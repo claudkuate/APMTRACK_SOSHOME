@@ -13,7 +13,19 @@ pub fn router() -> Router<AppState> {
         .merge(modules::agents::router())
         .merge(modules::zones::router())
         .merge(modules::referentiel::router())
-        .nest("/public", modules::agents::public_router())
+        .merge(modules::pvs::router())
+        .merge(modules::payments::router())
+        .merge(modules::signalements::router())
+        .merge(modules::patrouilles::router())
+        .merge(modules::dashboard::router())
+        .merge(modules::audit_logs::router())
+        .merge(modules::exports::router())
+        .nest(
+            "/public",
+            modules::agents::public_router()
+                .merge(modules::pvs::public_router())
+                .merge(modules::signalements::public_router()),
+        )
 }
 
 async fn api_root(State(state): State<AppState>) -> Json<ApiRootResponse> {
@@ -21,7 +33,7 @@ async fn api_root(State(state): State<AppState>) -> Json<ApiRootResponse> {
         service: "apmtrack-api",
         version: env!("CARGO_PKG_VERSION"),
         environment: state.config.app_env,
-        message: "APMTRACK API v1 — zones et referentiel disponibles.",
+        message: "APMTRACK API v1 — Backend complet : PV, paiements, signalements, patrouilles, dashboard, exports.",
     })
 }
 

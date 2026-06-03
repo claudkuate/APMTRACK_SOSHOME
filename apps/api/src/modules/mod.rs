@@ -1,8 +1,16 @@
 pub mod agents;
 pub mod audit;
+pub mod audit_logs;
 pub mod auth;
 pub mod communes;
+pub mod dashboard;
+pub mod exports;
+pub mod payments;
+pub mod patrouilles;
+pub mod pdf;
+pub mod pvs;
 pub mod rbac;
 pub mod referentiel;
+pub mod signalements;
 pub mod users;
 pub mod zones;

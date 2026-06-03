@@ -1,0 +1,545 @@
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sqlx::{PgPool, QueryBuilder, Row};
+use uuid::Uuid;
+
+use crate::errors::{map_database_error, ApiError};
+use crate::extractors::ApiJson;
+use crate::modules::audit;
+use crate::modules::auth::AuthUser;
+use crate::modules::rbac::Role;
+use crate::pagination::{Paginated, Pagination, PaginationQuery};
+use crate::state::AppState;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/patrouilles",
+            axum::routing::get(list_patrouilles).post(create_patrouille),
+        )
+        .route(
+            "/patrouilles/{id}",
+            axum::routing::get(get_patrouille).patch(patch_patrouille),
+        )
+        .route(
+            "/patrouilles/{id}/start",
+            axum::routing::post(start_patrouille),
+        )
+        .route(
+            "/patrouilles/{id}/end",
+            axum::routing::post(end_patrouille),
+        )
+        .route(
+            "/patrouilles/{id}/agents",
+            axum::routing::get(list_patrouille_agents).post(assign_agent),
+        )
+        .route(
+            "/patrouilles/{id}/agents/{agent_id}",
+            axum::routing::delete(remove_agent),
+        )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PatrouilleResponse {
+    pub id: Uuid,
+    pub commune_id: Uuid,
+    pub zone_id: Option<Uuid>,
+    pub nom: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub date_debut: Option<DateTime<Utc>>,
+    pub date_fin: Option<DateTime<Utc>>,
+    pub created_by: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatrouilleAgentResponse {
+    pub id: Uuid,
+    pub patrouille_id: Uuid,
+    pub agent_id: Uuid,
+    pub role_patrouille: String,
+    pub agent_matricule: Option<String>,
+    pub agent_nom: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatrouilleFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    commune_id: Option<Uuid>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePatrouilleRequest {
+    pub commune_id: Uuid,
+    pub zone_id: Option<Uuid>,
+    pub nom: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchPatrouilleRequest {
+    pub zone_id: Option<Uuid>,
+    pub nom: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AssignAgentRequest {
+    pub agent_id: Uuid,
+    pub role_patrouille: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+async fn list_patrouilles(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<PatrouilleFilterQuery>,
+) -> Result<Json<Paginated<PatrouilleResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+    ])?;
+
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM patrouilles WHERE deleted_at IS NULL");
+    apply_filters(&mut count_qb, commune_filter, query.status.as_deref());
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
+
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT * FROM patrouilles WHERE deleted_at IS NULL");
+    apply_filters(&mut qb, commune_filter, query.status.as_deref());
+    qb.push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
+
+    let rows = qb.build().fetch_all(&state.db).await?;
+    let items = rows.into_iter().map(row_to_patrouille).collect();
+    Ok(Json(Paginated::new(items, &pagination, total)))
+}
+
+async fn get_patrouille(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PatrouilleResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+    ])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+    Ok(Json(pat))
+}
+
+async fn create_patrouille(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    ApiJson(payload): ApiJson<CreatePatrouilleRequest>,
+) -> Result<(StatusCode, Json<PatrouilleResponse>), ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    auth_user.require_commune_access(payload.commune_id)?;
+
+    let nom = required_text(payload.nom, "nom")?;
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO patrouilles (id, commune_id, zone_id, nom, description, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(id)
+    .bind(payload.commune_id)
+    .bind(payload.zone_id)
+    .bind(&nom)
+    .bind(clean_optional(payload.description))
+    .bind(auth_user.id)
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "PATROUILLE_CREATED",
+        "patrouilles",
+        Some(id),
+        None,
+        Some(json!({ "nom": nom, "commune_id": payload.commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(load_patrouille(&state.db, id).await?)))
+}
+
+async fn patch_patrouille(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<PatchPatrouilleRequest>,
+) -> Result<Json<PatrouilleResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    if existing.status == "CLOTUREE" {
+        return Err(ApiError::conflict("Une patrouille clôturée ne peut pas être modifiée"));
+    }
+
+    let nom = match payload.nom {
+        Some(v) => required_text(v, "nom")?,
+        None => existing.nom.clone(),
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE patrouilles
+        SET nom = $2, description = COALESCE($3, description), zone_id = COALESCE($4, zone_id), updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(&nom)
+    .bind(payload.description.as_deref())
+    .bind(payload.zone_id)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(load_patrouille(&state.db, id).await?))
+}
+
+async fn start_patrouille(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PatrouilleResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+
+    if pat.status != "PLANIFIEE" {
+        return Err(ApiError::conflict(format!(
+            "Impossible de démarrer une patrouille avec le statut '{}'",
+            pat.status
+        )));
+    }
+
+    sqlx::query(
+        "UPDATE patrouilles SET status = 'EN_COURS', date_debut = now(), updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "PATROUILLE_STARTED",
+        "patrouilles",
+        Some(id),
+        Some(json!({ "status": "PLANIFIEE" })),
+        Some(json!({ "status": "EN_COURS" })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok(Json(load_patrouille(&state.db, id).await?))
+}
+
+async fn end_patrouille(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PatrouilleResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+
+    if pat.status != "EN_COURS" {
+        return Err(ApiError::conflict(format!(
+            "Impossible de clôturer une patrouille avec le statut '{}'",
+            pat.status
+        )));
+    }
+
+    sqlx::query(
+        "UPDATE patrouilles SET status = 'CLOTUREE', date_fin = now(), updated_at = now() WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "PATROUILLE_ENDED",
+        "patrouilles",
+        Some(id),
+        Some(json!({ "status": "EN_COURS" })),
+        Some(json!({ "status": "CLOTUREE" })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok(Json(load_patrouille(&state.db, id).await?))
+}
+
+async fn list_patrouille_agents(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<PatrouilleAgentResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+    ])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT pa.id, pa.patrouille_id, pa.agent_id, pa.role_patrouille,
+               a.matricule AS agent_matricule, a.full_name AS agent_nom
+        FROM patrouille_agents pa
+        JOIN agents a ON pa.agent_id = a.id
+        WHERE pa.patrouille_id = $1
+        ORDER BY pa.role_patrouille DESC, a.full_name ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|r| PatrouilleAgentResponse {
+            id: r.get("id"),
+            patrouille_id: r.get("patrouille_id"),
+            agent_id: r.get("agent_id"),
+            role_patrouille: r.get("role_patrouille"),
+            agent_matricule: r.get("agent_matricule"),
+            agent_nom: r.get("agent_nom"),
+        })
+        .collect();
+
+    Ok(Json(items))
+}
+
+async fn assign_agent(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<AssignAgentRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+
+    if pat.status == "CLOTUREE" {
+        return Err(ApiError::conflict("Impossible d'assigner un agent à une patrouille clôturée"));
+    }
+
+    // Vérifier que l'agent est actif et appartient à la même commune
+    let agent_check: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM agents WHERE id = $1 AND commune_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(payload.agent_id)
+    .bind(pat.commune_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    match agent_check {
+        None => return Err(ApiError::not_found("Agent introuvable dans cette commune")),
+        Some(s) if s != "ACTIF" => {
+            return Err(ApiError::bad_request("Seul un agent actif peut être assigné"))
+        }
+        _ => {}
+    }
+
+    let role = payload
+        .role_patrouille
+        .as_deref()
+        .unwrap_or("MEMBRE")
+        .to_uppercase();
+    if role != "CHEF" && role != "MEMBRE" {
+        return Err(ApiError::bad_request("role_patrouille doit être CHEF ou MEMBRE"));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO patrouille_agents (patrouille_id, agent_id, role_patrouille)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (patrouille_id, agent_id) DO UPDATE SET role_patrouille = $3
+        "#,
+    )
+    .bind(id)
+    .bind(payload.agent_id)
+    .bind(&role)
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "PATROUILLE_AGENT_ASSIGNED",
+        "patrouille_agents",
+        Some(id),
+        None,
+        Some(json!({ "agent_id": payload.agent_id, "role": role })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(json!({ "assigned": true, "agent_id": payload.agent_id, "role": role }))))
+}
+
+async fn remove_agent(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id, agent_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let pat = load_patrouille(&state.db, id).await?;
+    auth_user.require_commune_access(pat.commune_id)?;
+
+    if pat.status == "CLOTUREE" {
+        return Err(ApiError::conflict("Impossible de modifier une patrouille clôturée"));
+    }
+
+    sqlx::query(
+        "DELETE FROM patrouille_agents WHERE patrouille_id = $1 AND agent_id = $2",
+    )
+    .bind(id)
+    .bind(agent_id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "PATROUILLE_AGENT_REMOVED",
+        "patrouille_agents",
+        Some(id),
+        Some(json!({ "agent_id": agent_id })),
+        None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok(Json(json!({ "removed": true, "agent_id": agent_id })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub async fn load_patrouille(pool: &PgPool, id: Uuid) -> Result<PatrouilleResponse, ApiError> {
+    let row = sqlx::query("SELECT * FROM patrouilles WHERE id = $1 AND deleted_at IS NULL")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Patrouille introuvable"))?;
+    Ok(row_to_patrouille(row))
+}
+
+fn row_to_patrouille(row: sqlx::postgres::PgRow) -> PatrouilleResponse {
+    PatrouilleResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        zone_id: row.get("zone_id"),
+        nom: row.get("nom"),
+        description: row.get("description"),
+        status: row.get("status"),
+        date_debut: row.get("date_debut"),
+        date_fin: row.get("date_fin"),
+        created_by: row.get("created_by"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn apply_filters(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    commune_filter: Option<Uuid>,
+    status: Option<&str>,
+) {
+    if let Some(id) = commune_filter {
+        qb.push(" AND commune_id = ").push_bind(id);
+    }
+    if let Some(s) = status {
+        qb.push(" AND status = ").push_bind(s.to_string());
+    }
+}
+
+fn resolve_commune_filter(
+    auth_user: &AuthUser,
+    requested: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    if auth_user.has_role(Role::SuperAdmin)
+        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
+    {
+        return Ok(requested);
+    }
+    let user_commune = auth_user
+        .commune_id
+        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
+    if let Some(req) = requested {
+        if req != user_commune {
+            return Err(ApiError::forbidden("Acces refuse a cette commune"));
+        }
+    }
+    Ok(Some(user_commune))
+}
+
+fn required_text(value: String, field: &'static str) -> Result<String, ApiError> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request(format!("{field} est requis")));
+    }
+    Ok(trimmed)
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
