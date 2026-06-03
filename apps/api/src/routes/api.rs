@@ -11,6 +11,8 @@ pub fn router() -> Router<AppState> {
         .merge(modules::users::router())
         .merge(modules::communes::router())
         .merge(modules::agents::router())
+        .merge(modules::zones::router())
+        .merge(modules::referentiel::router())
         .nest("/public", modules::agents::public_router())
 }
 
@@ -19,7 +21,7 @@ async fn api_root(State(state): State<AppState>) -> Json<ApiRootResponse> {
         service: "apmtrack-api",
         version: env!("CARGO_PKG_VERSION"),
         environment: state.config.app_env,
-        message: "APMTRACK API v1 backend foundation is available.",
+        message: "APMTRACK API v1 — zones et referentiel disponibles.",
     })
 }
 

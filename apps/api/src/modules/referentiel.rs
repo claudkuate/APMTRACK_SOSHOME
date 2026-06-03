@@ -1,0 +1,971 @@
+use axum::extract::{Path, Query, State};
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+
+use crate::errors::{map_database_error, ApiError};
+use crate::extractors::ApiJson;
+use crate::modules::audit;
+use crate::modules::auth::AuthUser;
+use crate::modules::rbac::Role;
+use crate::pagination::{Paginated, Pagination, PaginationQuery};
+use crate::state::AppState;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Router
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        // Categories
+        .route(
+            "/referentiel/categories",
+            axum::routing::get(list_categories).post(create_category),
+        )
+        .route(
+            "/referentiel/categories/{id}",
+            axum::routing::get(get_category)
+                .patch(patch_category)
+                .delete(delete_category),
+        )
+        // Types
+        .route(
+            "/referentiel/types",
+            axum::routing::get(list_types).post(create_type),
+        )
+        .route(
+            "/referentiel/types/{id}",
+            axum::routing::get(get_type)
+                .patch(patch_type)
+                .delete(delete_type),
+        )
+        // Interventions
+        .route(
+            "/referentiel/interventions",
+            axum::routing::get(list_interventions).post(create_intervention),
+        )
+        .route(
+            "/referentiel/interventions/{id}",
+            axum::routing::get(get_intervention)
+                .patch(patch_intervention)
+                .delete(delete_intervention),
+        )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared filter query
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CommuneFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    commune_id: Option<Uuid>,
+    active: Option<bool>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Catégories d'intervention
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct CreateCategoryRequest {
+    commune_id: Uuid,
+    nom: String,
+    description: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchCategoryRequest {
+    nom: Option<String>,
+    description: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CategoryResponse {
+    pub id: Uuid,
+    pub commune_id: Uuid,
+    pub nom: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+async fn list_categories(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<CommuneFilterQuery>,
+) -> Result<Json<Paginated<CategoryResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+    let filter = commune_active_filter(commune_filter, query.active);
+
+    let total: i64 = sqlx::query(&format!(
+        "SELECT COUNT(*) AS total FROM intervention_categories WHERE deleted_at IS NULL {filter}"
+    ))
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT * FROM intervention_categories
+        WHERE deleted_at IS NULL {filter}
+        ORDER BY nom ASC
+        LIMIT $1 OFFSET $2
+        "#
+    ))
+    .bind(pagination.limit)
+    .bind(pagination.offset)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows.into_iter().map(row_to_category).collect();
+    Ok(Json(Paginated::new(items, &pagination, total)))
+}
+
+async fn get_category(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CategoryResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let cat = load_category(&state.db, id).await?;
+    auth_user.require_commune_access(cat.commune_id)?;
+    Ok(Json(cat))
+}
+
+async fn create_category(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    ApiJson(payload): ApiJson<CreateCategoryRequest>,
+) -> Result<Json<CategoryResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    auth_user.require_commune_access(payload.commune_id)?;
+
+    let nom = required_text(payload.nom, "nom")?;
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO intervention_categories (id, commune_id, nom, description, active)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(id)
+    .bind(payload.commune_id)
+    .bind(&nom)
+    .bind(clean_optional(payload.description))
+    .bind(payload.active.unwrap_or(true))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "CATEGORY_CREATED",
+        "intervention_categories",
+        Some(id),
+        None,
+        Some(json!({ "nom": nom, "commune_id": payload.commune_id })),
+    )
+    .await;
+
+    Ok(Json(load_category(&state.db, id).await?))
+}
+
+async fn patch_category(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<PatchCategoryRequest>,
+) -> Result<Json<CategoryResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_category(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let nom = match payload.nom {
+        Some(v) => required_text(v, "nom")?,
+        None => existing.nom.clone(),
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE intervention_categories
+        SET nom = $2, description = $3, active = $4, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(&nom)
+    .bind(payload.description.or(existing.description.clone()))
+    .bind(payload.active.unwrap_or(existing.active))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "CATEGORY_UPDATED",
+        "intervention_categories",
+        Some(id),
+        Some(json!({ "nom": existing.nom })),
+        Some(json!({ "nom": nom })),
+    )
+    .await;
+
+    Ok(Json(load_category(&state.db, id).await?))
+}
+
+async fn delete_category(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_category(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let children: i64 = sqlx::query(
+        "SELECT COUNT(*) AS total FROM intervention_types WHERE category_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
+
+    if children > 0 {
+        return Err(ApiError::conflict(
+            "Impossible de supprimer une categorie ayant des types associes",
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE intervention_categories SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "CATEGORY_DELETED",
+        "intervention_categories",
+        Some(id),
+        Some(json!({ "nom": existing.nom })),
+        None,
+    )
+    .await;
+
+    Ok(Json(json!({ "deleted": true, "id": id })))
+}
+
+pub async fn load_category(pool: &PgPool, id: Uuid) -> Result<CategoryResponse, ApiError> {
+    let row = sqlx::query(
+        "SELECT * FROM intervention_categories WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Categorie introuvable"))?;
+    Ok(row_to_category(row))
+}
+
+fn row_to_category(row: sqlx::postgres::PgRow) -> CategoryResponse {
+    CategoryResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        nom: row.get("nom"),
+        description: row.get("description"),
+        active: row.get("active"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types d'intervention
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct TypeFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    commune_id: Option<Uuid>,
+    category_id: Option<Uuid>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateTypeRequest {
+    commune_id: Uuid,
+    category_id: Uuid,
+    nom: String,
+    description: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchTypeRequest {
+    nom: Option<String>,
+    description: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct TypeResponse {
+    pub id: Uuid,
+    pub commune_id: Uuid,
+    pub category_id: Uuid,
+    pub nom: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+async fn list_types(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<TypeFilterQuery>,
+) -> Result<Json<Paginated<TypeResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+    let mut filter = commune_active_filter(commune_filter, query.active);
+    if let Some(cat_id) = query.category_id {
+        filter.push_str(&format!(" AND category_id = '{cat_id}'"));
+    }
+
+    let total: i64 = sqlx::query(&format!(
+        "SELECT COUNT(*) AS total FROM intervention_types WHERE deleted_at IS NULL {filter}"
+    ))
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT * FROM intervention_types
+        WHERE deleted_at IS NULL {filter}
+        ORDER BY nom ASC
+        LIMIT $1 OFFSET $2
+        "#
+    ))
+    .bind(pagination.limit)
+    .bind(pagination.offset)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows.into_iter().map(row_to_type).collect();
+    Ok(Json(Paginated::new(items, &pagination, total)))
+}
+
+async fn get_type(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TypeResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let item = load_type(&state.db, id).await?;
+    auth_user.require_commune_access(item.commune_id)?;
+    Ok(Json(item))
+}
+
+async fn create_type(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    ApiJson(payload): ApiJson<CreateTypeRequest>,
+) -> Result<Json<TypeResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    auth_user.require_commune_access(payload.commune_id)?;
+
+    let category = load_category(&state.db, payload.category_id).await?;
+    if category.commune_id != payload.commune_id {
+        return Err(ApiError::bad_request(
+            "La categorie n'appartient pas a cette commune",
+        ));
+    }
+
+    let nom = required_text(payload.nom, "nom")?;
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO intervention_types (id, commune_id, category_id, nom, description, active)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(id)
+    .bind(payload.commune_id)
+    .bind(payload.category_id)
+    .bind(&nom)
+    .bind(clean_optional(payload.description))
+    .bind(payload.active.unwrap_or(true))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_TYPE_CREATED",
+        "intervention_types",
+        Some(id),
+        None,
+        Some(json!({ "nom": nom, "category_id": payload.category_id })),
+    )
+    .await;
+
+    Ok(Json(load_type(&state.db, id).await?))
+}
+
+async fn patch_type(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<PatchTypeRequest>,
+) -> Result<Json<TypeResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_type(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let nom = match payload.nom {
+        Some(v) => required_text(v, "nom")?,
+        None => existing.nom.clone(),
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE intervention_types
+        SET nom = $2, description = $3, active = $4, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(&nom)
+    .bind(payload.description.or(existing.description.clone()))
+    .bind(payload.active.unwrap_or(existing.active))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_TYPE_UPDATED",
+        "intervention_types",
+        Some(id),
+        Some(json!({ "nom": existing.nom })),
+        Some(json!({ "nom": nom })),
+    )
+    .await;
+
+    Ok(Json(load_type(&state.db, id).await?))
+}
+
+async fn delete_type(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_type(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let children: i64 = sqlx::query(
+        "SELECT COUNT(*) AS total FROM interventions WHERE type_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
+
+    if children > 0 {
+        return Err(ApiError::conflict(
+            "Impossible de supprimer un type ayant des interventions associees",
+        ));
+    }
+
+    sqlx::query(
+        "UPDATE intervention_types SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_TYPE_DELETED",
+        "intervention_types",
+        Some(id),
+        Some(json!({ "nom": existing.nom })),
+        None,
+    )
+    .await;
+
+    Ok(Json(json!({ "deleted": true, "id": id })))
+}
+
+pub async fn load_type(pool: &PgPool, id: Uuid) -> Result<TypeResponse, ApiError> {
+    let row =
+        sqlx::query("SELECT * FROM intervention_types WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Type d'intervention introuvable"))?;
+    Ok(row_to_type(row))
+}
+
+fn row_to_type(row: sqlx::postgres::PgRow) -> TypeResponse {
+    TypeResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        category_id: row.get("category_id"),
+        nom: row.get("nom"),
+        description: row.get("description"),
+        active: row.get("active"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Interventions
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct InterventionFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    commune_id: Option<Uuid>,
+    category_id: Option<Uuid>,
+    type_id: Option<Uuid>,
+    active: Option<bool>,
+    sujet_paiement: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateInterventionRequest {
+    commune_id: Uuid,
+    category_id: Uuid,
+    type_id: Uuid,
+    nom: String,
+    description: Option<String>,
+    sujet_paiement: bool,
+    montant: Option<f64>,
+    delai_paiement_jours: Option<i32>,
+    taux_penalite: Option<f64>,
+    reference_deliberation: Option<String>,
+    piece_justificative: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchInterventionRequest {
+    nom: Option<String>,
+    description: Option<String>,
+    sujet_paiement: Option<bool>,
+    montant: Option<f64>,
+    delai_paiement_jours: Option<i32>,
+    taux_penalite: Option<f64>,
+    reference_deliberation: Option<String>,
+    piece_justificative: Option<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct InterventionResponse {
+    pub id: Uuid,
+    pub commune_id: Uuid,
+    pub category_id: Uuid,
+    pub type_id: Uuid,
+    pub nom: String,
+    pub description: Option<String>,
+    pub sujet_paiement: bool,
+    pub montant: Option<f64>,
+    pub delai_paiement_jours: Option<i32>,
+    pub taux_penalite: Option<f64>,
+    pub reference_deliberation: Option<String>,
+    pub piece_justificative: Option<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+async fn list_interventions(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<InterventionFilterQuery>,
+) -> Result<Json<Paginated<InterventionResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+    let mut filter = commune_active_filter(commune_filter, query.active);
+    if let Some(id) = query.category_id {
+        filter.push_str(&format!(" AND category_id = '{id}'"));
+    }
+    if let Some(id) = query.type_id {
+        filter.push_str(&format!(" AND type_id = '{id}'"));
+    }
+    if let Some(sp) = query.sujet_paiement {
+        filter.push_str(&format!(" AND sujet_paiement = {sp}"));
+    }
+
+    let total: i64 = sqlx::query(&format!(
+        "SELECT COUNT(*) AS total FROM interventions WHERE deleted_at IS NULL {filter}"
+    ))
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
+
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT * FROM interventions
+        WHERE deleted_at IS NULL {filter}
+        ORDER BY nom ASC
+        LIMIT $1 OFFSET $2
+        "#
+    ))
+    .bind(pagination.limit)
+    .bind(pagination.offset)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows.into_iter().map(row_to_intervention).collect();
+    Ok(Json(Paginated::new(items, &pagination, total)))
+}
+
+async fn get_intervention(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<InterventionResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let item = load_intervention(&state.db, id).await?;
+    auth_user.require_commune_access(item.commune_id)?;
+    Ok(Json(item))
+}
+
+async fn create_intervention(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    ApiJson(payload): ApiJson<CreateInterventionRequest>,
+) -> Result<Json<InterventionResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    auth_user.require_commune_access(payload.commune_id)?;
+
+    let category = load_category(&state.db, payload.category_id).await?;
+    if category.commune_id != payload.commune_id {
+        return Err(ApiError::bad_request(
+            "La categorie n'appartient pas a cette commune",
+        ));
+    }
+    let interv_type = load_type(&state.db, payload.type_id).await?;
+    if interv_type.commune_id != payload.commune_id || interv_type.category_id != payload.category_id {
+        return Err(ApiError::bad_request(
+            "Le type n'appartient pas a la categorie indiquee ou a cette commune",
+        ));
+    }
+
+    if payload.sujet_paiement {
+        if payload.montant.map(|m| m <= 0.0).unwrap_or(true) {
+            return Err(ApiError::bad_request(
+                "Une intervention payante doit avoir un montant positif",
+            ));
+        }
+        if clean_optional(payload.reference_deliberation.clone()).is_none() {
+            return Err(ApiError::bad_request(
+                "Une intervention payante doit avoir une reference de deliberation",
+            ));
+        }
+    }
+
+    let nom = required_text(payload.nom, "nom")?;
+    let id = Uuid::new_v4();
+
+    sqlx::query(
+        r#"
+        INSERT INTO interventions (
+            id, commune_id, category_id, type_id, nom, description,
+            sujet_paiement, montant, delai_paiement_jours, taux_penalite,
+            reference_deliberation, piece_justificative, active
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        "#,
+    )
+    .bind(id)
+    .bind(payload.commune_id)
+    .bind(payload.category_id)
+    .bind(payload.type_id)
+    .bind(&nom)
+    .bind(clean_optional(payload.description))
+    .bind(payload.sujet_paiement)
+    .bind(payload.montant)
+    .bind(payload.delai_paiement_jours)
+    .bind(payload.taux_penalite)
+    .bind(clean_optional(payload.reference_deliberation))
+    .bind(clean_optional(payload.piece_justificative))
+    .bind(payload.active.unwrap_or(true))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_CREATED",
+        "interventions",
+        Some(id),
+        None,
+        Some(json!({ "nom": nom, "commune_id": payload.commune_id, "sujet_paiement": payload.sujet_paiement })),
+    )
+    .await;
+
+    Ok(Json(load_intervention(&state.db, id).await?))
+}
+
+async fn patch_intervention(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<PatchInterventionRequest>,
+) -> Result<Json<InterventionResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_intervention(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let nom = match payload.nom {
+        Some(v) => required_text(v, "nom")?,
+        None => existing.nom.clone(),
+    };
+    let sujet_paiement = payload.sujet_paiement.unwrap_or(existing.sujet_paiement);
+    let montant = payload.montant.or(existing.montant);
+    let reference_deliberation = payload
+        .reference_deliberation
+        .or(existing.reference_deliberation.clone());
+
+    if sujet_paiement {
+        if montant.map(|m| m <= 0.0).unwrap_or(true) {
+            return Err(ApiError::bad_request(
+                "Une intervention payante doit avoir un montant positif",
+            ));
+        }
+        if reference_deliberation
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
+            return Err(ApiError::bad_request(
+                "Une intervention payante doit avoir une reference de deliberation",
+            ));
+        }
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE interventions
+        SET nom = $2,
+            description = $3,
+            sujet_paiement = $4,
+            montant = $5,
+            delai_paiement_jours = $6,
+            taux_penalite = $7,
+            reference_deliberation = $8,
+            piece_justificative = $9,
+            active = $10,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(&nom)
+    .bind(payload.description.or(existing.description.clone()))
+    .bind(sujet_paiement)
+    .bind(montant)
+    .bind(payload.delai_paiement_jours.or(existing.delai_paiement_jours))
+    .bind(payload.taux_penalite.or(existing.taux_penalite))
+    .bind(reference_deliberation)
+    .bind(payload.piece_justificative.or(existing.piece_justificative.clone()))
+    .bind(payload.active.unwrap_or(existing.active))
+    .execute(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_UPDATED",
+        "interventions",
+        Some(id),
+        Some(json!({ "nom": existing.nom, "montant": existing.montant })),
+        Some(json!({ "nom": nom, "montant": montant })),
+    )
+    .await;
+
+    Ok(Json(load_intervention(&state.db, id).await?))
+}
+
+async fn delete_intervention(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_intervention(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    sqlx::query(
+        "UPDATE interventions SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    audit::record(
+        &state.db,
+        Some(auth_user.id),
+        "INTERVENTION_DELETED",
+        "interventions",
+        Some(id),
+        Some(json!({ "nom": existing.nom })),
+        None,
+    )
+    .await;
+
+    Ok(Json(json!({ "deleted": true, "id": id })))
+}
+
+pub async fn load_intervention(pool: &PgPool, id: Uuid) -> Result<InterventionResponse, ApiError> {
+    let row = sqlx::query("SELECT * FROM interventions WHERE id = $1 AND deleted_at IS NULL")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Intervention introuvable"))?;
+    Ok(row_to_intervention(row))
+}
+
+fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
+    InterventionResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        category_id: row.get("category_id"),
+        type_id: row.get("type_id"),
+        nom: row.get("nom"),
+        description: row.get("description"),
+        sujet_paiement: row.get("sujet_paiement"),
+        montant: row.get("montant"),
+        delai_paiement_jours: row.get("delai_paiement_jours"),
+        taux_penalite: row.get("taux_penalite"),
+        reference_deliberation: row.get("reference_deliberation"),
+        piece_justificative: row.get("piece_justificative"),
+        active: row.get("active"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers partagés
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn resolve_commune_filter(
+    auth_user: &AuthUser,
+    requested: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    if auth_user.has_role(Role::SuperAdmin)
+        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
+    {
+        return Ok(requested);
+    }
+    let user_commune = auth_user
+        .commune_id
+        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
+    if let Some(req) = requested {
+        if req != user_commune {
+            return Err(ApiError::forbidden("Acces refuse a cette commune"));
+        }
+    }
+    Ok(Some(user_commune))
+}
+
+fn commune_active_filter(commune_filter: Option<Uuid>, active: Option<bool>) -> String {
+    let mut clauses = String::new();
+    if let Some(id) = commune_filter {
+        clauses.push_str(&format!(" AND commune_id = '{id}'"));
+    }
+    if let Some(a) = active {
+        clauses.push_str(&format!(" AND active = {a}"));
+    }
+    clauses
+}
+
+fn required_text(value: String, field: &'static str) -> Result<String, ApiError> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request(format!("{field} est requis")));
+    }
+    Ok(trimmed)
+}
+
+fn clean_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
