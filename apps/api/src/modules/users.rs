@@ -7,6 +7,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
+use crate::extractors::ApiJson;
 use crate::modules::audit;
 use crate::modules::auth::{assign_roles, hash_password, normalize_email, roles_for_user, AuthUser};
 use crate::modules::rbac::{parse_roles, Role};
@@ -133,7 +134,7 @@ async fn list_users(
 async fn create_user(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(payload): Json<CreateUserRequest>,
+    ApiJson(payload): ApiJson<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, ApiError> {
     auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
     let roles = parse_roles(&payload.roles)?;
@@ -181,7 +182,7 @@ async fn patch_user(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(user_id): Path<Uuid>,
-    Json(payload): Json<PatchUserRequest>,
+    ApiJson(payload): ApiJson<PatchUserRequest>,
 ) -> Result<Json<UserResponse>, ApiError> {
     auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
 

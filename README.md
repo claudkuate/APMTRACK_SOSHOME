@@ -2,7 +2,9 @@
 
 Plateforme de gestion des activites de la Police Municipale.
 
-Ce depot est initialise en Phase 0 : architecture, squelettes executables, Docker Compose local, contrats API minimaux et documentation technique. Il ne contient pas encore les modules metier MVP comme auth, RBAC, communes, agents, PV ou paiements.
+Ce depot contient le socle Phase 1 backend : architecture monorepo, Docker Compose local, API Rust Axum, PostgreSQL, OpenAPI, authentification JWT, RBAC serveur, communes, utilisateurs, agents et audit minimal.
+
+Il ne contient pas encore les modules metier MVP comme referentiel, PV, QR code PV, PDF, paiements, signalements ou offline mobile.
 
 ## Structure
 
@@ -53,6 +55,26 @@ Invoke-RestMethod http://localhost:8080/health
 Invoke-RestMethod http://localhost:8080/health/db
 ```
 
+Seed du premier super administrateur local :
+
+```powershell
+docker compose -f docker-compose.dev.yml run --rm `
+  -e SEED_SUPER_ADMIN_EMAIL=admin@apmtrack.local `
+  -e SEED_SUPER_ADMIN_PASSWORD=change_me_admin_123 `
+  -e SEED_SUPER_ADMIN_FULL_NAME="APMTRACK Super Admin" `
+  api seed-super-admin
+```
+
+Connexion API :
+
+```powershell
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://localhost:8080/api/v1/auth/login `
+  -ContentType "application/json" `
+  -Body '{"email":"admin@apmtrack.local","password":"change_me_admin_123"}'
+```
+
 ## Developpement sans Docker
 
 Angular :
@@ -84,11 +106,25 @@ cargo test
 cargo run
 ```
 
-## Regles Phase 0
+Test d'integration backend avec PostgreSQL local :
 
-- Les montants, paiements, PV, roles et permissions ne sont pas encore implementes.
-- `/api/v1/` est reserve pour la Phase 1.
+```powershell
+docker compose -f docker-compose.dev.yml up -d postgres
+docker run --rm --add-host=host.docker.internal:host-gateway `
+  -e APMTRACK_RUN_DB_TESTS=1 `
+  -e DATABASE_URL=postgres://apmtrack:apmtrack_dev_password@host.docker.internal:5432/apmtrack `
+  -v "${PWD}:/workspace" `
+  -w /workspace rust:1-bookworm `
+  cargo test -p apmtrack-api --test phase1_api -- --nocapture
+docker compose -f docker-compose.dev.yml down
+```
+
+## Regles Phase 1
+
+- Les montants, paiements, PV, QR code PV et PDF ne sont pas encore implementes.
+- `/api/v1/` expose la fondation backend : auth, users, communes, agents et verification publique agent.
+- `CITOYEN_PUBLIC` reste un usage public non authentifie, pas un role de compte utilisateur.
+- Les migrations sont lancees au demarrage local via `RUN_MIGRATIONS_ON_STARTUP=true`.
 - Les secrets reels ne doivent jamais etre commits.
 - `public/env.js` sert a configurer Angular en local et dans l'image Docker.
 - `android:usesCleartextTraffic="true"` est uniquement une facilite de developpement HTTP local.
-

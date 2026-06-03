@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::config::AppConfig;
 use crate::errors::{map_database_error, ApiError};
+use crate::extractors::ApiJson;
 use crate::modules::audit;
 use crate::modules::rbac::{has_any_role, has_role, Role};
 use crate::state::AppState;
@@ -151,7 +152,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
 async fn login(
     State(state): State<AppState>,
-    Json(payload): Json<LoginRequest>,
+    ApiJson(payload): ApiJson<LoginRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
     let email = normalize_email(&payload.email)?;
     let user = match load_login_user(&state.db, &email).await? {
@@ -213,7 +214,7 @@ async fn login(
 
 async fn refresh(
     State(state): State<AppState>,
-    Json(payload): Json<RefreshRequest>,
+    ApiJson(payload): ApiJson<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
     let (token_id, secret) = parse_refresh_token(&payload.refresh_token)?;
     let record = load_refresh_token(&state.db, token_id)
@@ -258,15 +259,11 @@ async fn refresh(
 async fn logout(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    body: Option<Json<LogoutRequest>>,
+    ApiJson(payload): ApiJson<LogoutRequest>,
 ) -> Result<StatusCode, ApiError> {
-    if let Some(Json(payload)) = body {
-        if let Some(refresh_token) = payload.refresh_token {
-            let (token_id, _) = parse_refresh_token(&refresh_token)?;
-            revoke_refresh_token(&state.db, token_id, auth_user.id).await?;
-        } else {
-            revoke_all_refresh_tokens(&state.db, auth_user.id).await?;
-        }
+    if let Some(refresh_token) = payload.refresh_token {
+        let (token_id, _) = parse_refresh_token(&refresh_token)?;
+        revoke_refresh_token(&state.db, token_id, auth_user.id).await?;
     } else {
         revoke_all_refresh_tokens(&state.db, auth_user.id).await?;
     }

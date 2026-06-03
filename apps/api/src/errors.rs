@@ -1,3 +1,6 @@
+use std::error::Error;
+use std::fmt;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -91,6 +94,14 @@ impl IntoResponse for ApiError {
         (self.status, Json(body)).into_response()
     }
 }
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl Error for ApiError {}
 
 impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {

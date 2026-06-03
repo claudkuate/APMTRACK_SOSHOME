@@ -25,4 +25,4 @@ COPY apps/api/migrations /app/migrations
 
 EXPOSE 8080
 
-CMD ["apmtrack-api"]
+ENTRYPOINT ["apmtrack-api"]
