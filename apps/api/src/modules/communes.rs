@@ -17,7 +17,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/communes", axum::routing::get(list_communes).post(create_commune))
-        .route("/communes/{id}", axum::routing::patch(patch_commune))
+        .route(
+            "/communes/{id}",
+            axum::routing::get(get_commune).patch(patch_commune),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,6 +69,23 @@ pub struct CommuneResponse {
     active: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+async fn get_commune(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(commune_id): Path<Uuid>,
+) -> Result<Json<CommuneResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let commune = load_commune(&state.db, commune_id).await?;
+    auth_user.require_commune_access(commune.id)?;
+    Ok(Json(commune))
 }
 
 async fn list_communes(
@@ -176,6 +196,8 @@ async fn create_commune(
         Some(commune_id),
         None,
         Some(json!({ "id": commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -251,6 +273,8 @@ async fn patch_commune(
         Some(commune_id),
         Some(json!({ "code": existing.code, "nom": existing.nom })),
         Some(json!({ "code": code, "nom": nom })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 

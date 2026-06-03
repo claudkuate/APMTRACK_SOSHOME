@@ -36,6 +36,8 @@ pub struct AuthUser {
     pub full_name: String,
     pub commune_id: Option<Uuid>,
     pub roles: Vec<Role>,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 impl AuthUser {
@@ -146,7 +148,23 @@ impl FromRequestParts<AppState> for AuthUser {
         let user_id = Uuid::parse_str(&claims.sub)
             .map_err(|_| ApiError::unauthorized("Token invalide"))?;
 
-        load_auth_user(&state.db, user_id).await
+        let ip_address = parts
+            .headers
+            .get("x-forwarded-for")
+            .or_else(|| parts.headers.get("x-real-ip"))
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or(s).trim().to_string());
+
+        let user_agent = parts
+            .headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
+        let mut user = load_auth_user(&state.db, user_id).await?;
+        user.ip_address = ip_address;
+        user.user_agent = user_agent;
+        Ok(user)
     }
 }
 
@@ -166,6 +184,8 @@ async fn login(
                 None,
                 None,
                 Some(json!({ "email": email })),
+                None,
+                None,
             )
             .await;
             return Err(ApiError::unauthorized("Identifiants invalides"));
@@ -181,6 +201,8 @@ async fn login(
             Some(user.id),
             None,
             Some(json!({ "email": user.email })),
+            None,
+            None,
         )
         .await;
         return Err(ApiError::unauthorized("Identifiants invalides"));
@@ -204,6 +226,8 @@ async fn login(
         "AUTH_LOGIN_SUCCEEDED",
         "users",
         Some(user.id),
+        None,
+        None,
         None,
         None,
     )
@@ -250,6 +274,8 @@ async fn refresh(
         Some(record.id),
         None,
         None,
+        None,
+        None,
     )
     .await;
 
@@ -276,6 +302,8 @@ async fn logout(
         Some(auth_user.id),
         None,
         None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -366,6 +394,8 @@ pub async fn seed_super_admin(pool: &PgPool) -> anyhow::Result<()> {
         Some(user_id),
         None,
         Some(json!({ "email": email })),
+        None,
+        None,
     )
     .await;
 
@@ -402,6 +432,8 @@ pub async fn load_auth_user(pool: &PgPool, user_id: Uuid) -> Result<AuthUser, Ap
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
         roles,
+        ip_address: None,
+        user_agent: None,
     })
 }
 
@@ -659,7 +691,7 @@ async fn revoke_refresh_token(
     Ok(())
 }
 
-async fn revoke_all_refresh_tokens(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError> {
+pub async fn revoke_all_refresh_tokens(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError> {
     sqlx::query(
         r#"
         UPDATE refresh_tokens

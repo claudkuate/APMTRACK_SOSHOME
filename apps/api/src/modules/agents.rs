@@ -3,7 +3,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
@@ -17,7 +17,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/agents", axum::routing::get(list_agents).post(create_agent))
-        .route("/agents/{id}", axum::routing::patch(patch_agent))
+        .route(
+            "/agents/{id}",
+            axum::routing::get(get_agent).patch(patch_agent),
+        )
         .route("/agents/{id}/suspend", axum::routing::post(suspend_agent))
         .route(
             "/agents/{id}/reactivate",
@@ -31,6 +34,14 @@ pub fn public_router() -> Router<AppState> {
         "/agents/verify/{matricule}",
         axum::routing::get(verify_agent_public),
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    status: Option<String>,
+    commune_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -91,10 +102,27 @@ struct PublicAgentVerification {
     active: bool,
 }
 
+async fn get_agent(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<AgentResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let agent = load_agent(&state.db, agent_id).await?;
+    auth_user.require_commune_access(agent.commune_id)?;
+    Ok(Json(agent))
+}
+
 async fn list_agents(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(query): Query<PaginationQuery>,
+    Query(query): Query<AgentFilterQuery>,
 ) -> Result<Json<Paginated<AgentResponse>>, ApiError> {
     auth_user.require_any_role(&[
         Role::SuperAdmin,
@@ -103,57 +131,57 @@ async fn list_agents(
         Role::Superviseur,
         Role::Receveur,
     ])?;
-    let pagination = Pagination::from_query(query)?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
 
-    let (rows, total) = if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        let total = sqlx::query("SELECT COUNT(*) AS total FROM agents WHERE deleted_at IS NULL")
-            .fetch_one(&state.db)
-            .await?
-            .get("total");
-        let rows = sqlx::query(
-            r#"
-            SELECT *
-            FROM agents
-            WHERE deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            "#,
-        )
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total)
-    } else {
-        let commune_id = auth_user
-            .commune_id
-            .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-        let total = sqlx::query(
-            "SELECT COUNT(*) AS total FROM agents WHERE commune_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(commune_id)
-        .fetch_one(&state.db)
-        .await?
-        .get("total");
-        let rows = sqlx::query(
-            r#"
-            SELECT *
-            FROM agents
-            WHERE commune_id = $1 AND deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(commune_id)
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total)
+    let status_filter = match query.status {
+        Some(ref s) => Some(validate_agent_status(s)?),
+        None => None,
     };
 
+    let commune_filter: Option<Uuid> =
+        if auth_user.has_role(Role::SuperAdmin)
+            || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
+        {
+            query.commune_id
+        } else {
+            let user_commune = auth_user
+                .commune_id
+                .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
+            if let Some(req) = query.commune_id {
+                if req != user_commune {
+                    return Err(ApiError::forbidden("Acces refuse a cette commune"));
+                }
+            }
+            Some(user_commune)
+        };
+
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM agents WHERE deleted_at IS NULL");
+    if let Some(id) = commune_filter {
+        count_qb.push(" AND commune_id = ").push_bind(id);
+    }
+    if let Some(ref s) = status_filter {
+        count_qb.push(" AND status = ").push_bind(s.clone());
+    }
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
+
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT * FROM agents WHERE deleted_at IS NULL");
+    if let Some(id) = commune_filter {
+        qb.push(" AND commune_id = ").push_bind(id);
+    }
+    if let Some(ref s) = status_filter {
+        qb.push(" AND status = ").push_bind(s.clone());
+    }
+    qb.push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
+
+    let rows = qb.build().fetch_all(&state.db).await?;
     let agents = rows.into_iter().map(row_to_agent).collect::<Vec<_>>();
     Ok(Json(Paginated::new(agents, &pagination, total)))
 }
@@ -199,6 +227,8 @@ async fn create_agent(
         Some(agent_id),
         None,
         Some(json!({ "id": agent_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -272,6 +302,8 @@ async fn patch_agent(
         Some(agent_id),
         Some(json!({ "status": existing.status, "commune_id": existing.commune_id })),
         Some(json!({ "status": status, "commune_id": commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -333,6 +365,8 @@ async fn change_agent_status(
         Some(agent_id),
         Some(json!({ "status": existing.status })),
         Some(json!({ "status": status })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -360,7 +394,7 @@ async fn verify_agent_public(
           AND c.deleted_at IS NULL
         "#,
     )
-    .bind(matricule)
+    .bind(&matricule)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::not_found("Agent introuvable"))?;
@@ -420,7 +454,9 @@ fn validate_agent_status(value: &str) -> Result<String, ApiError> {
     ) {
         Ok(status)
     } else {
-        Err(ApiError::bad_request("Statut agent invalide"))
+        Err(ApiError::bad_request(
+            "Statut agent invalide. Valeurs acceptees: ACTIF, SUSPENDU, RETRAITE, INACTIF",
+        ))
     }
 }
 

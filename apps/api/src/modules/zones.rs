@@ -3,7 +3,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
@@ -94,28 +94,41 @@ async fn list_zones(
 
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
-    let base_where = build_filter_clause(commune_filter, query.active, query.type_zone.as_deref());
+    let type_filter = match query.type_zone {
+        Some(ref t) => Some(validate_type_zone(t.clone())?),
+        None => None,
+    };
 
-    let total: i64 = sqlx::query(&format!(
-        "SELECT COUNT(*) AS total FROM zones WHERE deleted_at IS NULL {base_where}"
-    ))
-    .fetch_one(&state.db)
-    .await?
-    .get("total");
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM zones WHERE deleted_at IS NULL");
+    if let Some(id) = commune_filter {
+        count_qb.push(" AND commune_id = ").push_bind(id);
+    }
+    if let Some(a) = query.active {
+        count_qb.push(" AND active = ").push_bind(a);
+    }
+    if let Some(ref t) = type_filter {
+        count_qb.push(" AND type_zone = ").push_bind(t.clone());
+    }
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT * FROM zones
-        WHERE deleted_at IS NULL {base_where}
-        ORDER BY nom ASC
-        LIMIT $1 OFFSET $2
-        "#
-    ))
-    .bind(pagination.limit)
-    .bind(pagination.offset)
-    .fetch_all(&state.db)
-    .await?;
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT * FROM zones WHERE deleted_at IS NULL");
+    if let Some(id) = commune_filter {
+        qb.push(" AND commune_id = ").push_bind(id);
+    }
+    if let Some(a) = query.active {
+        qb.push(" AND active = ").push_bind(a);
+    }
+    if let Some(ref t) = type_filter {
+        qb.push(" AND type_zone = ").push_bind(t.clone());
+    }
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
 
+    let rows = qb.build().fetch_all(&state.db).await?;
     let zones = rows.into_iter().map(row_to_zone).collect();
     Ok(Json(Paginated::new(zones, &pagination, total)))
 }
@@ -182,6 +195,8 @@ async fn create_zone(
         Some(zone_id),
         None,
         Some(json!({ "nom": nom, "commune_id": payload.commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -245,6 +260,8 @@ async fn patch_zone(
         Some(zone_id),
         Some(json!({ "nom": existing.nom, "active": existing.active })),
         Some(json!({ "nom": nom, "active": payload.active })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -260,12 +277,13 @@ async fn delete_zone(
     let existing = load_zone(&state.db, zone_id).await?;
     auth_user.require_commune_access(existing.commune_id)?;
 
-    let children: i64 =
-        sqlx::query("SELECT COUNT(*) AS total FROM zones WHERE parent_id = $1 AND deleted_at IS NULL")
-            .bind(zone_id)
-            .fetch_one(&state.db)
-            .await?
-            .get("total");
+    let children: i64 = sqlx::query(
+        "SELECT COUNT(*) AS total FROM zones WHERE parent_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(zone_id)
+    .fetch_one(&state.db)
+    .await?
+    .get("total");
 
     if children > 0 {
         return Err(ApiError::conflict(
@@ -286,6 +304,8 @@ async fn delete_zone(
         Some(zone_id),
         Some(json!({ "nom": existing.nom })),
         None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -334,32 +354,13 @@ fn resolve_commune_filter(
     Ok(Some(user_commune))
 }
 
-fn build_filter_clause(
-    commune_filter: Option<Uuid>,
-    active: Option<bool>,
-    type_zone: Option<&str>,
-) -> String {
-    let mut clauses = Vec::new();
-    if let Some(id) = commune_filter {
-        clauses.push(format!("AND commune_id = '{id}'"));
-    }
-    if let Some(a) = active {
-        clauses.push(format!("AND active = {a}"));
-    }
-    if let Some(t) = type_zone {
-        let safe = t.replace('\'', "''");
-        clauses.push(format!("AND type_zone = '{safe}'"));
-    }
-    clauses.join(" ")
-}
-
 fn validate_type_zone(value: String) -> Result<String, ApiError> {
     let upper = value.trim().to_ascii_uppercase();
     if VALID_TYPES.contains(&upper.as_str()) {
         Ok(upper)
     } else {
         Err(ApiError::bad_request(format!(
-            "type_zone invalide. Valeurs acceptees : {}",
+            "type_zone invalide. Valeurs acceptees: {}",
             VALID_TYPES.join(", ")
         )))
     }

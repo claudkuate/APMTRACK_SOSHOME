@@ -112,8 +112,21 @@ impl From<sqlx::Error> for ApiError {
 
 pub fn map_database_error(error: sqlx::Error) -> ApiError {
     if let sqlx::Error::Database(database_error) = &error {
-        if database_error.code().as_deref() == Some("23505") {
-            return ApiError::conflict("Une ressource avec ces informations existe deja");
+        match database_error.code().as_deref() {
+            Some("23505") => {
+                return ApiError::conflict("Une ressource avec ces informations existe deja")
+            }
+            Some("23503") => {
+                return ApiError::conflict(
+                    "Impossible de supprimer: cette ressource est referencee par d'autres donnees",
+                )
+            }
+            Some("23514") => {
+                return ApiError::bad_request(
+                    "Donnees invalides: contrainte metier non respectee",
+                )
+            }
+            _ => {}
         }
     }
 

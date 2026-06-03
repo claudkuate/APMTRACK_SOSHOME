@@ -10,6 +10,8 @@ pub async fn record(
     entity_id: Option<Uuid>,
     old_value: Option<Value>,
     new_value: Option<Value>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
 ) {
     let audit_id = Uuid::new_v4();
     let result = sqlx::query(
@@ -18,7 +20,7 @@ pub async fn record(
             id, user_id, action, entity_type, entity_id,
             old_value, new_value, ip_address, user_agent
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(audit_id)
@@ -28,6 +30,8 @@ pub async fn record(
     .bind(entity_id)
     .bind(old_value)
     .bind(new_value)
+    .bind(ip_address)
+    .bind(user_agent)
     .execute(pool)
     .await;
 

@@ -9,7 +9,10 @@ use uuid::Uuid;
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
 use crate::modules::audit;
-use crate::modules::auth::{assign_roles, hash_password, normalize_email, roles_for_user, AuthUser};
+use crate::modules::auth::{
+    assign_roles, hash_password, normalize_email, revoke_all_refresh_tokens, roles_for_user,
+    AuthUser,
+};
 use crate::modules::rbac::{parse_roles, Role};
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::state::AppState;
@@ -17,7 +20,10 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/users", axum::routing::get(list_users).post(create_user))
-        .route("/users/{id}", axum::routing::patch(patch_user))
+        .route(
+            "/users/{id}",
+            axum::routing::get(get_user).patch(patch_user),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +66,17 @@ struct UserRow {
     active: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+async fn get_user(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<UserResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
+    let user = load_user_response(&state.db, user_id).await?;
+    auth_user.require_commune_access(user.commune_id.unwrap_or_else(Uuid::nil))?;
+    Ok(Json(user))
 }
 
 async fn list_users(
@@ -171,6 +188,8 @@ async fn create_user(
         Some(user_id),
         None,
         Some(json!({ "email": email, "roles": payload.roles })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -231,6 +250,8 @@ async fn patch_user(
         .execute(&state.db)
         .await
         .map_err(map_database_error)?;
+
+        revoke_all_refresh_tokens(&state.db, user_id).await?;
     } else {
         sqlx::query(
             r#"
@@ -265,6 +286,8 @@ async fn patch_user(
         Some(user_id),
         Some(json!({ "email": existing.email, "commune_id": existing.commune_id })),
         Some(json!({ "email": email, "commune_id": new_commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 

@@ -3,7 +3,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
@@ -20,7 +20,6 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        // Categories
         .route(
             "/referentiel/categories",
             axum::routing::get(list_categories).post(create_category),
@@ -31,7 +30,6 @@ pub fn router() -> Router<AppState> {
                 .patch(patch_category)
                 .delete(delete_category),
         )
-        // Types
         .route(
             "/referentiel/types",
             axum::routing::get(list_types).post(create_type),
@@ -42,7 +40,6 @@ pub fn router() -> Router<AppState> {
                 .patch(patch_type)
                 .delete(delete_type),
         )
-        // Interventions
         .route(
             "/referentiel/interventions",
             axum::routing::get(list_interventions).post(create_intervention),
@@ -56,7 +53,7 @@ pub fn router() -> Router<AppState> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Shared filter query
+// Catégories
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -66,10 +63,6 @@ struct CommuneFilterQuery {
     commune_id: Option<Uuid>,
     active: Option<bool>,
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Catégories d'intervention
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct CreateCategoryRequest {
@@ -114,28 +107,23 @@ async fn list_categories(
         page_size: query.page_size,
     })?;
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
-    let filter = commune_active_filter(commune_filter, query.active);
 
-    let total: i64 = sqlx::query(&format!(
-        "SELECT COUNT(*) AS total FROM intervention_categories WHERE deleted_at IS NULL {filter}"
-    ))
-    .fetch_one(&state.db)
-    .await?
-    .get("total");
+    let mut count_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT COUNT(*) AS total FROM intervention_categories WHERE deleted_at IS NULL",
+    );
+    apply_commune_active(&mut count_qb, commune_filter, query.active);
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT * FROM intervention_categories
-        WHERE deleted_at IS NULL {filter}
-        ORDER BY nom ASC
-        LIMIT $1 OFFSET $2
-        "#
-    ))
-    .bind(pagination.limit)
-    .bind(pagination.offset)
-    .fetch_all(&state.db)
-    .await?;
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT * FROM intervention_categories WHERE deleted_at IS NULL",
+    );
+    apply_commune_active(&mut qb, commune_filter, query.active);
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
 
+    let rows = qb.build().fetch_all(&state.db).await?;
     let items = rows.into_iter().map(row_to_category).collect();
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
@@ -191,6 +179,8 @@ async fn create_category(
         Some(id),
         None,
         Some(json!({ "nom": nom, "commune_id": payload.commune_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -235,6 +225,8 @@ async fn patch_category(
         Some(id),
         Some(json!({ "nom": existing.nom })),
         Some(json!({ "nom": nom })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -279,6 +271,8 @@ async fn delete_category(
         Some(id),
         Some(json!({ "nom": existing.nom })),
         None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -366,31 +360,28 @@ async fn list_types(
         page_size: query.page_size,
     })?;
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
-    let mut filter = commune_active_filter(commune_filter, query.active);
+
+    let mut count_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT COUNT(*) AS total FROM intervention_types WHERE deleted_at IS NULL",
+    );
+    apply_commune_active(&mut count_qb, commune_filter, query.active);
     if let Some(cat_id) = query.category_id {
-        filter.push_str(&format!(" AND category_id = '{cat_id}'"));
+        count_qb.push(" AND category_id = ").push_bind(cat_id);
     }
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let total: i64 = sqlx::query(&format!(
-        "SELECT COUNT(*) AS total FROM intervention_types WHERE deleted_at IS NULL {filter}"
-    ))
-    .fetch_one(&state.db)
-    .await?
-    .get("total");
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT * FROM intervention_types WHERE deleted_at IS NULL");
+    apply_commune_active(&mut qb, commune_filter, query.active);
+    if let Some(cat_id) = query.category_id {
+        qb.push(" AND category_id = ").push_bind(cat_id);
+    }
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
 
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT * FROM intervention_types
-        WHERE deleted_at IS NULL {filter}
-        ORDER BY nom ASC
-        LIMIT $1 OFFSET $2
-        "#
-    ))
-    .bind(pagination.limit)
-    .bind(pagination.offset)
-    .fetch_all(&state.db)
-    .await?;
-
+    let rows = qb.build().fetch_all(&state.db).await?;
     let items = rows.into_iter().map(row_to_type).collect();
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
@@ -454,6 +445,8 @@ async fn create_type(
         Some(id),
         None,
         Some(json!({ "nom": nom, "category_id": payload.category_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -498,6 +491,8 @@ async fn patch_type(
         Some(id),
         Some(json!({ "nom": existing.nom })),
         Some(json!({ "nom": nom })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -542,6 +537,8 @@ async fn delete_type(
         Some(id),
         Some(json!({ "nom": existing.nom })),
         None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -651,37 +648,39 @@ async fn list_interventions(
         page_size: query.page_size,
     })?;
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
-    let mut filter = commune_active_filter(commune_filter, query.active);
+
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM interventions WHERE deleted_at IS NULL");
+    apply_commune_active(&mut count_qb, commune_filter, query.active);
     if let Some(id) = query.category_id {
-        filter.push_str(&format!(" AND category_id = '{id}'"));
+        count_qb.push(" AND category_id = ").push_bind(id);
     }
     if let Some(id) = query.type_id {
-        filter.push_str(&format!(" AND type_id = '{id}'"));
+        count_qb.push(" AND type_id = ").push_bind(id);
     }
     if let Some(sp) = query.sujet_paiement {
-        filter.push_str(&format!(" AND sujet_paiement = {sp}"));
+        count_qb.push(" AND sujet_paiement = ").push_bind(sp);
     }
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let total: i64 = sqlx::query(&format!(
-        "SELECT COUNT(*) AS total FROM interventions WHERE deleted_at IS NULL {filter}"
-    ))
-    .fetch_one(&state.db)
-    .await?
-    .get("total");
+    let mut qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT * FROM interventions WHERE deleted_at IS NULL");
+    apply_commune_active(&mut qb, commune_filter, query.active);
+    if let Some(id) = query.category_id {
+        qb.push(" AND category_id = ").push_bind(id);
+    }
+    if let Some(id) = query.type_id {
+        qb.push(" AND type_id = ").push_bind(id);
+    }
+    if let Some(sp) = query.sujet_paiement {
+        qb.push(" AND sujet_paiement = ").push_bind(sp);
+    }
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
 
-    let rows = sqlx::query(&format!(
-        r#"
-        SELECT * FROM interventions
-        WHERE deleted_at IS NULL {filter}
-        ORDER BY nom ASC
-        LIMIT $1 OFFSET $2
-        "#
-    ))
-    .bind(pagination.limit)
-    .bind(pagination.offset)
-    .fetch_all(&state.db)
-    .await?;
-
+    let rows = qb.build().fetch_all(&state.db).await?;
     let items = rows.into_iter().map(row_to_intervention).collect();
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
@@ -718,24 +717,19 @@ async fn create_intervention(
         ));
     }
     let interv_type = load_type(&state.db, payload.type_id).await?;
-    if interv_type.commune_id != payload.commune_id || interv_type.category_id != payload.category_id {
+    if interv_type.commune_id != payload.commune_id
+        || interv_type.category_id != payload.category_id
+    {
         return Err(ApiError::bad_request(
             "Le type n'appartient pas a la categorie indiquee ou a cette commune",
         ));
     }
 
-    if payload.sujet_paiement {
-        if payload.montant.map(|m| m <= 0.0).unwrap_or(true) {
-            return Err(ApiError::bad_request(
-                "Une intervention payante doit avoir un montant positif",
-            ));
-        }
-        if clean_optional(payload.reference_deliberation.clone()).is_none() {
-            return Err(ApiError::bad_request(
-                "Une intervention payante doit avoir une reference de deliberation",
-            ));
-        }
-    }
+    validate_paiement_rules(
+        payload.sujet_paiement,
+        payload.montant,
+        payload.reference_deliberation.as_deref(),
+    )?;
 
     let nom = required_text(payload.nom, "nom")?;
     let id = Uuid::new_v4();
@@ -775,6 +769,8 @@ async fn create_intervention(
         Some(id),
         None,
         Some(json!({ "nom": nom, "commune_id": payload.commune_id, "sujet_paiement": payload.sujet_paiement })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -795,28 +791,19 @@ async fn patch_intervention(
         Some(v) => required_text(v, "nom")?,
         None => existing.nom.clone(),
     };
+
+    // Résoudre les valeurs finales avant validation
     let sujet_paiement = payload.sujet_paiement.unwrap_or(existing.sujet_paiement);
     let montant = payload.montant.or(existing.montant);
     let reference_deliberation = payload
         .reference_deliberation
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
         .or(existing.reference_deliberation.clone());
 
-    if sujet_paiement {
-        if montant.map(|m| m <= 0.0).unwrap_or(true) {
-            return Err(ApiError::bad_request(
-                "Une intervention payante doit avoir un montant positif",
-            ));
-        }
-        if reference_deliberation
-            .as_deref()
-            .map(|s| s.trim().is_empty())
-            .unwrap_or(true)
-        {
-            return Err(ApiError::bad_request(
-                "Une intervention payante doit avoir une reference de deliberation",
-            ));
-        }
-    }
+    validate_paiement_rules(sujet_paiement, montant, reference_deliberation.as_deref())?;
 
     sqlx::query(
         r#"
@@ -842,7 +829,11 @@ async fn patch_intervention(
     .bind(payload.delai_paiement_jours.or(existing.delai_paiement_jours))
     .bind(payload.taux_penalite.or(existing.taux_penalite))
     .bind(reference_deliberation)
-    .bind(payload.piece_justificative.or(existing.piece_justificative.clone()))
+    .bind(
+        payload
+            .piece_justificative
+            .or(existing.piece_justificative.clone()),
+    )
     .bind(payload.active.unwrap_or(existing.active))
     .execute(&state.db)
     .await
@@ -856,6 +847,8 @@ async fn patch_intervention(
         Some(id),
         Some(json!({ "nom": existing.nom, "montant": existing.montant })),
         Some(json!({ "nom": nom, "montant": montant })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -886,6 +879,8 @@ async fn delete_intervention(
         Some(id),
         Some(json!({ "nom": existing.nom })),
         None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
     )
     .await;
 
@@ -925,6 +920,30 @@ fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
 // Helpers partagés
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn validate_paiement_rules(
+    sujet_paiement: bool,
+    montant: Option<f64>,
+    reference_deliberation: Option<&str>,
+) -> Result<(), ApiError> {
+    if !sujet_paiement {
+        return Ok(());
+    }
+    if montant.map(|m| m <= 0.0).unwrap_or(true) {
+        return Err(ApiError::bad_request(
+            "Une intervention payante doit avoir un montant positif",
+        ));
+    }
+    if reference_deliberation
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return Err(ApiError::bad_request(
+            "Une intervention payante doit avoir une reference de deliberation",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_commune_filter(
     auth_user: &AuthUser,
     requested: Option<Uuid>,
@@ -945,15 +964,17 @@ fn resolve_commune_filter(
     Ok(Some(user_commune))
 }
 
-fn commune_active_filter(commune_filter: Option<Uuid>, active: Option<bool>) -> String {
-    let mut clauses = String::new();
+fn apply_commune_active(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    commune_filter: Option<Uuid>,
+    active: Option<bool>,
+) {
     if let Some(id) = commune_filter {
-        clauses.push_str(&format!(" AND commune_id = '{id}'"));
+        qb.push(" AND commune_id = ").push_bind(id);
     }
     if let Some(a) = active {
-        clauses.push_str(&format!(" AND active = {a}"));
+        qb.push(" AND active = ").push_bind(a);
     }
-    clauses
 }
 
 fn required_text(value: String, field: &'static str) -> Result<String, ApiError> {
