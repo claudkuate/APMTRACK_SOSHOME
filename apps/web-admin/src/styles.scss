@@ -1,0 +1,31 @@
+:root {
+  --color-canvas: #f6f7f9;
+  --color-panel: #ffffff;
+  --color-border: #d7dbe0;
+  --color-text: #17202a;
+  --color-muted: #5f6b7a;
+  --font-ui: Inter, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  background: var(--color-canvas);
+  color: var(--color-text);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}

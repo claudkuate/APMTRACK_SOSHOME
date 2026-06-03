@@ -1,0 +1,15 @@
+name: docker-build
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build local compose services
+        run: docker compose -f docker-compose.dev.yml build
+

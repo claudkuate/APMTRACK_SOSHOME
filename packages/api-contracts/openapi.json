@@ -1,0 +1,83 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "APMTRACK API",
+    "version": "0.1.0",
+    "description": "Contrat OpenAPI Phase 0. Les endpoints metier MVP seront ajoutes en Phase 1."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080",
+      "description": "Developpement local"
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Verifie que l'API est disponible",
+        "responses": {
+          "200": {
+            "description": "API disponible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health/db": {
+      "get": {
+        "summary": "Verifie la connectivite PostgreSQL",
+        "responses": {
+          "200": {
+            "description": "Base de donnees joignable"
+          },
+          "503": {
+            "description": "Base de donnees indisponible"
+          }
+        }
+      }
+    },
+    "/api/v1/": {
+      "get": {
+        "summary": "Racine reservee de l'API v1",
+        "responses": {
+          "200": {
+            "description": "API v1 reservee pour les modules Phase 1"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status", "service", "environment", "version"],
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "service": {
+            "type": "string",
+            "example": "apmtrack-api"
+          },
+          "environment": {
+            "type": "string",
+            "example": "development"
+          },
+          "version": {
+            "type": "string",
+            "example": "0.1.0"
+          }
+        }
+      }
+    }
+  }
+}
+

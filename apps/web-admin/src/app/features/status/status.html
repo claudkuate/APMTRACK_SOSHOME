@@ -1,0 +1,27 @@
+<section class="status-layout">
+  <div class="intro">
+    <span class="status-pill" [class.is-ok]="summary() === 'operationnel'">
+      {{ summary() }}
+    </span>
+    <h2>Statut plateforme</h2>
+    <p>{{ apiUrl }}</p>
+  </div>
+
+  <div class="checks" aria-label="Etat des services techniques">
+    @for (item of [api(), database()]; track item.label) {
+      <article class="check" [class.is-ok]="item.state === 'ok'" [class.is-error]="item.state === 'error'">
+        <div>
+          <h3>{{ item.label }}</h3>
+          <p>{{ item.detail }}</p>
+        </div>
+        <span>{{ item.state }}</span>
+      </article>
+    }
+  </div>
+
+  <footer class="status-footer">
+    <span>Environnement: {{ environment }}</span>
+    <button type="button" (click)="refresh()">Rafraichir</button>
+  </footer>
+</section>
+
