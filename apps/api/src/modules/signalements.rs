@@ -1,7 +1,7 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, Router};
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
@@ -9,10 +9,12 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::resolve_commune_filter;
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
+use crate::sequences::{next_document_sequence, SEQUENCE_SIGNALEMENT};
 use crate::state::AppState;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -109,8 +111,16 @@ pub struct PatchSignalementStatusRequest {
 /// Suivi public par numéro — sans authentification, sans données sensibles.
 async fn track_signalement_public(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(numero_suivi): Path<String>,
 ) -> Result<Json<SignalementPublicTrackResponse>, ApiError> {
+    state.rate_limiter.check(
+        "public:signalements:track",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let row = sqlx::query(
         r#"
         SELECT signalement_number, commune_id, type_incident, status, created_at, updated_at
@@ -136,21 +146,28 @@ async fn track_signalement_public(
 /// Création publique — sans authentification.
 async fn create_signalement_public(
     State(state): State<AppState>,
+    headers: HeaderMap,
     ApiJson(payload): ApiJson<CreateSignalementRequest>,
 ) -> Result<(StatusCode, Json<SignalementCreatedResponse>), ApiError> {
+    state.rate_limiter.check(
+        "public:signalements:create",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let type_incident = required_text(payload.type_incident, "type_incident")?;
     let location = required_text(payload.location_description, "location_description")?;
     let description = required_text(payload.description, "description")?;
 
-    // Vérifier que la commune existe
-    let commune_exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM communes WHERE id = $1 AND deleted_at IS NULL)")
+    let mut tx = state.db.begin().await?;
+
+    let commune_code: Option<String> =
+        sqlx::query_scalar("SELECT code FROM communes WHERE id = $1 AND deleted_at IS NULL")
             .bind(payload.commune_id)
-            .fetch_one(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
-    if !commune_exists {
-        return Err(ApiError::not_found("Commune introuvable"));
-    }
+    let commune_code = commune_code.ok_or_else(|| ApiError::not_found("Commune introuvable"))?;
 
     let anonyme = payload.contact_anonyme.unwrap_or(false);
     let contact_info = if anonyme {
@@ -159,7 +176,7 @@ async fn create_signalement_public(
         clean_optional(payload.contact_info)
     };
 
-    let number = generate_signalement_number(&state.db, payload.commune_id).await?;
+    let number = generate_signalement_number(&mut tx, &commune_code, payload.commune_id).await?;
     let id = Uuid::new_v4();
 
     sqlx::query(
@@ -178,9 +195,11 @@ async fn create_signalement_public(
     .bind(&description)
     .bind(anonyme)
     .bind(contact_info)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
+
+    tx.commit().await?;
 
     Ok((
         StatusCode::CREATED,
@@ -188,21 +207,16 @@ async fn create_signalement_public(
             id,
             signalement_number: number,
             status: "RECU".to_string(),
-            message: "Votre signalement a été enregistré avec succès.",
+            message: "Signalement recu et en attente de traitement",
         }),
     ))
 }
-
 async fn list_signalements(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Query(query): Query<SignalementFilterQuery>,
 ) -> Result<Json<Paginated<SignalementResponse>>, ApiError> {
-    auth_user.require_any_role(&[
-        Role::SuperAdmin,
-        Role::AdminCommune,
-        Role::Superviseur,
-    ])?;
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
 
     let pagination = Pagination::from_query(PaginationQuery {
         page: query.page,
@@ -273,8 +287,9 @@ async fn patch_signalement_status(
     .execute(&state.db)
     .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(existing.commune_id),
         Some(auth_user.id),
         "SIGNALEMENT_STATUS_CHANGED",
         "signalements",
@@ -317,20 +332,12 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
     }
 }
 
-async fn generate_signalement_number(pool: &PgPool, commune_id: Uuid) -> Result<String, ApiError> {
-    let year = Utc::now().year();
-    let commune_code: String =
-        sqlx::query_scalar("SELECT code FROM communes WHERE id = $1")
-            .bind(commune_id)
-            .fetch_one(pool)
-            .await?;
-    let seq: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) + 1 FROM signalements WHERE commune_id = $1 AND EXTRACT(YEAR FROM created_at) = $2",
-    )
-    .bind(commune_id)
-    .bind(year as i64)
-    .fetch_one(pool)
-    .await?;
+async fn generate_signalement_number(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_code: &str,
+    commune_id: Uuid,
+) -> Result<String, ApiError> {
+    let (year, seq) = next_document_sequence(tx, commune_id, SEQUENCE_SIGNALEMENT).await?;
     Ok(format!(
         "SIG-{}-{}-{:06}",
         commune_code.to_uppercase(),
@@ -338,7 +345,6 @@ async fn generate_signalement_number(pool: &PgPool, commune_id: Uuid) -> Result<
         seq
     ))
 }
-
 fn apply_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     commune_filter: Option<Uuid>,
@@ -350,26 +356,6 @@ fn apply_filters(
     if let Some(s) = status {
         qb.push(" AND status = ").push_bind(s.to_string());
     }
-}
-
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
 }
 
 fn required_text(value: String, field: &'static str) -> Result<String, ApiError> {

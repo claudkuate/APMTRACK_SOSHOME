@@ -4,6 +4,7 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use axum::extract::{FromRequestParts, State};
 use axum::http::request::Parts;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
@@ -145,8 +146,8 @@ impl FromRequestParts<AppState> for AuthUser {
             .ok_or_else(|| ApiError::unauthorized("Token bearer manquant"))?;
 
         let claims = decode_access_token(token, &state.config.jwt_secret)?;
-        let user_id = Uuid::parse_str(&claims.sub)
-            .map_err(|_| ApiError::unauthorized("Token invalide"))?;
+        let user_id =
+            Uuid::parse_str(&claims.sub).map_err(|_| ApiError::unauthorized("Token invalide"))?;
 
         let ip_address = parts
             .headers
@@ -170,8 +171,16 @@ impl FromRequestParts<AppState> for AuthUser {
 
 async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     ApiJson(payload): ApiJson<LoginRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
+    state.rate_limiter.check(
+        "auth:login",
+        &headers,
+        state.config.rate_limit_login_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let email = normalize_email(&payload.email)?;
     let user = match load_login_user(&state.db, &email).await? {
         Some(user) => user,
@@ -193,8 +202,9 @@ async fn login(
     };
 
     if !user.active || !verify_password(&payload.password, &user.password_hash)? {
-        audit::record(
+        audit::record_for_commune(
             &state.db,
+            user.commune_id,
             Some(user.id),
             "AUTH_LOGIN_FAILED",
             "users",
@@ -220,8 +230,9 @@ async fn login(
     )
     .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        user.commune_id,
         Some(user.id),
         "AUTH_LOGIN_SUCCEEDED",
         "users",
@@ -238,10 +249,19 @@ async fn login(
 
 async fn refresh(
     State(state): State<AppState>,
+    headers: HeaderMap,
     ApiJson(payload): ApiJson<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
+    state.rate_limiter.check(
+        "auth:refresh",
+        &headers,
+        state.config.rate_limit_login_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let (token_id, secret) = parse_refresh_token(&payload.refresh_token)?;
-    let record = load_refresh_token(&state.db, token_id)
+    let mut transaction = state.db.begin().await?;
+    let record = load_refresh_token_for_update(&mut transaction, token_id)
         .await?
         .ok_or_else(|| ApiError::unauthorized("Refresh token invalide"))?;
 
@@ -253,10 +273,10 @@ async fn refresh(
         return Err(ApiError::unauthorized("Refresh token invalide"));
     }
 
-    revoke_refresh_token(&state.db, token_id, record.user_id).await?;
-    let auth_user = load_auth_user(&state.db, record.user_id).await?;
-    let response = issue_tokens(
-        &state.db,
+    revoke_refresh_token_in_tx(&mut transaction, token_id, record.user_id).await?;
+    let auth_user = load_auth_user_in_tx(&mut transaction, record.user_id).await?;
+    let response = issue_tokens_in_tx(
+        &mut transaction,
         &state.config,
         auth_user.id,
         auth_user.email.clone(),
@@ -265,9 +285,9 @@ async fn refresh(
         auth_user.roles.clone(),
     )
     .await?;
-
-    audit::record(
-        &state.db,
+    audit::record_for_commune_tx(
+        &mut transaction,
+        auth_user.commune_id,
         Some(auth_user.id),
         "AUTH_TOKEN_REFRESHED",
         "refresh_tokens",
@@ -278,6 +298,7 @@ async fn refresh(
         None,
     )
     .await;
+    transaction.commit().await?;
 
     Ok(Json(response))
 }
@@ -294,8 +315,9 @@ async fn logout(
         revoke_all_refresh_tokens(&state.db, auth_user.id).await?;
     }
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        auth_user.commune_id,
         Some(auth_user.id),
         "AUTH_LOGOUT",
         "users",
@@ -437,6 +459,43 @@ pub async fn load_auth_user(pool: &PgPool, user_id: Uuid) -> Result<AuthUser, Ap
     })
 }
 
+async fn load_auth_user_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<AuthUser, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, email, full_name, commune_id, active
+        FROM users
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| ApiError::unauthorized("Utilisateur introuvable"))?;
+
+    let active: bool = row.get("active");
+    if !active {
+        return Err(ApiError::unauthorized("Utilisateur inactif"));
+    }
+
+    let roles = roles_for_user_in_tx(transaction, user_id).await?;
+    if roles.is_empty() {
+        return Err(ApiError::forbidden("Utilisateur sans role actif"));
+    }
+
+    Ok(AuthUser {
+        id: row.get("id"),
+        email: row.get("email"),
+        full_name: row.get("full_name"),
+        commune_id: row.get("commune_id"),
+        roles,
+        ip_address: None,
+        user_agent: None,
+    })
+}
+
 pub async fn roles_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Role>, ApiError> {
     let rows = sqlx::query(
         r#"
@@ -457,12 +516,44 @@ pub async fn roles_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Role>, A
         .collect())
 }
 
+async fn roles_for_user_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<Vec<Role>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT r.code
+        FROM roles r
+        INNER JOIN user_roles ur ON ur.role_id = r.id
+        WHERE ur.user_id = $1
+        ORDER BY r.code
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut **transaction)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| Role::from_code(row.get::<String, _>("code").as_str()))
+        .collect())
+}
+
 pub async fn assign_roles(pool: &PgPool, user_id: Uuid, roles: &[Role]) -> Result<(), ApiError> {
     let mut transaction = pool.begin().await?;
+    assign_roles_in_tx(&mut transaction, user_id, roles).await?;
+    transaction.commit().await?;
+    Ok(())
+}
 
+pub async fn assign_roles_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    roles: &[Role],
+) -> Result<(), ApiError> {
     sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
         .bind(user_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
 
     for role in roles {
@@ -474,11 +565,10 @@ pub async fn assign_roles(pool: &PgPool, user_id: Uuid, roles: &[Role]) -> Resul
         )
         .bind(user_id)
         .bind(role.code())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
     }
 
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -512,9 +602,35 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, ApiE
 
 pub fn normalize_email(email: &str) -> Result<String, ApiError> {
     let normalized = email.trim().to_ascii_lowercase();
-    if normalized.is_empty() || !normalized.contains('@') {
-        return Err(ApiError::bad_request("Email invalide"));
+    let err = || ApiError::bad_request("Adresse email invalide");
+
+    if normalized.is_empty() {
+        return Err(err());
     }
+
+    let (local, domain) = normalized.split_once('@').ok_or_else(err)?;
+
+    if local.is_empty() || domain.is_empty() {
+        return Err(err());
+    }
+
+    // Le domaine doit contenir au moins un point et aucune espace
+    if !domain.contains('.') || domain.contains(' ') {
+        return Err(err());
+    }
+
+    // Ni partie locale ni domaine ne peut commencer ou finir par un point
+    if local.starts_with('.') || local.ends_with('.') {
+        return Err(err());
+    }
+    if domain.starts_with('.') || domain.ends_with('.') {
+        return Err(err());
+    }
+
+    if normalized.len() > 254 {
+        return Err(err());
+    }
+
     Ok(normalized)
 }
 
@@ -578,7 +694,57 @@ async fn issue_tokens(
             email,
             full_name,
             commune_id,
-            roles: roles.into_iter().map(|role| role.code().to_string()).collect(),
+            roles: roles
+                .into_iter()
+                .map(|role| role.code().to_string())
+                .collect(),
+            active: true,
+        },
+    })
+}
+
+async fn issue_tokens_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    config: &AppConfig,
+    user_id: Uuid,
+    email: String,
+    full_name: String,
+    commune_id: Option<Uuid>,
+    roles: Vec<Role>,
+) -> Result<TokenResponse, ApiError> {
+    let access_token = create_access_token(config, user_id, &email, commune_id, &roles)?;
+    let (refresh_token_id, refresh_token, refresh_secret) = generate_refresh_token();
+    let refresh_hash = hash_password(&refresh_secret)?;
+    let refresh_expires_at = Utc::now() + Duration::days(config.jwt_refresh_token_ttl_days);
+
+    sqlx::query(
+        r#"
+        INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(refresh_token_id)
+    .bind(user_id)
+    .bind(refresh_hash)
+    .bind(refresh_expires_at)
+    .execute(&mut **transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    Ok(TokenResponse {
+        access_token,
+        refresh_token,
+        token_type: "Bearer",
+        expires_in_seconds: config.jwt_access_token_ttl_minutes * 60,
+        user: MeResponse {
+            id: user_id,
+            email,
+            full_name,
+            commune_id,
+            roles: roles
+                .into_iter()
+                .map(|role| role.code().to_string())
+                .collect(),
             active: true,
         },
     })
@@ -625,11 +791,7 @@ fn decode_access_token(token: &str, secret: &str) -> Result<Claims, ApiError> {
 
 fn generate_refresh_token() -> (Uuid, String, String) {
     let id = Uuid::new_v4();
-    let secret = format!(
-        "{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    );
+    let secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let token = format!("{id}.{secret}");
     (id, token, secret)
 }
@@ -647,8 +809,8 @@ fn parse_refresh_token(token: &str) -> Result<(Uuid, String), ApiError> {
     Ok((id, secret.to_string()))
 }
 
-async fn load_refresh_token(
-    pool: &PgPool,
+async fn load_refresh_token_for_update(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     token_id: Uuid,
 ) -> Result<Option<RefreshTokenRecord>, ApiError> {
     let row = sqlx::query(
@@ -656,10 +818,11 @@ async fn load_refresh_token(
         SELECT id, user_id, token_hash, expires_at, revoked_at
         FROM refresh_tokens
         WHERE id = $1
+        FOR UPDATE
         "#,
     )
     .bind(token_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **transaction)
     .await?;
 
     Ok(row.map(|row| RefreshTokenRecord {
@@ -691,6 +854,26 @@ async fn revoke_refresh_token(
     Ok(())
 }
 
+async fn revoke_refresh_token_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    token_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        UPDATE refresh_tokens
+        SET revoked_at = COALESCE(revoked_at, now())
+        WHERE id = $1 AND user_id = $2
+        "#,
+    )
+    .bind(token_id)
+    .bind(user_id)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn revoke_all_refresh_tokens(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError> {
     sqlx::query(
         r#"
@@ -701,6 +884,24 @@ pub async fn revoke_all_refresh_tokens(pool: &PgPool, user_id: Uuid) -> Result<(
     )
     .bind(user_id)
     .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn revoke_all_refresh_tokens_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    sqlx::query(
+        r#"
+        UPDATE refresh_tokens
+        SET revoked_at = COALESCE(revoked_at, now())
+        WHERE user_id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .execute(&mut **transaction)
     .await?;
 
     Ok(())
@@ -734,12 +935,19 @@ mod tests {
             app_port: 8080,
             database_url: "postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack"
                 .to_string(),
+            database_max_connections: 5,
+            database_acquire_timeout_seconds: 3,
+            database_idle_timeout_seconds: None,
             jwt_secret: "test_secret_for_phase1".to_string(),
             jwt_access_token_ttl_minutes: 15,
             jwt_refresh_token_ttl_days: 7,
             cors_allowed_origins: vec!["http://localhost:4200".to_string()],
             public_api_url: "http://localhost:8080".to_string(),
             run_migrations_on_startup: false,
+            rate_limit_enabled: false,
+            rate_limit_window_seconds: 60,
+            rate_limit_login_max: 10,
+            rate_limit_public_max: 60,
         };
         let user_id = Uuid::new_v4();
         let token = create_access_token(

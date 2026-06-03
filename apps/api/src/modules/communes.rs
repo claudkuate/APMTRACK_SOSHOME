@@ -16,7 +16,10 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/communes", axum::routing::get(list_communes).post(create_commune))
+        .route(
+            "/communes",
+            axum::routing::get(list_communes).post(create_commune),
+        )
         .route(
             "/communes/{id}",
             axum::routing::get(get_commune).patch(patch_commune),
@@ -105,11 +108,10 @@ async fn list_communes(
     let (rows, total) = if auth_user.has_role(Role::SuperAdmin)
         || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
     {
-        let total =
-            sqlx::query("SELECT COUNT(*) AS total FROM communes WHERE deleted_at IS NULL")
-                .fetch_one(&state.db)
-                .await?
-                .get("total");
+        let total = sqlx::query("SELECT COUNT(*) AS total FROM communes WHERE deleted_at IS NULL")
+            .fetch_one(&state.db)
+            .await?
+            .get("total");
         let rows = sqlx::query(
             r#"
             SELECT *
@@ -188,8 +190,9 @@ async fn create_commune(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(commune_id),
         Some(auth_user.id),
         "COMMUNE_CREATED",
         "communes",
@@ -222,9 +225,11 @@ async fn patch_commune(
     let nom = payload.nom.map_or(Ok(existing.nom.clone()), |value| {
         required_text(value, "nom")
     })?;
-    let region = payload.region.map_or(Ok(existing.region.clone()), |value| {
-        required_text(value, "region")
-    })?;
+    let region = payload
+        .region
+        .map_or(Ok(existing.region.clone()), |value| {
+            required_text(value, "region")
+        })?;
     let departement = payload
         .departement
         .map_or(Ok(existing.departement.clone()), |value| {
@@ -265,8 +270,9 @@ async fn patch_commune(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(commune_id),
         Some(auth_user.id),
         "COMMUNE_UPDATED",
         "communes",

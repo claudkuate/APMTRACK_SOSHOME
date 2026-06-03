@@ -34,7 +34,9 @@ impl Pagination {
         let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
 
         if page < 1 {
-            return Err(ApiError::bad_request("page doit etre superieur ou egal a 1"));
+            return Err(ApiError::bad_request(
+                "page doit etre superieur ou egal a 1",
+            ));
         }
 
         if !(1..=MAX_PAGE_SIZE).contains(&page_size) {

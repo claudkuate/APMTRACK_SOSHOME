@@ -1,4 +1,5 @@
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,10 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/agents", axum::routing::get(list_agents).post(create_agent))
+        .route(
+            "/agents",
+            axum::routing::get(list_agents).post(create_agent),
+        )
         .route(
             "/agents/{id}",
             axum::routing::get(get_agent).patch(patch_agent),
@@ -141,22 +145,21 @@ async fn list_agents(
         None => None,
     };
 
-    let commune_filter: Option<Uuid> =
-        if auth_user.has_role(Role::SuperAdmin)
-            || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-        {
-            query.commune_id
-        } else {
-            let user_commune = auth_user
-                .commune_id
-                .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-            if let Some(req) = query.commune_id {
-                if req != user_commune {
-                    return Err(ApiError::forbidden("Acces refuse a cette commune"));
-                }
+    let commune_filter: Option<Uuid> = if auth_user.has_role(Role::SuperAdmin)
+        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
+    {
+        query.commune_id
+    } else {
+        let user_commune = auth_user
+            .commune_id
+            .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
+        if let Some(req) = query.commune_id {
+            if req != user_commune {
+                return Err(ApiError::forbidden("Acces refuse a cette commune"));
             }
-            Some(user_commune)
-        };
+        }
+        Some(user_commune)
+    };
 
     let mut count_qb: QueryBuilder<sqlx::Postgres> =
         QueryBuilder::new("SELECT COUNT(*) AS total FROM agents WHERE deleted_at IS NULL");
@@ -219,8 +222,9 @@ async fn create_agent(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(payload.commune_id),
         Some(auth_user.id),
         "AGENT_CREATED",
         "agents",
@@ -294,8 +298,9 @@ async fn patch_agent(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(commune_id),
         Some(auth_user.id),
         "AGENT_UPDATED",
         "agents",
@@ -357,8 +362,9 @@ async fn change_agent_status(
     .execute(&state.db)
     .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(existing.commune_id),
         Some(auth_user.id),
         action,
         "agents",
@@ -375,8 +381,16 @@ async fn change_agent_status(
 
 async fn verify_agent_public(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(matricule): Path<String>,
 ) -> Result<Json<PublicAgentVerification>, ApiError> {
+    state.rate_limiter.check(
+        "public:agents:verify",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let matricule = required_text(matricule, "matricule")?;
     let row = sqlx::query(
         r#"

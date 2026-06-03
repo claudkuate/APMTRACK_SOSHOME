@@ -40,7 +40,13 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
     let access_token = login.body["access_token"].as_str().expect("access token");
     let refresh_token = login.body["refresh_token"].as_str().expect("refresh token");
 
-    let me = request_empty(app.clone(), Method::GET, "/api/v1/auth/me", Some(access_token)).await;
+    let me = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/auth/me",
+        Some(access_token),
+    )
+    .await;
     assert_eq!(me.status, StatusCode::OK);
     assert_eq!(me.body["email"], super_admin.email);
 
@@ -81,9 +87,13 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
         .as_str()
         .expect("commune admin token");
 
-    let visible_communes =
-        request_empty(app.clone(), Method::GET, "/api/v1/communes", Some(commune_admin_token))
-            .await;
+    let visible_communes = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/communes",
+        Some(commune_admin_token),
+    )
+    .await;
     assert_eq!(visible_communes.status, StatusCode::OK);
     assert_eq!(visible_communes.body["total"], 1);
     assert_eq!(visible_communes.body["items"][0]["id"], commune_a_id);
@@ -180,18 +190,26 @@ struct TestResponse {
 }
 
 fn test_state() -> AppState {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack".into());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack".into()
+    });
     let config = AppConfig {
         app_env: "test".to_string(),
         app_port: 8080,
         database_url,
+        database_max_connections: 5,
+        database_acquire_timeout_seconds: 3,
+        database_idle_timeout_seconds: None,
         jwt_secret: "test_secret_for_phase1_integration".to_string(),
         jwt_access_token_ttl_minutes: 15,
         jwt_refresh_token_ttl_days: 7,
         cors_allowed_origins: vec!["http://localhost:4200".to_string()],
         public_api_url: "http://localhost:8080".to_string(),
         run_migrations_on_startup: false,
+        rate_limit_enabled: false,
+        rate_limit_window_seconds: 60,
+        rate_limit_login_max: 10,
+        rate_limit_public_max: 60,
     };
 
     AppState::try_new(config).expect("state")
@@ -241,12 +259,7 @@ async fn seed_test_super_admin(state: &AppState) -> TestUser {
     TestUser { email, password }
 }
 
-async fn create_commune(
-    app: &axum::Router,
-    access_token: &str,
-    code: &str,
-    nom: &str,
-) -> Value {
+async fn create_commune(app: &axum::Router, access_token: &str, code: &str, nom: &str) -> Value {
     let response = request_json(
         app.clone(),
         Method::POST,

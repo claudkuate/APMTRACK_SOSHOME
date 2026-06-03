@@ -8,14 +8,40 @@ on:
 jobs:
   api:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: apmtrack
+          POSTGRES_USER: apmtrack
+          POSTGRES_PASSWORD: apmtrack_dev_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apmtrack -d apmtrack"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack
+        run: cargo run -p apmtrack-api --bin migrate
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         env:
           DATABASE_URL: postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack
-          JWT_SECRET: ci_secret_for_phase0
-        run: cargo test -p apmtrack-api
-
+          JWT_SECRET: ci_secret_for_apmtrack_tests_minimum_32_chars
+          APMTRACK_RUN_DB_TESTS: "1"
+        run: cargo test --locked -p apmtrack-api
+      - name: Audit dependencies
+        run: cargo audit

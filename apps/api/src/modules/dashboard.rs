@@ -5,6 +5,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::errors::ApiError;
+use crate::helpers::resolve_commune_filter;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
 use crate::state::AppState;
@@ -19,7 +20,10 @@ pub fn router() -> Router<AppState> {
         .route("/dashboard/pvs", axum::routing::get(pv_stats))
         .route("/dashboard/payments", axum::routing::get(payment_stats))
         .route("/dashboard/agents", axum::routing::get(agent_stats))
-        .route("/dashboard/signalements", axum::routing::get(signalement_stats))
+        .route(
+            "/dashboard/signalements",
+            axum::routing::get(signalement_stats),
+        )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -209,8 +213,12 @@ async fn summary(
 
     let payments = PaymentSummary {
         total_payments: pay_row.get("total_payments"),
-        total_collected_fcfa: pay_row.get::<Option<f64>, _>("total_collected").unwrap_or(0.0),
-        pending_fcfa: pending_row.get::<Option<f64>, _>("pending_fcfa").unwrap_or(0.0),
+        total_collected_fcfa: pay_row
+            .get::<Option<f64>, _>("total_collected")
+            .unwrap_or(0.0),
+        pending_fcfa: pending_row
+            .get::<Option<f64>, _>("pending_fcfa")
+            .unwrap_or(0.0),
     };
 
     // Agent stats — commune_filter always applies for agents
@@ -299,7 +307,12 @@ async fn pv_stats(
     auth_user: AuthUser,
     Query(query): Query<DashboardQuery>,
 ) -> Result<Json<PvStatsResponse>, ApiError> {
-    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur, Role::Receveur])?;
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
 
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
@@ -338,7 +351,12 @@ async fn payment_stats(
     auth_user: AuthUser,
     Query(query): Query<DashboardQuery>,
 ) -> Result<Json<PaymentStatsResponse>, ApiError> {
-    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur, Role::Receveur])?;
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
 
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
@@ -377,7 +395,9 @@ async fn payment_stats(
         total_collected_fcfa: row.get::<Option<f64>, _>("total_collected").unwrap_or(0.0),
         total_penalties_fcfa: row.get::<Option<f64>, _>("total_penalties").unwrap_or(0.0),
         pending_count: pending_row.get("pending_count"),
-        pending_fcfa: pending_row.get::<Option<f64>, _>("pending_fcfa").unwrap_or(0.0),
+        pending_fcfa: pending_row
+            .get::<Option<f64>, _>("pending_fcfa")
+            .unwrap_or(0.0),
         commune_id: commune_filter,
     }))
 }
@@ -482,23 +502,3 @@ async fn signalement_stats(
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
-}

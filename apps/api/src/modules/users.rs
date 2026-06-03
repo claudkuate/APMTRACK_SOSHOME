@@ -10,8 +10,8 @@ use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
 use crate::modules::audit;
 use crate::modules::auth::{
-    assign_roles, hash_password, normalize_email, revoke_all_refresh_tokens, roles_for_user,
-    AuthUser,
+    assign_roles_in_tx, hash_password, normalize_email, revoke_all_refresh_tokens_in_tx,
+    roles_for_user, AuthUser,
 };
 use crate::modules::rbac::{parse_roles, Role};
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
@@ -41,7 +41,7 @@ struct PatchUserRequest {
     email: Option<String>,
     password: Option<String>,
     full_name: Option<String>,
-    commune_id: Option<Uuid>,
+    commune_id: Option<Option<Uuid>>,
     roles: Option<Vec<String>>,
     active: Option<bool>,
 }
@@ -75,7 +75,13 @@ async fn get_user(
 ) -> Result<Json<UserResponse>, ApiError> {
     auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
     let user = load_user_response(&state.db, user_id).await?;
-    auth_user.require_commune_access(user.commune_id.unwrap_or_else(Uuid::nil))?;
+    match user.commune_id {
+        Some(commune) => auth_user.require_commune_access(commune)?,
+        None if !auth_user.has_role(Role::SuperAdmin) && !auth_user.has_role(Role::Superviseur) => {
+            return Err(ApiError::forbidden("Acces interdit"));
+        }
+        _ => {}
+    }
     Ok(Json(user))
 }
 
@@ -84,11 +90,7 @@ async fn list_users(
     auth_user: AuthUser,
     Query(query): Query<PaginationQuery>,
 ) -> Result<Json<Paginated<UserResponse>>, ApiError> {
-    auth_user.require_any_role(&[
-        Role::SuperAdmin,
-        Role::AdminCommune,
-        Role::Superviseur,
-    ])?;
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
     let pagination = Pagination::from_query(query)?;
 
     let (rows, total) = if auth_user.has_role(Role::SuperAdmin)
@@ -140,10 +142,47 @@ async fn list_users(
         (rows, total)
     };
 
-    let mut users = Vec::with_capacity(rows.len());
-    for row in rows {
-        users.push(response_from_row(&state.db, row_to_user(row)).await?);
+    // Charger tous les rôles en une seule requête (évite le N+1)
+    let user_rows: Vec<UserRow> = rows.into_iter().map(row_to_user).collect();
+    let user_ids: Vec<Uuid> = user_rows.iter().map(|u| u.id).collect();
+
+    let role_rows = sqlx::query(
+        r#"
+        SELECT ur.user_id, r.code
+        FROM user_roles ur
+        JOIN roles r ON ur.role_id = r.id
+        WHERE ur.user_id = ANY($1)
+        "#,
+    )
+    .bind(&user_ids[..])
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut roles_by_user: std::collections::HashMap<Uuid, Vec<String>> =
+        std::collections::HashMap::new();
+    for r in role_rows {
+        roles_by_user
+            .entry(r.get("user_id"))
+            .or_default()
+            .push(r.get::<String, _>("code"));
     }
+
+    let users: Vec<UserResponse> = user_rows
+        .into_iter()
+        .map(|u| {
+            let roles = roles_by_user.remove(&u.id).unwrap_or_default();
+            UserResponse {
+                id: u.id,
+                email: u.email,
+                full_name: u.full_name,
+                commune_id: u.commune_id,
+                roles,
+                active: u.active,
+                created_at: u.created_at,
+                updated_at: u.updated_at,
+            }
+        })
+        .collect();
 
     Ok(Json(Paginated::new(users, &pagination, total)))
 }
@@ -163,6 +202,7 @@ async fn create_user(
     let active = payload.active.unwrap_or(true);
     let user_id = Uuid::new_v4();
 
+    let mut transaction = state.db.begin().await?;
     sqlx::query(
         r#"
         INSERT INTO users (id, email, password_hash, full_name, commune_id, active)
@@ -175,13 +215,14 @@ async fn create_user(
     .bind(&full_name)
     .bind(payload.commune_id)
     .bind(active)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
     .map_err(map_database_error)?;
 
-    assign_roles(&state.db, user_id, &roles).await?;
-    audit::record(
-        &state.db,
+    assign_roles_in_tx(&mut transaction, user_id, &roles).await?;
+    audit::record_for_commune_tx(
+        &mut transaction,
+        payload.commune_id,
         Some(auth_user.id),
         "USER_CREATED",
         "users",
@@ -192,6 +233,7 @@ async fn create_user(
         auth_user.user_agent.clone(),
     )
     .await;
+    transaction.commit().await?;
 
     let user = load_user_response(&state.db, user_id).await?;
     Ok(Json(user))
@@ -208,26 +250,44 @@ async fn patch_user(
     let existing = load_user_row(&state.db, user_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Utilisateur introuvable"))?;
-    auth_user.require_commune_access(existing.commune_id.unwrap_or_else(Uuid::nil))?;
+    match existing.commune_id {
+        Some(commune) => auth_user.require_commune_access(commune)?,
+        None if !auth_user.has_role(Role::SuperAdmin) => {
+            return Err(ApiError::forbidden("Acces interdit"));
+        }
+        _ => {}
+    }
 
-    let new_roles = match &payload.roles {
+    let PatchUserRequest {
+        email,
+        password,
+        full_name,
+        commune_id,
+        roles,
+        active,
+    } = payload;
+    let roles_changed = roles.is_some();
+    let audit_role_codes = roles.clone();
+
+    let new_roles = match &roles {
         Some(values) => parse_roles(values)?,
         None => roles_for_user(&state.db, user_id).await?,
     };
-    let new_commune_id = payload.commune_id.or(existing.commune_id);
+    let new_commune_id = commune_id.unwrap_or(existing.commune_id);
     validate_user_assignment(&auth_user, new_commune_id, &new_roles)?;
 
-    let email = match payload.email {
+    let email = match email {
         Some(email) => normalize_email(&email)?,
         None => existing.email.clone(),
     };
-    let full_name = match payload.full_name {
+    let full_name = match full_name {
         Some(full_name) => required_text(full_name, "full_name")?,
         None => existing.full_name.clone(),
     };
-    let active = payload.active.unwrap_or(existing.active);
+    let active = active.unwrap_or(existing.active);
 
-    if let Some(password) = payload.password {
+    let mut transaction = state.db.begin().await?;
+    if let Some(password) = password {
         let password_hash = hash_password(&password)?;
         sqlx::query(
             r#"
@@ -247,11 +307,11 @@ async fn patch_user(
         .bind(&full_name)
         .bind(new_commune_id)
         .bind(active)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
 
-        revoke_all_refresh_tokens(&state.db, user_id).await?;
+        revoke_all_refresh_tokens_in_tx(&mut transaction, user_id).await?;
     } else {
         sqlx::query(
             r#"
@@ -269,27 +329,33 @@ async fn patch_user(
         .bind(&full_name)
         .bind(new_commune_id)
         .bind(active)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
         .map_err(map_database_error)?;
     }
 
-    if payload.roles.is_some() {
-        assign_roles(&state.db, user_id, &new_roles).await?;
+    if roles_changed {
+        assign_roles_in_tx(&mut transaction, user_id, &new_roles).await?;
     }
 
-    audit::record(
-        &state.db,
+    audit::record_for_commune_tx(
+        &mut transaction,
+        new_commune_id,
         Some(auth_user.id),
         "USER_UPDATED",
         "users",
         Some(user_id),
         Some(json!({ "email": existing.email, "commune_id": existing.commune_id })),
-        Some(json!({ "email": email, "commune_id": new_commune_id })),
+        Some(json!({
+            "email": email,
+            "commune_id": new_commune_id,
+            "roles": audit_role_codes,
+        })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
     .await;
+    transaction.commit().await?;
 
     let user = load_user_response(&state.db, user_id).await?;
     Ok(Json(user))
@@ -311,7 +377,10 @@ async fn response_from_row(pool: &PgPool, row: UserRow) -> Result<UserResponse, 
         email: row.email,
         full_name: row.full_name,
         commune_id: row.commune_id,
-        roles: roles.into_iter().map(|role| role.code().to_string()).collect(),
+        roles: roles
+            .into_iter()
+            .map(|role| role.code().to_string())
+            .collect(),
         active: row.active,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -350,9 +419,11 @@ fn validate_user_assignment(
     commune_id: Option<Uuid>,
     roles: &[Role],
 ) -> Result<(), ApiError> {
-    let is_super_admin_target = roles.iter().any(|role| *role == Role::SuperAdmin);
+    let is_super_admin_target = roles.contains(&Role::SuperAdmin);
     if is_super_admin_target && !actor.has_role(Role::SuperAdmin) {
-        return Err(ApiError::forbidden("Seul SUPER_ADMIN peut attribuer SUPER_ADMIN"));
+        return Err(ApiError::forbidden(
+            "Seul SUPER_ADMIN peut attribuer SUPER_ADMIN",
+        ));
     }
 
     if is_super_admin_target && commune_id.is_some() {
@@ -361,12 +432,9 @@ fn validate_user_assignment(
         ));
     }
 
-    let needs_commune = roles.iter().any(|role| {
-        matches!(
-            role,
-            Role::AdminCommune | Role::ApmAgent | Role::Receveur
-        )
-    });
+    let needs_commune = roles
+        .iter()
+        .any(|role| matches!(role, Role::AdminCommune | Role::ApmAgent | Role::Receveur));
     if needs_commune && commune_id.is_none() {
         return Err(ApiError::bad_request(
             "Ce role doit etre rattache a une commune",
@@ -378,7 +446,9 @@ fn validate_user_assignment(
             .commune_id
             .ok_or_else(|| ApiError::forbidden("Administrateur sans commune"))?;
         if commune_id != Some(actor_commune_id) {
-            return Err(ApiError::forbidden("Gestion limitee a la commune de l'utilisateur"));
+            return Err(ApiError::forbidden(
+                "Gestion limitee a la commune de l'utilisateur",
+            ));
         }
     }
 

@@ -48,6 +48,15 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "CONFLICT", message, None)
     }
 
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "TOO_MANY_REQUESTS",
+            message,
+            None,
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -122,9 +131,7 @@ pub fn map_database_error(error: sqlx::Error) -> ApiError {
                 )
             }
             Some("23514") => {
-                return ApiError::bad_request(
-                    "Donnees invalides: contrainte metier non respectee",
-                )
+                return ApiError::bad_request("Donnees invalides: contrainte metier non respectee")
             }
             _ => {}
         }

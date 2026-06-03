@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::resolve_commune_filter;
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -171,6 +172,7 @@ async fn create_zone(
     }
 
     let zone_id = Uuid::new_v4();
+    // Pas de vérification de cycle ici car la zone n'existe pas encore.
     sqlx::query(
         r#"
         INSERT INTO zones (id, commune_id, nom, type_zone, parent_id, active)
@@ -187,8 +189,9 @@ async fn create_zone(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(payload.commune_id),
         Some(auth_user.id),
         "ZONE_CREATED",
         "zones",
@@ -234,6 +237,8 @@ async fn patch_zone(
                 "La zone parente doit appartenir a la meme commune",
             ));
         }
+        // Vérification de cycle profond via CTE récursive
+        check_zone_cycle(&state.db, zone_id, parent_id).await?;
     }
 
     sqlx::query(
@@ -252,8 +257,9 @@ async fn patch_zone(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(existing.commune_id),
         Some(auth_user.id),
         "ZONE_UPDATED",
         "zones",
@@ -296,8 +302,9 @@ async fn delete_zone(
         .execute(&state.db)
         .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(existing.commune_id),
         Some(auth_user.id),
         "ZONE_DELETED",
         "zones",
@@ -334,26 +341,6 @@ fn row_to_zone(row: sqlx::postgres::PgRow) -> ZoneResponse {
     }
 }
 
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
-}
-
 fn validate_type_zone(value: String) -> Result<String, ApiError> {
     let upper = value.trim().to_ascii_uppercase();
     if VALID_TYPES.contains(&upper.as_str()) {
@@ -372,4 +359,35 @@ fn required_text(value: String, field: &'static str) -> Result<String, ApiError>
         return Err(ApiError::bad_request(format!("{field} est requis")));
     }
     Ok(trimmed)
+}
+
+/// Vérifie qu'assigner `new_parent_id` comme parent de `zone_id` ne crée pas de cycle.
+async fn check_zone_cycle(
+    pool: &sqlx::PgPool,
+    zone_id: Uuid,
+    new_parent_id: Uuid,
+) -> Result<(), ApiError> {
+    let cycle_exists: bool = sqlx::query_scalar(
+        r#"
+        WITH RECURSIVE ancestors AS (
+            SELECT id, parent_id FROM zones WHERE id = $1
+            UNION ALL
+            SELECT z.id, z.parent_id FROM zones z
+            JOIN ancestors a ON z.id = a.parent_id
+            WHERE z.deleted_at IS NULL
+        )
+        SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = $2)
+        "#,
+    )
+    .bind(new_parent_id)
+    .bind(zone_id)
+    .fetch_one(pool)
+    .await?;
+
+    if cycle_exists {
+        return Err(ApiError::bad_request(
+            "Cette relation de parente creerait un cycle dans la hierarchie des zones",
+        ));
+    }
+    Ok(())
 }

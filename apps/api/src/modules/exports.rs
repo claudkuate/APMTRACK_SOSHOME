@@ -1,12 +1,13 @@
 use axum::extract::{Query, State};
 use axum::response::Response;
-use axum::{Router};
+use axum::Router;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::ApiError;
+use crate::helpers::{csv_safe_field, resolve_commune_filter};
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -20,7 +21,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/exports/pvs", axum::routing::get(export_pvs))
         .route("/exports/payments", axum::routing::get(export_payments))
-        .route("/exports/signalements", axum::routing::get(export_signalements))
+        .route(
+            "/exports/signalements",
+            axum::routing::get(export_signalements),
+        )
         .route("/exports/agents", axum::routing::get(export_agents))
 }
 
@@ -47,7 +51,12 @@ async fn export_pvs(
     auth_user: AuthUser,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur, Role::Receveur])?;
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -71,7 +80,8 @@ async fn export_pvs(
         qb.push(" AND p.status = ").push_bind(s.clone());
     }
     apply_date_filter(&mut qb, "p.created_at", query.from, query.to);
-    qb.push(" ORDER BY p.created_at DESC LIMIT ").push_bind(MAX_ROWS);
+    qb.push(" ORDER BY p.created_at DESC LIMIT ")
+        .push_bind(MAX_ROWS);
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
@@ -105,8 +115,9 @@ async fn export_pvs(
         ));
     }
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        commune_filter,
         Some(auth_user.id),
         "EXPORT_PVS",
         "pvs",
@@ -126,7 +137,12 @@ async fn export_payments(
     auth_user: AuthUser,
     Query(query): Query<ExportQuery>,
 ) -> Result<Response, ApiError> {
-    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur, Role::Receveur])?;
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
@@ -150,7 +166,8 @@ async fn export_payments(
         qb.push(" AND pay.status = ").push_bind(s.clone());
     }
     apply_date_filter(&mut qb, "pay.created_at", query.from, query.to);
-    qb.push(" ORDER BY pay.created_at DESC LIMIT ").push_bind(MAX_ROWS);
+    qb.push(" ORDER BY pay.created_at DESC LIMIT ")
+        .push_bind(MAX_ROWS);
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
@@ -176,14 +193,17 @@ async fn export_payments(
             total,
             paid,
             csv_field(&status),
-            paid_at.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default(),
+            paid_at
+                .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default(),
             csv_field(&commune_nom),
             csv_field(&receveur),
         ));
     }
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        commune_filter,
         Some(auth_user.id),
         "EXPORT_PAYMENTS",
         "payments",
@@ -223,7 +243,8 @@ async fn export_signalements(
         qb.push(" AND s.status = ").push_bind(s.clone());
     }
     apply_date_filter(&mut qb, "s.created_at", query.from, query.to);
-    qb.push(" ORDER BY s.created_at DESC LIMIT ").push_bind(MAX_ROWS);
+    qb.push(" ORDER BY s.created_at DESC LIMIT ")
+        .push_bind(MAX_ROWS);
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
@@ -249,8 +270,9 @@ async fn export_signalements(
         ));
     }
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        commune_filter,
         Some(auth_user.id),
         "EXPORT_SIGNALEMENTS",
         "signalements",
@@ -290,11 +312,14 @@ async fn export_agents(
         qb.push(" AND a.status = ").push_bind(s.clone());
     }
     apply_date_filter(&mut qb, "a.created_at", query.from, query.to);
-    qb.push(" ORDER BY a.full_name ASC LIMIT ").push_bind(MAX_ROWS);
+    qb.push(" ORDER BY a.full_name ASC LIMIT ")
+        .push_bind(MAX_ROWS);
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
-    let mut csv = String::from("Matricule,Nom Complet,Grade,Statut,Formation NASLA,Date Prise Fonction,Commune,Créé le\n");
+    let mut csv = String::from(
+        "Matricule,Nom Complet,Grade,Statut,Formation NASLA,Date Prise Fonction,Commune,Créé le\n",
+    );
     for row in &rows {
         let matricule: String = row.get("matricule");
         let nom: String = row.get("full_name");
@@ -312,14 +337,17 @@ async fn export_agents(
             csv_field(&grade),
             csv_field(&status),
             if nasla { "Oui" } else { "Non" },
-            date_pf.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
+            date_pf
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
             csv_field(&commune_nom),
             created_at.format("%Y-%m-%d"),
         ));
     }
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        commune_filter,
         Some(auth_user.id),
         "EXPORT_AGENTS",
         "agents",
@@ -360,11 +388,7 @@ fn csv_response(content: String, name: &str) -> Result<Response, ApiError> {
 
 /// Échappe les champs CSV (guillemets doubles pour les virgules/guillemets).
 fn csv_field(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value.to_string()
-    }
+    csv_safe_field(value)
 }
 
 fn apply_date_filter(
@@ -374,37 +398,13 @@ fn apply_date_filter(
     to: Option<NaiveDate>,
 ) {
     if let Some(from_date) = from {
-        let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
-            from_date.and_hms_opt(0, 0, 0).unwrap(),
-            Utc,
-        );
+        let dt: DateTime<Utc> =
+            DateTime::from_naive_utc_and_offset(from_date.and_hms_opt(0, 0, 0).unwrap(), Utc);
         qb.push(format!(" AND {col} >= ")).push_bind(dt);
     }
     if let Some(to_date) = to {
-        let dt: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
-            to_date.and_hms_opt(23, 59, 59).unwrap(),
-            Utc,
-        );
+        let dt: DateTime<Utc> =
+            DateTime::from_naive_utc_and_offset(to_date.and_hms_opt(23, 59, 59).unwrap(), Utc);
         qb.push(format!(" AND {col} <= ")).push_bind(dt);
     }
-}
-
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
 }

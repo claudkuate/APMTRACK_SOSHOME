@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::resolve_commune_filter;
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -33,10 +34,7 @@ pub fn router() -> Router<AppState> {
             "/patrouilles/{id}/start",
             axum::routing::post(start_patrouille),
         )
-        .route(
-            "/patrouilles/{id}/end",
-            axum::routing::post(end_patrouille),
-        )
+        .route("/patrouilles/{id}/end", axum::routing::post(end_patrouille))
         .route(
             "/patrouilles/{id}/agents",
             axum::routing::get(list_patrouille_agents).post(assign_agent),
@@ -189,8 +187,9 @@ async fn create_patrouille(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(payload.commune_id),
         Some(auth_user.id),
         "PATROUILLE_CREATED",
         "patrouilles",
@@ -202,7 +201,10 @@ async fn create_patrouille(
     )
     .await;
 
-    Ok((StatusCode::CREATED, Json(load_patrouille(&state.db, id).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(load_patrouille(&state.db, id).await?),
+    ))
 }
 
 async fn patch_patrouille(
@@ -216,7 +218,9 @@ async fn patch_patrouille(
     auth_user.require_commune_access(existing.commune_id)?;
 
     if existing.status == "CLOTUREE" {
-        return Err(ApiError::conflict("Une patrouille clôturée ne peut pas être modifiée"));
+        return Err(ApiError::conflict(
+            "Une patrouille clôturée ne peut pas être modifiée",
+        ));
     }
 
     let nom = match payload.nom {
@@ -264,8 +268,9 @@ async fn start_patrouille(
     .execute(&state.db)
     .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(pat.commune_id),
         Some(auth_user.id),
         "PATROUILLE_STARTED",
         "patrouilles",
@@ -303,8 +308,9 @@ async fn end_patrouille(
     .execute(&state.db)
     .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(pat.commune_id),
         Some(auth_user.id),
         "PATROUILLE_ENDED",
         "patrouilles",
@@ -324,11 +330,7 @@ async fn list_patrouille_agents(
     auth_user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<PatrouilleAgentResponse>>, ApiError> {
-    auth_user.require_any_role(&[
-        Role::SuperAdmin,
-        Role::AdminCommune,
-        Role::Superviseur,
-    ])?;
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
     let pat = load_patrouille(&state.db, id).await?;
     auth_user.require_commune_access(pat.commune_id)?;
 
@@ -372,7 +374,9 @@ async fn assign_agent(
     auth_user.require_commune_access(pat.commune_id)?;
 
     if pat.status == "CLOTUREE" {
-        return Err(ApiError::conflict("Impossible d'assigner un agent à une patrouille clôturée"));
+        return Err(ApiError::conflict(
+            "Impossible d'assigner un agent à une patrouille clôturée",
+        ));
     }
 
     // Vérifier que l'agent est actif et appartient à la même commune
@@ -387,7 +391,9 @@ async fn assign_agent(
     match agent_check {
         None => return Err(ApiError::not_found("Agent introuvable dans cette commune")),
         Some(s) if s != "ACTIF" => {
-            return Err(ApiError::bad_request("Seul un agent actif peut être assigné"))
+            return Err(ApiError::bad_request(
+                "Seul un agent actif peut être assigné",
+            ))
         }
         _ => {}
     }
@@ -398,7 +404,9 @@ async fn assign_agent(
         .unwrap_or("MEMBRE")
         .to_uppercase();
     if role != "CHEF" && role != "MEMBRE" {
-        return Err(ApiError::bad_request("role_patrouille doit être CHEF ou MEMBRE"));
+        return Err(ApiError::bad_request(
+            "role_patrouille doit être CHEF ou MEMBRE",
+        ));
     }
 
     sqlx::query(
@@ -415,8 +423,9 @@ async fn assign_agent(
     .await
     .map_err(map_database_error)?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(pat.commune_id),
         Some(auth_user.id),
         "PATROUILLE_AGENT_ASSIGNED",
         "patrouille_agents",
@@ -428,7 +437,10 @@ async fn assign_agent(
     )
     .await;
 
-    Ok((StatusCode::CREATED, Json(json!({ "assigned": true, "agent_id": payload.agent_id, "role": role }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "assigned": true, "agent_id": payload.agent_id, "role": role })),
+    ))
 }
 
 async fn remove_agent(
@@ -441,19 +453,20 @@ async fn remove_agent(
     auth_user.require_commune_access(pat.commune_id)?;
 
     if pat.status == "CLOTUREE" {
-        return Err(ApiError::conflict("Impossible de modifier une patrouille clôturée"));
+        return Err(ApiError::conflict(
+            "Impossible de modifier une patrouille clôturée",
+        ));
     }
 
-    sqlx::query(
-        "DELETE FROM patrouille_agents WHERE patrouille_id = $1 AND agent_id = $2",
-    )
-    .bind(id)
-    .bind(agent_id)
-    .execute(&state.db)
-    .await?;
+    sqlx::query("DELETE FROM patrouille_agents WHERE patrouille_id = $1 AND agent_id = $2")
+        .bind(id)
+        .bind(agent_id)
+        .execute(&state.db)
+        .await?;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(pat.commune_id),
         Some(auth_user.id),
         "PATROUILLE_AGENT_REMOVED",
         "patrouille_agents",
@@ -508,26 +521,6 @@ fn apply_filters(
     if let Some(s) = status {
         qb.push(" AND status = ").push_bind(s.to_string());
     }
-}
-
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
 }
 
 fn required_text(value: String, field: &'static str) -> Result<String, ApiError> {

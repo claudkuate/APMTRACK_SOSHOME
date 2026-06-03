@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # rsa 0.9.10 via jsonwebtoken/sqlx; no fixed upgrade is available as of 2026-06-03.
+    # The backend currently signs/verifies HS256 JWTs, not RSA JWTs.
+    "RUSTSEC-2023-0071",
+]

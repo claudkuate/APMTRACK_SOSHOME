@@ -51,17 +51,29 @@ pub fn parse_roles(values: &[String]) -> Result<Vec<Role>, ApiError> {
         return Err(ApiError::bad_request("Au moins un role est requis"));
     }
 
-    values
+    let roles = values
         .iter()
         .map(|value| {
             Role::from_code(value.trim())
                 .ok_or_else(|| ApiError::bad_request(format!("Role inconnu: {value}")))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut seen = std::collections::HashSet::new();
+    for role in &roles {
+        if !seen.insert(*role) {
+            return Err(ApiError::bad_request(format!(
+                "Role duplique: {}",
+                role.code()
+            )));
+        }
+    }
+
+    Ok(roles)
 }
 
 pub fn has_role(roles: &[Role], role: Role) -> bool {
-    roles.iter().any(|candidate| *candidate == role)
+    roles.contains(&role)
 }
 
 pub fn has_any_role(roles: &[Role], allowed: &[Role]) -> bool {

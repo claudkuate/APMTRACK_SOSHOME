@@ -1,8 +1,8 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::{Json, Router};
-use chrono::{DateTime, Datelike, Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
@@ -10,10 +10,12 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::{is_agent_only, resolve_commune_filter, validate_gps};
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
+use crate::sequences::{next_document_sequence, SEQUENCE_PV};
 use crate::state::AppState;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -23,20 +25,14 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pvs", axum::routing::get(list_pvs).post(create_pv))
-        .route(
-            "/pvs/{id}",
-            axum::routing::get(get_pv).delete(cancel_pv),
-        )
+        .route("/pvs/{id}", axum::routing::get(get_pv).delete(cancel_pv))
         .route("/pvs/{id}/status", axum::routing::patch(patch_pv_status))
         .route("/pvs/{id}/qr", axum::routing::get(get_pv_qr))
         .route("/pvs/{id}/pdf", axum::routing::get(get_pv_pdf))
 }
 
 pub fn public_router() -> Router<AppState> {
-    Router::new().route(
-        "/pvs/{pv_number}",
-        axum::routing::get(verify_pv_public),
-    )
+    Router::new().route("/pvs/{pv_number}", axum::routing::get(verify_pv_public))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -58,6 +54,7 @@ pub struct PvResponse {
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
     pub amount_initial: Option<f64>,
+    pub amount_initial_fcfa: Option<i64>,
     pub status: String,
     pub notes_internes: Option<String>,
     pub created_by: Uuid,
@@ -71,6 +68,7 @@ pub struct PvPublicResponse {
     pub commune_id: Uuid,
     pub status: String,
     pub amount_initial: Option<f64>,
+    pub amount_initial_fcfa: Option<i64>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -136,20 +134,11 @@ async fn list_pvs(
 
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
-    // APM_AGENT voit seulement ses propres PV
-    let agent_filter = if auth_user.has_role(Role::ApmAgent)
-        && !auth_user.has_role(Role::SuperAdmin)
-        && !auth_user.has_role(Role::AdminCommune)
-        && !auth_user.has_role(Role::Superviseur)
-        && !auth_user.has_role(Role::Receveur)
-    {
-        // On doit résoudre l'agent_id lié à cet utilisateur
-        let agent_id: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM agents WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1",
-        )
-        .bind(auth_user.id)
-        .fetch_optional(&state.db)
-        .await?;
+    let agent_filter = if is_agent_only(&auth_user) {
+        let agent_id = active_agent_id_for_user(&state.db, &auth_user).await?;
+        if agent_id.is_none() {
+            return Ok(Json(Paginated::new(Vec::new(), &pagination, 0)));
+        }
         agent_id
     } else {
         query.agent_id
@@ -157,12 +146,22 @@ async fn list_pvs(
 
     let mut count_qb: QueryBuilder<sqlx::Postgres> =
         QueryBuilder::new("SELECT COUNT(*) AS total FROM pvs WHERE deleted_at IS NULL");
-    apply_pv_filters(&mut count_qb, commune_filter, agent_filter, query.status.as_deref());
+    apply_pv_filters(
+        &mut count_qb,
+        commune_filter,
+        agent_filter,
+        query.status.as_deref(),
+    );
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
     let mut qb: QueryBuilder<sqlx::Postgres> =
         QueryBuilder::new("SELECT * FROM pvs WHERE deleted_at IS NULL");
-    apply_pv_filters(&mut qb, commune_filter, agent_filter, query.status.as_deref());
+    apply_pv_filters(
+        &mut qb,
+        commune_filter,
+        agent_filter,
+        query.status.as_deref(),
+    );
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(pagination.limit)
         .push(" OFFSET ")
@@ -187,6 +186,7 @@ async fn get_pv(
     ])?;
     let pv = load_pv(&state.db, id).await?;
     auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
     Ok(Json(pv))
 }
 
@@ -200,31 +200,30 @@ async fn create_pv(
     let commune_id = auth_user
         .commune_id
         .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
+    validate_gps(payload.gps_latitude, payload.gps_longitude)?;
 
-    // Vérifier que l'agent est actif
+    let mut tx = state.db.begin().await?;
+
     let agent_row = sqlx::query(
         "SELECT id, status FROM agents WHERE user_id = $1 AND commune_id = $2 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(auth_user.id)
     .bind(commune_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::forbidden("Agent introuvable pour cet utilisateur et cette commune"))?;
 
     let agent_status: String = agent_row.get("status");
     if agent_status != "ACTIF" {
-        return Err(ApiError::forbidden(
-            "Seul un agent actif peut creer un PV",
-        ));
+        return Err(ApiError::forbidden("Seul un agent actif peut creer un PV"));
     }
     let agent_id: Uuid = agent_row.get("id");
 
-    // Charger l'intervention (doit appartenir à la commune)
     let intervention = sqlx::query(
-        "SELECT id, commune_id, sujet_paiement, montant, delai_paiement_jours, taux_penalite, active FROM interventions WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT id, commune_id, sujet_paiement, montant, montant_fcfa, delai_paiement_jours, taux_penalite, active FROM interventions WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(payload.intervention_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::not_found("Intervention introuvable"))?;
 
@@ -237,35 +236,38 @@ async fn create_pv(
 
     let active: bool = intervention.get("active");
     if !active {
-        return Err(ApiError::bad_request("L'intervention selectionnee est inactive"));
+        return Err(ApiError::bad_request(
+            "L'intervention selectionnee est inactive",
+        ));
     }
 
     let sujet_paiement: bool = intervention.get("sujet_paiement");
     let montant: Option<f64> = intervention.get("montant");
+    let montant_fcfa: Option<i64> = intervention.get("montant_fcfa");
 
-    // Vérifier double verbalisation
     let verb_id = payload.verbalized_identifier.as_deref();
     let plate = payload.vehicle_plate.as_deref();
-    check_double_verbalisation(&state.db, commune_id, payload.intervention_id, verb_id, plate)
+    check_double_verbalisation(&mut tx, commune_id, payload.intervention_id, verb_id, plate)
         .await?;
 
-    // Générer le numéro PV
-    let commune_code: String =
-        sqlx::query_scalar("SELECT code FROM communes WHERE id = $1")
-            .bind(commune_id)
-            .fetch_one(&state.db)
-            .await?;
-    let pv_number = generate_pv_number(&state.db, &commune_code, commune_id).await?;
+    let commune_code: String = sqlx::query_scalar("SELECT code FROM communes WHERE id = $1")
+        .bind(commune_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let (year, seq) = next_document_sequence(&mut tx, commune_id, SEQUENCE_PV).await?;
+    let pv_number = format!(
+        "PV-{}-{}-{:06}",
+        commune_code.to_uppercase().replace(' ', "-"),
+        year,
+        seq
+    );
 
-    // Générer le QR code (SVG)
     let public_url = format!(
         "{}/api/v1/public/pvs/{}",
-        state.config.public_api_url,
-        pv_number
+        state.config.public_api_url, pv_number
     );
     let qr_svg = generate_qr_svg(&public_url)?;
 
-    // Statut initial
     let initial_status = if sujet_paiement {
         "EN_ATTENTE_PAIEMENT"
     } else {
@@ -280,12 +282,12 @@ async fn create_pv(
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
             verbalized_name, verbalized_identifier, vehicle_plate,
             location_description, gps_latitude, gps_longitude,
-            amount_initial, status, qr_code_svg, notes_internes, created_by
+            amount_initial, amount_initial_fcfa, status, qr_code_svg, notes_internes, created_by
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             $7, $8, $9,
             $10, $11, $12,
-            $13, $14, $15, $16, $17
+            $13, $14, $15, $16, $17, $18
         )
         "#,
     )
@@ -302,19 +304,20 @@ async fn create_pv(
     .bind(payload.gps_latitude)
     .bind(payload.gps_longitude)
     .bind(montant)
+    .bind(montant_fcfa)
     .bind(initial_status)
     .bind(&qr_svg)
     .bind(clean_optional(payload.notes_internes))
     .bind(auth_user.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
 
-    // Enregistrer l'historique initial
-    record_status_change(&state.db, id, None, initial_status, auth_user.id, None).await;
+    record_status_change_tx(&mut tx, id, None, initial_status, auth_user.id, None).await;
 
-    audit::record(
-        &state.db,
+    audit::record_for_commune_tx(
+        &mut tx,
+        Some(commune_id),
         Some(auth_user.id),
         "PV_CREATED",
         "pvs",
@@ -332,9 +335,10 @@ async fn create_pv(
     )
     .await;
 
+    tx.commit().await?;
+
     Ok((StatusCode::CREATED, Json(load_pv(&state.db, id).await?)))
 }
-
 async fn patch_pv_status(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -366,8 +370,9 @@ async fn patch_pv_status(
     )
     .await;
 
-    audit::record(
+    audit::record_for_commune(
         &state.db,
+        Some(pv.commune_id),
         Some(auth_user.id),
         "PV_STATUS_CHANGED",
         "pvs",
@@ -405,10 +410,19 @@ async fn cancel_pv(
     .execute(&state.db)
     .await?;
 
-    record_status_change(&state.db, id, Some(&pv.status), "ANNULE", auth_user.id, None).await;
-
-    audit::record(
+    record_status_change(
         &state.db,
+        id,
+        Some(&pv.status),
+        "ANNULE",
+        auth_user.id,
+        None,
+    )
+    .await;
+
+    audit::record_for_commune(
+        &state.db,
+        Some(pv.commune_id),
         Some(auth_user.id),
         "PV_CANCELLED",
         "pvs",
@@ -437,6 +451,7 @@ async fn get_pv_qr(
     ])?;
     let pv = load_pv(&state.db, id).await?;
     auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
 
     let svg: String = sqlx::query_scalar("SELECT qr_code_svg FROM pvs WHERE id = $1")
         .bind(id)
@@ -445,11 +460,7 @@ async fn get_pv_qr(
 
     use axum::http::header;
     use axum::response::IntoResponse;
-    Ok((
-        [(header::CONTENT_TYPE, "image/svg+xml")],
-        svg,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "image/svg+xml")], svg).into_response())
 }
 
 async fn get_pv_pdf(
@@ -466,6 +477,7 @@ async fn get_pv_pdf(
     ])?;
     let pv = load_pv(&state.db, id).await?;
     auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
 
     let pdf_bytes = crate::modules::pdf::generate_pv_pdf(&state.db, &pv).await?;
 
@@ -484,10 +496,18 @@ async fn get_pv_pdf(
 
 async fn verify_pv_public(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(pv_number): Path<String>,
 ) -> Result<Json<PvPublicResponse>, ApiError> {
+    state.rate_limiter.check(
+        "public:pvs:verify",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
     let row = sqlx::query(
-        "SELECT id, commune_id, status, amount_initial, created_at FROM pvs WHERE pv_number = $1 AND deleted_at IS NULL",
+        "SELECT id, commune_id, status, amount_initial, amount_initial_fcfa, created_at FROM pvs WHERE pv_number = $1 AND deleted_at IS NULL",
     )
     .bind(&pv_number)
     .fetch_optional(&state.db)
@@ -499,6 +519,7 @@ async fn verify_pv_public(
         commune_id: row.get("commune_id"),
         status: row.get("status"),
         amount_initial: row.get("amount_initial"),
+        amount_initial_fcfa: row.get("amount_initial_fcfa"),
         created_at: row.get("created_at"),
     }))
 }
@@ -516,6 +537,49 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
     Ok(row_to_pv(row))
 }
 
+async fn require_pv_read_access(
+    pool: &PgPool,
+    auth_user: &AuthUser,
+    pv: &PvResponse,
+) -> Result<(), ApiError> {
+    if !is_agent_only(auth_user) {
+        return Ok(());
+    }
+
+    let agent_id = active_agent_id_for_user(pool, auth_user)
+        .await?
+        .ok_or_else(|| ApiError::forbidden("Agent actif introuvable pour cet utilisateur"))?;
+    if pv.agent_id != agent_id {
+        return Err(ApiError::forbidden("Acces refuse a ce PV"));
+    }
+    Ok(())
+}
+
+async fn active_agent_id_for_user(
+    pool: &PgPool,
+    auth_user: &AuthUser,
+) -> Result<Option<Uuid>, ApiError> {
+    let commune_id = auth_user
+        .commune_id
+        .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
+    let agent_id = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM agents
+        WHERE user_id = $1
+          AND commune_id = $2
+          AND status = 'ACTIF'
+          AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(auth_user.id)
+    .bind(commune_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(agent_id)
+}
+
 fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
     PvResponse {
         id: row.get("id"),
@@ -531,6 +595,7 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
         gps_latitude: row.get("gps_latitude"),
         gps_longitude: row.get("gps_longitude"),
         amount_initial: row.get("amount_initial"),
+        amount_initial_fcfa: row.get("amount_initial_fcfa"),
         status: row.get("status"),
         notes_internes: row.get("notes_internes"),
         created_by: row.get("created_by"),
@@ -540,51 +605,31 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
 }
 
 /// Génère un numéro PV unique : PV-{CODE}-{YEAR}-{SEQ:06}
-async fn generate_pv_number(pool: &PgPool, commune_code: &str, commune_id: Uuid) -> Result<String, ApiError> {
-    let year = Utc::now().year();
-    let seq: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) + 1 FROM pvs WHERE commune_id = $1 AND EXTRACT(YEAR FROM created_at) = $2",
-    )
-    .bind(commune_id)
-    .bind(year as i64)
-    .fetch_one(pool)
-    .await?;
-
-    let code = commune_code.to_uppercase().replace(' ', "-");
-    Ok(format!("PV-{}-{}-{:06}", code, year, seq))
-}
-
-/// Génère un SVG de QR code sans dépendance externe lourde.
 fn generate_qr_svg(data: &str) -> Result<String, ApiError> {
-    use qrcode::{QrCode, EcLevel};
     use qrcode::render::svg;
+    use qrcode::{EcLevel, QrCode};
 
     let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::M)
         .map_err(|e| ApiError::internal(format!("QR code generation failed: {e}")))?;
 
-    let svg_string = code
-        .render::<svg::Color>()
-        .min_dimensions(200, 200)
-        .build();
+    let svg_string = code.render::<svg::Color>().min_dimensions(200, 200).build();
 
     Ok(svg_string)
 }
 
 /// Vérifie qu'aucun PV actif similaire n'existe (double verbalisation).
 async fn check_double_verbalisation(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commune_id: Uuid,
     intervention_id: Uuid,
     verbalized_identifier: Option<&str>,
     vehicle_plate: Option<&str>,
 ) -> Result<(), ApiError> {
-    // Vérifier la config commune
-    let bloquant: bool = sqlx::query_scalar(
-        "SELECT double_verbalisation_bloquant FROM communes WHERE id = $1",
-    )
-    .bind(commune_id)
-    .fetch_one(pool)
-    .await?;
+    let bloquant: bool =
+        sqlx::query_scalar("SELECT double_verbalisation_bloquant FROM communes WHERE id = $1")
+            .bind(commune_id)
+            .fetch_one(&mut **tx)
+            .await?;
 
     if !bloquant {
         return Ok(());
@@ -592,6 +637,7 @@ async fn check_double_verbalisation(
 
     if let Some(vid) = verbalized_identifier {
         if !vid.trim().is_empty() {
+            lock_double_verbalisation(tx, commune_id, intervention_id, "identifier", vid).await?;
             let existing: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT pv_number FROM pvs
@@ -606,7 +652,7 @@ async fn check_double_verbalisation(
             .bind(commune_id)
             .bind(intervention_id)
             .bind(vid)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await?;
 
             if let Some(pv_num) = existing {
@@ -620,6 +666,7 @@ async fn check_double_verbalisation(
 
     if let Some(plate) = vehicle_plate {
         if !plate.trim().is_empty() {
+            lock_double_verbalisation(tx, commune_id, intervention_id, "plate", plate).await?;
             let existing: Option<String> = sqlx::query_scalar(
                 r#"
                 SELECT pv_number FROM pvs
@@ -634,7 +681,7 @@ async fn check_double_verbalisation(
             .bind(commune_id)
             .bind(intervention_id)
             .bind(plate)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await?;
 
             if let Some(pv_num) = existing {
@@ -649,6 +696,23 @@ async fn check_double_verbalisation(
     Ok(())
 }
 
+async fn lock_double_verbalisation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    intervention_id: Uuid,
+    kind: &str,
+    value: &str,
+) -> Result<(), ApiError> {
+    let key = format!(
+        "double-verbalisation:{commune_id}:{intervention_id}:{kind}:{}",
+        value.trim().to_ascii_uppercase()
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
 fn validate_status_transition(current: &str, next: &str) -> Result<(), ApiError> {
     let allowed: &[&str] = match current {
         "BROUILLON" => &["EMIS", "ANNULE"],
@@ -691,6 +755,29 @@ pub async fn record_status_change(
     .await;
 }
 
+pub async fn record_status_change_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pv_id: Uuid,
+    old_status: Option<&str>,
+    new_status: &str,
+    changed_by: Uuid,
+    reason: Option<&str>,
+) {
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO pv_status_history (pv_id, old_status, new_status, changed_by, reason)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(pv_id)
+    .bind(old_status)
+    .bind(new_status)
+    .bind(changed_by)
+    .bind(reason)
+    .execute(&mut **tx)
+    .await;
+}
+
 fn apply_pv_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     commune_filter: Option<Uuid>,
@@ -706,26 +793,6 @@ fn apply_pv_filters(
     if let Some(s) = status {
         qb.push(" AND status = ").push_bind(s.to_string());
     }
-}
-
-fn resolve_commune_filter(
-    auth_user: &AuthUser,
-    requested: Option<Uuid>,
-) -> Result<Option<Uuid>, ApiError> {
-    if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        return Ok(requested);
-    }
-    let user_commune = auth_user
-        .commune_id
-        .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-    if let Some(req) = requested {
-        if req != user_commune {
-            return Err(ApiError::forbidden("Acces refuse a cette commune"));
-        }
-    }
-    Ok(Some(user_commune))
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {
