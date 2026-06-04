@@ -67,6 +67,62 @@
         }
       }
     },
+    "/api/v1/search": {
+      "get": {
+        "summary": "Recherche metier filtree par role et commune",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 2
+            }
+          },
+          {
+            "name": "commune_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resultats accessibles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SearchResult"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Non authentifie"
+          },
+          "403": {
+            "description": "Role non autorise"
+          }
+        }
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "security": [],
@@ -115,6 +171,27 @@
         "responses": {
           "200": {
             "description": "Nouveaux tokens emis",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/refresh-cookie": {
+      "post": {
+        "security": [],
+        "summary": "Rafraichit une session Angular via cookie HttpOnly",
+        "responses": {
+          "200": {
+            "description": "Nouveaux tokens emis et cookie refresh mis a jour",
             "content": {
               "application/json": {
                 "schema": {
@@ -391,6 +468,45 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Agent"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agents/import-csv": {
+      "post": {
+        "summary": "Importe des agents par CSV pour une commune",
+        "parameters": [
+          {
+            "name": "commune_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string",
+                "description": "Colonnes: matricule, full_name, grade, date_prise_fonction, formation_nasla, telephone, email"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Resultat de l'import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportAgentsResponse"
                 }
               }
             }
@@ -2578,6 +2694,29 @@
       "AgentPage": {
         "$ref": "#/components/schemas/PaginatedAgents"
       },
+      "ImportAgentsResponse": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "PublicAgentVerification": {
         "type": "object",
         "properties": {
@@ -2745,14 +2884,9 @@
       "CreatePvRequest": {
         "type": "object",
         "required": [
-          "commune_id",
           "intervention_id"
         ],
         "properties": {
-          "commune_id": {
-            "type": "string",
-            "format": "uuid"
-          },
           "intervention_id": {
             "type": "string",
             "format": "uuid"
@@ -3150,6 +3284,40 @@
               "null"
             ],
             "format": "date-time"
+          }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": [
+          "module",
+          "id",
+          "title",
+          "detail",
+          "route"
+        ],
+        "properties": {
+          "module": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route": {
+            "type": "string"
           }
         }
       },

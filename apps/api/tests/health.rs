@@ -47,8 +47,10 @@ async fn openapi_contract_is_served() {
     for path in [
         "/docs/openapi.json",
         "/api/v1/",
+        "/api/v1/search",
         "/api/v1/auth/login",
         "/api/v1/auth/refresh",
+        "/api/v1/auth/refresh-cookie",
         "/api/v1/auth/logout",
         "/api/v1/auth/me",
         "/api/v1/users",
@@ -56,6 +58,7 @@ async fn openapi_contract_is_served() {
         "/api/v1/communes",
         "/api/v1/communes/{id}",
         "/api/v1/agents",
+        "/api/v1/agents/import-csv",
         "/api/v1/agents/{id}",
         "/api/v1/agents/{id}/suspend",
         "/api/v1/agents/{id}/reactivate",

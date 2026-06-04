@@ -123,8 +123,21 @@ async fn list_payments(
     }
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let mut qb: QueryBuilder<sqlx::Postgres> =
-        QueryBuilder::new("SELECT * FROM payments WHERE 1=1");
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        r#"
+        SELECT
+            id, pv_id, commune_id,
+            amount_due::DOUBLE PRECISION AS amount_due,
+            amount_penalty::DOUBLE PRECISION AS amount_penalty,
+            amount_total::DOUBLE PRECISION AS amount_total,
+            amount_paid::DOUBLE PRECISION AS amount_paid,
+            amount_due_fcfa, amount_penalty_fcfa, amount_total_fcfa,
+            amount_paid_fcfa, receiver_user_id, paid_at, status,
+            receipt_number, created_at
+        FROM payments
+        WHERE 1=1
+        "#,
+    );
     if let Some(id) = commune_filter {
         qb.push(" AND commune_id = ").push_bind(id);
     }
@@ -169,11 +182,11 @@ async fn list_pending(
             p.id AS pv_id,
             p.pv_number,
             p.commune_id,
-            p.amount_initial,
+            p.amount_initial::DOUBLE PRECISION AS amount_initial,
             p.amount_initial_fcfa,
             p.created_at,
             i.delai_paiement_jours,
-            i.taux_penalite
+            i.taux_penalite::DOUBLE PRECISION AS taux_penalite
         FROM pvs p
         JOIN interventions i ON p.intervention_id = i.id
         WHERE p.status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
@@ -255,7 +268,10 @@ async fn validate_payment(
 
     let pv_row = sqlx::query(
         r#"
-        SELECT *
+        SELECT
+            id, commune_id, status, intervention_id, pv_number,
+            amount_initial::DOUBLE PRECISION AS amount_initial,
+            amount_initial_fcfa, created_at
         FROM pvs
         WHERE id = $1 AND deleted_at IS NULL
         FOR UPDATE
@@ -293,11 +309,18 @@ async fn validate_payment(
     }
 
     let intervention_id: Uuid = pv_row.get("intervention_id");
-    let interv_row =
-        sqlx::query("SELECT delai_paiement_jours, taux_penalite FROM interventions WHERE id = $1")
-            .bind(intervention_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let interv_row = sqlx::query(
+        r#"
+        SELECT
+            delai_paiement_jours,
+            taux_penalite::DOUBLE PRECISION AS taux_penalite
+        FROM interventions
+        WHERE id = $1
+        "#,
+    )
+    .bind(intervention_id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     let delai: i32 = interv_row
         .get::<Option<i32>, _>("delai_paiement_jours")
@@ -441,7 +464,21 @@ async fn get_receipt_pdf(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn load_payment(pool: &PgPool, id: Uuid) -> Result<PaymentResponse, ApiError> {
-    let row = sqlx::query("SELECT * FROM payments WHERE id = $1")
+    let row = sqlx::query(
+        r#"
+        SELECT
+            id, pv_id, commune_id,
+            amount_due::DOUBLE PRECISION AS amount_due,
+            amount_penalty::DOUBLE PRECISION AS amount_penalty,
+            amount_total::DOUBLE PRECISION AS amount_total,
+            amount_paid::DOUBLE PRECISION AS amount_paid,
+            amount_due_fcfa, amount_penalty_fcfa, amount_total_fcfa,
+            amount_paid_fcfa, receiver_user_id, paid_at, status,
+            receipt_number, created_at
+        FROM payments
+        WHERE id = $1
+        "#,
+    )
         .bind(id)
         .fetch_optional(pool)
         .await?

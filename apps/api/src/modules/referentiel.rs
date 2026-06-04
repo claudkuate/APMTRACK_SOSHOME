@@ -596,8 +596,10 @@ struct CreateInterventionRequest {
     description: Option<String>,
     sujet_paiement: bool,
     montant: Option<f64>,
+    montant_fcfa: Option<i64>,
     delai_paiement_jours: Option<i32>,
     taux_penalite: Option<f64>,
+    taux_penalite_basis_points: Option<i32>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -609,8 +611,10 @@ struct PatchInterventionRequest {
     description: Option<String>,
     sujet_paiement: Option<bool>,
     montant: Option<f64>,
+    montant_fcfa: Option<i64>,
     delai_paiement_jours: Option<i32>,
     taux_penalite: Option<f64>,
+    taux_penalite_basis_points: Option<i32>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -626,8 +630,10 @@ pub struct InterventionResponse {
     pub description: Option<String>,
     pub sujet_paiement: bool,
     pub montant: Option<f64>,
+    pub montant_fcfa: Option<i64>,
     pub delai_paiement_jours: Option<i32>,
     pub taux_penalite: Option<f64>,
+    pub taux_penalite_basis_points: Option<i32>,
     pub reference_deliberation: Option<String>,
     pub piece_justificative: Option<String>,
     pub active: bool,
@@ -666,7 +672,20 @@ async fn list_interventions(
     );
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let base_select = "SELECT i.*, it.category_id FROM interventions i JOIN intervention_types it ON i.type_id = it.id WHERE i.deleted_at IS NULL";
+    let base_select = r#"
+        SELECT
+            i.id, i.commune_id, it.category_id, i.type_id, i.nom, i.description,
+            i.sujet_paiement,
+            i.montant::DOUBLE PRECISION AS montant,
+            i.montant_fcfa, i.delai_paiement_jours,
+            i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            i.taux_penalite_basis_points,
+            i.reference_deliberation, i.piece_justificative, i.active,
+            i.created_at, i.updated_at
+        FROM interventions i
+        JOIN intervention_types it ON i.type_id = it.id
+        WHERE i.deleted_at IS NULL
+    "#;
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(base_select);
     apply_intervention_filters(
         &mut qb,
@@ -727,9 +746,13 @@ async fn create_intervention(
         }
     }
 
+    let montant_fcfa = normalize_fcfa(payload.montant_fcfa, payload.montant)?;
+    let taux_penalite_basis_points =
+        normalize_basis_points(payload.taux_penalite_basis_points, payload.taux_penalite)?;
     validate_paiement_rules(
         payload.sujet_paiement,
         payload.montant,
+        montant_fcfa,
         payload.reference_deliberation.as_deref(),
     )?;
 
@@ -740,10 +763,11 @@ async fn create_intervention(
         r#"
         INSERT INTO interventions (
             id, commune_id, type_id, nom, description,
-            sujet_paiement, montant, delai_paiement_jours, taux_penalite,
+            sujet_paiement, montant, montant_fcfa, delai_paiement_jours,
+            taux_penalite, taux_penalite_basis_points,
             reference_deliberation, piece_justificative, active
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         "#,
     )
     .bind(id)
@@ -753,8 +777,10 @@ async fn create_intervention(
     .bind(clean_optional(payload.description))
     .bind(payload.sujet_paiement)
     .bind(payload.montant)
+    .bind(montant_fcfa)
     .bind(payload.delai_paiement_jours)
     .bind(payload.taux_penalite)
+    .bind(taux_penalite_basis_points)
     .bind(clean_optional(payload.reference_deliberation))
     .bind(clean_optional(payload.piece_justificative))
     .bind(payload.active.unwrap_or(true))
@@ -797,6 +823,10 @@ async fn patch_intervention(
     // Résoudre les valeurs finales avant validation
     let sujet_paiement = payload.sujet_paiement.unwrap_or(existing.sujet_paiement);
     let montant = payload.montant.or(existing.montant);
+    let montant_fcfa = payload
+        .montant_fcfa
+        .or_else(|| payload.montant.map(|amount| amount.round() as i64))
+        .or(existing.montant_fcfa);
     let reference_deliberation = payload
         .reference_deliberation
         .as_deref()
@@ -805,7 +835,18 @@ async fn patch_intervention(
         .map(String::from)
         .or(existing.reference_deliberation.clone());
 
-    validate_paiement_rules(sujet_paiement, montant, reference_deliberation.as_deref())?;
+    let taux_penalite_basis_points = normalize_basis_points(
+        payload.taux_penalite_basis_points,
+        payload.taux_penalite,
+    )?
+    .or(existing.taux_penalite_basis_points);
+
+    validate_paiement_rules(
+        sujet_paiement,
+        montant,
+        montant_fcfa,
+        reference_deliberation.as_deref(),
+    )?;
 
     sqlx::query(
         r#"
@@ -814,11 +855,13 @@ async fn patch_intervention(
             description = $3,
             sujet_paiement = $4,
             montant = $5,
-            delai_paiement_jours = $6,
-            taux_penalite = $7,
-            reference_deliberation = $8,
-            piece_justificative = $9,
-            active = $10,
+            montant_fcfa = $6,
+            delai_paiement_jours = $7,
+            taux_penalite = $8,
+            taux_penalite_basis_points = $9,
+            reference_deliberation = $10,
+            piece_justificative = $11,
+            active = $12,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -828,12 +871,14 @@ async fn patch_intervention(
     .bind(payload.description.or(existing.description.clone()))
     .bind(sujet_paiement)
     .bind(montant)
+    .bind(montant_fcfa)
     .bind(
         payload
             .delai_paiement_jours
             .or(existing.delai_paiement_jours),
     )
     .bind(payload.taux_penalite.or(existing.taux_penalite))
+    .bind(taux_penalite_basis_points)
     .bind(reference_deliberation)
     .bind(
         payload
@@ -853,7 +898,7 @@ async fn patch_intervention(
         "interventions",
         Some(id),
         Some(json!({ "nom": existing.nom, "montant": existing.montant })),
-        Some(json!({ "nom": nom, "montant": montant })),
+        Some(json!({ "nom": nom, "montant": montant, "montant_fcfa": montant_fcfa })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
@@ -895,7 +940,20 @@ async fn delete_intervention(
 
 pub async fn load_intervention(pool: &PgPool, id: Uuid) -> Result<InterventionResponse, ApiError> {
     let row = sqlx::query(
-        "SELECT i.*, it.category_id FROM interventions i JOIN intervention_types it ON i.type_id = it.id WHERE i.id = $1 AND i.deleted_at IS NULL"
+        r#"
+        SELECT
+            i.id, i.commune_id, it.category_id, i.type_id, i.nom, i.description,
+            i.sujet_paiement,
+            i.montant::DOUBLE PRECISION AS montant,
+            i.montant_fcfa, i.delai_paiement_jours,
+            i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            i.taux_penalite_basis_points,
+            i.reference_deliberation, i.piece_justificative, i.active,
+            i.created_at, i.updated_at
+        FROM interventions i
+        JOIN intervention_types it ON i.type_id = it.id
+        WHERE i.id = $1 AND i.deleted_at IS NULL
+        "#
     )
     .bind(id)
     .fetch_optional(pool)
@@ -914,8 +972,10 @@ fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
         description: row.get("description"),
         sujet_paiement: row.get("sujet_paiement"),
         montant: row.get("montant"),
+        montant_fcfa: row.get("montant_fcfa"),
         delai_paiement_jours: row.get("delai_paiement_jours"),
         taux_penalite: row.get("taux_penalite"),
+        taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
         reference_deliberation: row.get("reference_deliberation"),
         piece_justificative: row.get("piece_justificative"),
         active: row.get("active"),
@@ -956,12 +1016,13 @@ fn apply_intervention_filters(
 fn validate_paiement_rules(
     sujet_paiement: bool,
     montant: Option<f64>,
+    montant_fcfa: Option<i64>,
     reference_deliberation: Option<&str>,
 ) -> Result<(), ApiError> {
     if !sujet_paiement {
         return Ok(());
     }
-    if montant.map(|m| m <= 0.0).unwrap_or(true) {
+    if montant_fcfa.map(|m| m <= 0).unwrap_or_else(|| montant.map(|m| m <= 0.0).unwrap_or(true)) {
         return Err(ApiError::bad_request(
             "Une intervention payante doit avoir un montant positif",
         ));
@@ -975,6 +1036,24 @@ fn validate_paiement_rules(
         ));
     }
     Ok(())
+}
+
+fn normalize_fcfa(value: Option<i64>, legacy: Option<f64>) -> Result<Option<i64>, ApiError> {
+    let amount = value.or_else(|| legacy.map(|amount| amount.round() as i64));
+    if amount.map(|amount| amount < 0).unwrap_or(false) {
+        return Err(ApiError::bad_request("montant_fcfa doit etre positif"));
+    }
+    Ok(amount)
+}
+
+fn normalize_basis_points(value: Option<i32>, legacy: Option<f64>) -> Result<Option<i32>, ApiError> {
+    let rate = value.or_else(|| legacy.map(|rate| (rate * 100.0).round() as i32));
+    if rate.map(|rate| rate < 0).unwrap_or(false) {
+        return Err(ApiError::bad_request(
+            "taux_penalite_basis_points doit etre positif",
+        ));
+    }
+    Ok(rate)
 }
 
 fn apply_commune_active(

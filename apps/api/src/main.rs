@@ -16,12 +16,19 @@ async fn main() -> anyhow::Result<()> {
     let app_env = config.app_env.clone();
     let state = AppState::try_new(config)?;
 
-    if state.config.run_migrations_on_startup || command.as_deref() == Some("seed-super-admin") {
+    if state.config.run_migrations_on_startup
+        || matches!(command.as_deref(), Some("seed-super-admin" | "seed-demo"))
+    {
         database::run_migrations(&state.db).await?;
     }
 
     if command.as_deref() == Some("seed-super-admin") {
         modules::auth::seed_super_admin(&state.db).await?;
+        return Ok(());
+    }
+
+    if command.as_deref() == Some("seed-demo") {
+        modules::demo_seed::seed_demo(&state.db, &state.config.app_env).await?;
         return Ok(());
     }
 

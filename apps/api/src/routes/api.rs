@@ -20,6 +20,7 @@ pub fn router() -> Router<AppState> {
         .merge(modules::dashboard::router())
         .merge(modules::audit_logs::router())
         .merge(modules::exports::router())
+        .merge(modules::search::router())
         .nest(
             "/public",
             modules::agents::public_router()

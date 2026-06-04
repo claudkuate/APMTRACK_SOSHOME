@@ -58,8 +58,8 @@ pub struct PvSummary {
 #[derive(Debug, Serialize)]
 pub struct PaymentSummary {
     pub total_payments: i64,
-    pub total_collected_fcfa: f64,
-    pub pending_fcfa: f64,
+    pub total_collected_fcfa: i64,
+    pub pending_fcfa: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,10 +102,10 @@ pub struct StatusCount {
 #[derive(Debug, Serialize)]
 pub struct PaymentStatsResponse {
     pub total_payments: i64,
-    pub total_collected_fcfa: f64,
-    pub total_penalties_fcfa: f64,
+    pub total_collected_fcfa: i64,
+    pub total_penalties_fcfa: i64,
     pub pending_count: i64,
-    pub pending_fcfa: f64,
+    pub pending_fcfa: i64,
     pub commune_id: Option<Uuid>,
 }
 
@@ -185,8 +185,7 @@ async fn summary(
         r#"
         SELECT
             COUNT(*) AS total_payments,
-            COALESCE(SUM(amount_paid), 0) AS total_collected,
-            COALESCE(SUM(p.amount_total) FILTER (WHERE pv.status IN ('EN_ATTENTE_PAIEMENT','EN_RETARD')), 0) AS pending
+            COALESCE(SUM(amount_paid_fcfa), 0)::BIGINT AS total_collected
         FROM payments p
         JOIN pvs pv ON p.pv_id = pv.id
         WHERE ($1::uuid IS NULL OR p.commune_id = $1)
@@ -200,7 +199,7 @@ async fn summary(
     // Pending amount from pvs directly
     let pending_row = sqlx::query(
         r#"
-        SELECT COALESCE(SUM(amount_initial), 0) AS pending_fcfa
+        SELECT COALESCE(SUM(amount_initial_fcfa), 0)::BIGINT AS pending_fcfa
         FROM pvs
         WHERE status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
           AND deleted_at IS NULL
@@ -213,12 +212,8 @@ async fn summary(
 
     let payments = PaymentSummary {
         total_payments: pay_row.get("total_payments"),
-        total_collected_fcfa: pay_row
-            .get::<Option<f64>, _>("total_collected")
-            .unwrap_or(0.0),
-        pending_fcfa: pending_row
-            .get::<Option<f64>, _>("pending_fcfa")
-            .unwrap_or(0.0),
+        total_collected_fcfa: pay_row.get("total_collected"),
+        pending_fcfa: pending_row.get("pending_fcfa"),
     };
 
     // Agent stats — commune_filter always applies for agents
@@ -364,8 +359,8 @@ async fn payment_stats(
         r#"
         SELECT
             COUNT(*) AS total_payments,
-            COALESCE(SUM(amount_paid), 0) AS total_collected,
-            COALESCE(SUM(amount_penalty), 0) AS total_penalties
+            COALESCE(SUM(amount_paid_fcfa), 0)::BIGINT AS total_collected,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS total_penalties
         FROM payments
         WHERE status = 'PAYE'
           AND ($1::uuid IS NULL OR commune_id = $1)
@@ -379,7 +374,7 @@ async fn payment_stats(
         r#"
         SELECT
             COUNT(*) AS pending_count,
-            COALESCE(SUM(amount_initial), 0) AS pending_fcfa
+            COALESCE(SUM(amount_initial_fcfa), 0)::BIGINT AS pending_fcfa
         FROM pvs
         WHERE status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
           AND deleted_at IS NULL
@@ -392,12 +387,10 @@ async fn payment_stats(
 
     Ok(Json(PaymentStatsResponse {
         total_payments: row.get("total_payments"),
-        total_collected_fcfa: row.get::<Option<f64>, _>("total_collected").unwrap_or(0.0),
-        total_penalties_fcfa: row.get::<Option<f64>, _>("total_penalties").unwrap_or(0.0),
+        total_collected_fcfa: row.get("total_collected"),
+        total_penalties_fcfa: row.get("total_penalties"),
         pending_count: pending_row.get("pending_count"),
-        pending_fcfa: pending_row
-            .get::<Option<f64>, _>("pending_fcfa")
-            .unwrap_or(0.0),
+        pending_fcfa: pending_row.get("pending_fcfa"),
         commune_id: commune_filter,
     }))
 }

@@ -27,16 +27,16 @@
   align-items: center;
   padding: 5px 9px;
   border-radius: 999px;
-  background: #fff6db;
-  color: #7b5700;
+  background: var(--tint-gold);
+  color: var(--gold-ink);
   font-size: 0.78rem;
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .status-pill.is-ok {
-  background: #e8f5ee;
-  color: #17613d;
+  background: var(--tint-green);
+  color: var(--cameroon-green-deep);
 }
 
 .checks {
@@ -53,17 +53,17 @@
   gap: 16px;
   padding: 18px;
   border: 1px solid var(--color-border);
-  border-left: 5px solid #e0a106;
+  border-left: 5px solid var(--cameroon-gold);
   border-radius: 8px;
   background: var(--color-panel);
 }
 
 .check.is-ok {
-  border-left-color: #1f7a4d;
+  border-left-color: var(--cameroon-green);
 }
 
 .check.is-error {
-  border-left-color: #b42318;
+  border-left-color: var(--cameroon-red);
 }
 
 .check h3 {
@@ -99,9 +99,9 @@
 button {
   min-height: 38px;
   padding: 0 14px;
-  border: 1px solid #1f7a4d;
+  border: 1px solid var(--cameroon-green);
   border-radius: 6px;
-  background: #1f7a4d;
+  background: var(--cameroon-green);
   color: #ffffff;
   font: inherit;
   font-weight: 700;
@@ -110,7 +110,7 @@ button {
 
 button:hover,
 button:focus-visible {
-  background: #17613d;
+  background: var(--cameroon-green-strong);
 }
 
 @media (max-width: 760px) {

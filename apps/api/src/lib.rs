@@ -62,5 +62,5 @@ fn cors_layer(config: &AppConfig) -> CorsLayer {
         .filter_map(|origin| HeaderValue::from_str(origin.trim()).ok())
         .collect::<Vec<_>>();
 
-    base.allow_origin(origins)
+    base.allow_origin(origins).allow_credentials(true)
 }

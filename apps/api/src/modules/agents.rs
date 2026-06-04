@@ -1,3 +1,4 @@
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::{Json, Router};
@@ -21,6 +22,7 @@ pub fn router() -> Router<AppState> {
             "/agents",
             axum::routing::get(list_agents).post(create_agent),
         )
+        .route("/agents/import-csv", axum::routing::post(import_agents_csv))
         .route(
             "/agents/{id}",
             axum::routing::get(get_agent).patch(patch_agent),
@@ -49,6 +51,11 @@ struct AgentFilterQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ImportAgentsQuery {
+    commune_id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateAgentRequest {
     matricule: String,
     full_name: String,
@@ -60,6 +67,25 @@ struct CreateAgentRequest {
     telephone: Option<String>,
     email: Option<String>,
     user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImportAgentsResponse {
+    created: usize,
+    updated: usize,
+    skipped: usize,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CsvAgentRow {
+    matricule: String,
+    full_name: String,
+    grade: String,
+    date_prise_fonction: Option<NaiveDate>,
+    formation_nasla: Option<bool>,
+    telephone: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +263,154 @@ async fn create_agent(
     .await;
 
     Ok(Json(load_agent(&state.db, agent_id).await?))
+}
+
+async fn import_agents_csv(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<ImportAgentsQuery>,
+    body: Bytes,
+) -> Result<Json<ImportAgentsResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    auth_user.require_commune_access(query.commune_id)?;
+
+    let content = std::str::from_utf8(&body)
+        .map_err(|_| ApiError::bad_request("Le fichier CSV doit etre encode en UTF-8"))?;
+    if content.trim().is_empty() {
+        return Err(ApiError::bad_request("Le fichier CSV est vide"));
+    }
+
+    let mut reader = csv::ReaderBuilder::new()
+        .trim(csv::Trim::All)
+        .from_reader(content.as_bytes());
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut skipped = 0usize;
+    let mut errors = Vec::new();
+    let mut tx = state.db.begin().await?;
+
+    for (idx, row) in reader.deserialize::<CsvAgentRow>().enumerate() {
+        let line = idx + 2;
+        let row = match row {
+            Ok(row) => row,
+            Err(error) => {
+                skipped += 1;
+                errors.push(format!("Ligne {line}: {error}"));
+                continue;
+            }
+        };
+
+        let matricule = match required_text(row.matricule, "matricule") {
+            Ok(value) => value,
+            Err(error) => {
+                skipped += 1;
+                errors.push(format!("Ligne {line}: {error}"));
+                continue;
+            }
+        };
+        let full_name = match required_text(row.full_name, "full_name") {
+            Ok(value) => value,
+            Err(error) => {
+                skipped += 1;
+                errors.push(format!("Ligne {line}: {error}"));
+                continue;
+            }
+        };
+        let grade = match required_text(row.grade, "grade") {
+            Ok(value) => value,
+            Err(error) => {
+                skipped += 1;
+                errors.push(format!("Ligne {line}: {error}"));
+                continue;
+            }
+        };
+
+        let existing_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE lower(matricule) = lower($1) AND deleted_at IS NULL",
+        )
+        .bind(&matricule)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(agent_id) = existing_id {
+            sqlx::query(
+                r#"
+                UPDATE agents
+                SET full_name = $2,
+                    commune_id = $3,
+                    grade = $4,
+                    date_prise_fonction = $5,
+                    formation_nasla = $6,
+                    telephone = $7,
+                    email = $8,
+                    updated_at = now()
+                WHERE id = $1 AND deleted_at IS NULL
+                "#,
+            )
+            .bind(agent_id)
+            .bind(&full_name)
+            .bind(query.commune_id)
+            .bind(&grade)
+            .bind(row.date_prise_fonction)
+            .bind(row.formation_nasla.unwrap_or(false))
+            .bind(clean_optional(row.telephone))
+            .bind(clean_optional(row.email))
+            .execute(&mut *tx)
+            .await
+            .map_err(map_database_error)?;
+            updated += 1;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO agents (
+                    id, matricule, full_name, commune_id, grade, status,
+                    date_prise_fonction, formation_nasla, telephone, email
+                )
+                VALUES ($1, $2, $3, $4, $5, 'ACTIF', $6, $7, $8, $9)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(&matricule)
+            .bind(&full_name)
+            .bind(query.commune_id)
+            .bind(&grade)
+            .bind(row.date_prise_fonction)
+            .bind(row.formation_nasla.unwrap_or(false))
+            .bind(clean_optional(row.telephone))
+            .bind(clean_optional(row.email))
+            .execute(&mut *tx)
+            .await
+            .map_err(map_database_error)?;
+            created += 1;
+        }
+    }
+
+    audit::record_for_commune_tx(
+        &mut tx,
+        Some(query.commune_id),
+        Some(auth_user.id),
+        "AGENTS_IMPORTED_CSV",
+        "agents",
+        None,
+        None,
+        Some(json!({
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors.len()
+        })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+    tx.commit().await?;
+
+    Ok(Json(ImportAgentsResponse {
+        created,
+        updated,
+        skipped,
+        errors,
+    }))
 }
 
 async fn patch_agent(

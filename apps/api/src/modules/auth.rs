@@ -3,9 +3,12 @@ use std::env;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::extract::{FromRequestParts, State};
+use axum::http::header::{COOKIE, SET_COOKIE};
 use axum::http::request::Parts;
 use axum::http::HeaderMap;
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
@@ -22,10 +25,13 @@ use crate::modules::audit;
 use crate::modules::rbac::{has_any_role, has_role, Role};
 use crate::state::AppState;
 
+const REFRESH_COOKIE_NAME: &str = "apmtrack_refresh";
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", axum::routing::post(login))
         .route("/refresh", axum::routing::post(refresh))
+        .route("/refresh-cookie", axum::routing::post(refresh_cookie))
         .route("/logout", axum::routing::post(logout))
         .route("/me", axum::routing::get(me))
 }
@@ -173,7 +179,7 @@ async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     ApiJson(payload): ApiJson<LoginRequest>,
-) -> Result<Json<TokenResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     state.rate_limiter.check(
         "auth:login",
         &headers,
@@ -244,14 +250,14 @@ async fn login(
     )
     .await;
 
-    Ok(Json(response))
+    token_response_with_cookie(response, &state.config)
 }
 
 async fn refresh(
     State(state): State<AppState>,
     headers: HeaderMap,
     ApiJson(payload): ApiJson<RefreshRequest>,
-) -> Result<Json<TokenResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     state.rate_limiter.check(
         "auth:refresh",
         &headers,
@@ -259,7 +265,31 @@ async fn refresh(
         state.config.rate_limit_window_seconds,
     )?;
 
-    let (token_id, secret) = parse_refresh_token(&payload.refresh_token)?;
+    let response = refresh_with_token(&state, &payload.refresh_token).await?;
+    token_response_with_cookie(response, &state.config)
+}
+
+async fn refresh_cookie(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    state.rate_limiter.check(
+        "auth:refresh-cookie",
+        &headers,
+        state.config.rate_limit_login_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
+    let refresh_token = refresh_token_from_cookie(&headers)?;
+    let response = refresh_with_token(&state, &refresh_token).await?;
+    token_response_with_cookie(response, &state.config)
+}
+
+async fn refresh_with_token(
+    state: &AppState,
+    refresh_token: &str,
+) -> Result<TokenResponse, ApiError> {
+    let (token_id, secret) = parse_refresh_token(refresh_token)?;
     let mut transaction = state.db.begin().await?;
     let record = load_refresh_token_for_update(&mut transaction, token_id)
         .await?
@@ -300,14 +330,14 @@ async fn refresh(
     .await;
     transaction.commit().await?;
 
-    Ok(Json(response))
+    Ok(response)
 }
 
 async fn logout(
     State(state): State<AppState>,
     auth_user: AuthUser,
     ApiJson(payload): ApiJson<LogoutRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     if let Some(refresh_token) = payload.refresh_token {
         let (token_id, _) = parse_refresh_token(&refresh_token)?;
         revoke_refresh_token(&state.db, token_id, auth_user.id).await?;
@@ -329,7 +359,15 @@ async fn logout(
     )
     .await;
 
-    Ok(StatusCode::NO_CONTENT)
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        SET_COOKIE,
+        HeaderValue::from_str(&clear_refresh_cookie(&state.config)).map_err(|error| {
+            tracing::error!(%error, "clear refresh cookie header failed");
+            ApiError::internal("Impossible de finaliser la deconnexion")
+        })?,
+    );
+    Ok(response)
 }
 
 async fn me(auth_user: AuthUser) -> Json<MeResponse> {
@@ -807,6 +845,61 @@ fn parse_refresh_token(token: &str) -> Result<(Uuid, String), ApiError> {
     }
 
     Ok((id, secret.to_string()))
+}
+
+fn token_response_with_cookie(
+    response: TokenResponse,
+    config: &AppConfig,
+) -> Result<Response, ApiError> {
+    let cookie = refresh_cookie_header(&response.refresh_token, config);
+    let mut http_response = Json(response).into_response();
+    http_response.headers_mut().insert(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie).map_err(|error| {
+            tracing::error!(%error, "refresh cookie header failed");
+            ApiError::internal("Impossible de securiser la session")
+        })?,
+    );
+    Ok(http_response)
+}
+
+fn refresh_token_from_cookie(headers: &HeaderMap) -> Result<String, ApiError> {
+    let raw = headers
+        .get(COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| ApiError::unauthorized("Cookie de session manquant"))?;
+
+    raw.split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find_map(|(name, value)| {
+            if name == REFRESH_COOKIE_NAME {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::unauthorized("Cookie de session invalide"))
+}
+
+fn refresh_cookie_header(refresh_token: &str, config: &AppConfig) -> String {
+    let max_age = config.jwt_refresh_token_ttl_days * 24 * 60 * 60;
+    let secure = secure_cookie_suffix(config);
+    format!(
+        "{REFRESH_COOKIE_NAME}={refresh_token}; Path=/api/v1/auth; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}"
+    )
+}
+
+fn clear_refresh_cookie(config: &AppConfig) -> String {
+    let secure = secure_cookie_suffix(config);
+    format!("{REFRESH_COOKIE_NAME}=; Path=/api/v1/auth; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
+}
+
+fn secure_cookie_suffix(config: &AppConfig) -> &'static str {
+    match config.app_env.as_str() {
+        "development" | "test" => "",
+        _ => "; Secure",
+    }
 }
 
 async fn load_refresh_token_for_update(

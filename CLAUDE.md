@@ -103,6 +103,10 @@ flutter run --dart-define=API_URL=http://10.0.2.2:8080 --dart-define=APP_ENV=dev
 | `RUN_MIGRATIONS_ON_STARTUP` | ❌ | false | Set `true` in Docker |
 | `JWT_ACCESS_TOKEN_TTL_MINUTES` | ❌ | 15 | |
 | `JWT_REFRESH_TOKEN_TTL_DAYS` | ❌ | 7 | |
+| `RATE_LIMIT_ENABLED` | ❌ | true | Toggle rate limiting |
+| `RATE_LIMIT_WINDOW_SECONDS` | ❌ | 60 | Rolling window size |
+| `RATE_LIMIT_LOGIN_MAX` | ❌ | 10 | Max login attempts per window per IP |
+| `RATE_LIMIT_PUBLIC_MAX` | ❌ | 60 | Max public endpoint requests per window per IP |
 
 See `apps/api/.env.example` for a full template.
 
@@ -168,12 +172,21 @@ Paginated::new(items, &pagination, total)
 // → { items, page, page_size, total }
 ```
 
-**Audit logging** — call after every mutating action:
+**Audit logging** — three variants, never `?` on any of them (logs warning and continues):
 ```rust
+// Standard — commune_id stored as NULL in audit_logs
 audit::record(&state.db, Some(auth_user.id), "ACTION_NAME", "table", Some(entity_id),
     old_value, new_value, auth_user.ip_address.clone(), auth_user.user_agent.clone()).await;
+
+// With commune scope — stores commune_id for filtered audit queries
+audit::record_for_commune(&state.db, commune_id, Some(auth_user.id), "ACTION_NAME",
+    "table", Some(entity_id), old_value, new_value,
+    auth_user.ip_address.clone(), auth_user.user_agent.clone()).await;
+
+// Inside a transaction (use when the audit must share the same tx)
+audit::record_for_commune_tx(&mut tx, commune_id, Some(auth_user.id), ...).await;
 ```
-Never `?` on audit — it logs a warning and continues.
+Use `record_for_commune` in all commune-scoped modules so audit logs are filterable per commune.
 
 **Soft deletes** — all domain tables have `deleted_at TIMESTAMPTZ`. Always filter `WHERE deleted_at IS NULL`.
 
@@ -202,7 +215,7 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 - UUIDs everywhere; generated with `gen_random_uuid()` in SQL or `Uuid::new_v4()` in Rust
 - All timestamps are `TIMESTAMPTZ` (UTC)
 - Column naming: `snake_case` in SQL, same in Rust structs
-- All monetary amounts: `NUMERIC(12,2)` in DB, mapped to `f64` in Rust responses
+- **Monetary amounts are integer FCFA** — stored as `BIGINT` in DB, mapped to `i64` in Rust. Column names carry the `_fcfa` suffix (e.g., `amount_initial_fcfa`, `amount_paid_fcfa`). Never use `f64` for money.
 - Status columns are `TEXT` with `CHECK` constraints (not enums) for migration flexibility
 - Indexes always include `WHERE deleted_at IS NULL` for soft-delete tables
 - Use `sqlx::QueryBuilder` for dynamic queries; never raw string concatenation
@@ -223,7 +236,7 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 
 ## Business Rules (Critical)
 
-- **Amounts come from the referentiel** — agents cannot set free amounts on a PV. `amount_initial` is copied from `interventions.montant` at creation time.
+- **Amounts come from the referentiel** — agents cannot set free amounts on a PV. `amount_initial_fcfa` (integer FCFA) is copied from `interventions.montant_fcfa` at creation time.
 - **PV number is server-generated** — format `PV-{COMMUNE_CODE}-{YEAR}-{SEQ:06}`.
 - **Penalty calculation is server-side** — `penalty = amount × rate%` if `now > created_at + delai_paiement_jours`.
 - **Only `RECEVEUR` validates payments** — and only within their own commune.
@@ -236,13 +249,27 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 
 ## Shared Utilities (`src/helpers.rs`)
 
-```rust
-resolve_commune_filter(auth_user, requested_commune_id) // → Result<Option<Uuid>>
-required_text(value, "field_name")                      // → Result<String>
-clean_optional(value)                                   // → Option<String>
-```
+Import what you need with `use crate::helpers::{...}`. All modules should use these instead of local duplicates.
 
-These replace the per-module duplicates. Import with `use crate::helpers::{resolve_commune_filter, required_text, clean_optional}`.
+```rust
+// Commune access
+resolve_commune_filter(auth_user, requested_commune_id) // → Result<Option<Uuid>>
+is_global_actor(auth_user)   // true for SuperAdmin or global Superviseur (no commune_id)
+is_agent_only(auth_user)     // true for pure APM_AGENT with no elevated roles
+
+// Text validation
+required_text(value, "field_name")                      // → Result<String> (trims, rejects empty)
+clean_optional(value)                                   // → Option<String> (trims, None if empty)
+validate_text_len(value, "field", max_len)              // → Result<()>
+validate_optional_text_len(opt_value, "field", max_len) // → Result<()>
+validate_email_like(opt_value, "field")                 // → Result<()> (format check, not DNS)
+
+// Coordinates
+validate_gps(latitude, longitude)                       // → Result<()> (ranges: lat ±90, lon ±180)
+
+// CSV safety (injection prevention)
+csv_safe_field(value)                                   // → String (prefixes =+-@, quotes commas)
+```
 
 ---
 
@@ -253,4 +280,6 @@ These replace the per-module duplicates. Import with `use crate::helpers::{resol
 3. Add `.merge(modules::my_module::router())` in `src/routes/api.rs`
 4. If public endpoints needed, add `pub fn public_router()` and merge it inside the `"/public"` nest
 
-Follow the pattern in any existing module: `list_*`, `get_*`, `create_*`, `patch_*` — each with role check → commune access check → DB query → audit.
+Follow the pattern in any existing module: `list_*`, `get_*`, `create_*`, `patch_*` — each with role check → commune access check → DB query → `audit::record_for_commune(...)`.
+
+Use `is_global_actor(auth_user)` / `is_agent_only(auth_user)` from `helpers.rs` instead of re-implementing role combinations inline.

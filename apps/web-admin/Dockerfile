@@ -15,6 +15,6 @@ RUN printf "window.__APMTRACK_CONFIG__ = { apiUrl: '%s', environment: '%s' };\n"
 FROM nginx:alpine
 
 COPY infra/nginx/web-admin.conf /etc/nginx/conf.d/default.conf
-COPY --from=builder /app/dist/web-admin /usr/share/nginx/html
+COPY --from=builder /app/dist/web-admin/browser /usr/share/nginx/html
 
 EXPOSE 80

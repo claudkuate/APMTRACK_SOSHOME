@@ -154,8 +154,19 @@ async fn list_pvs(
     );
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let mut qb: QueryBuilder<sqlx::Postgres> =
-        QueryBuilder::new("SELECT * FROM pvs WHERE deleted_at IS NULL");
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        r#"
+        SELECT
+            id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            verbalized_name, verbalized_identifier, vehicle_plate,
+            location_description, gps_latitude, gps_longitude,
+            amount_initial::DOUBLE PRECISION AS amount_initial,
+            amount_initial_fcfa, status, notes_internes, created_by,
+            created_at, updated_at
+        FROM pvs
+        WHERE deleted_at IS NULL
+        "#,
+    );
     apply_pv_filters(
         &mut qb,
         commune_filter,
@@ -220,7 +231,16 @@ async fn create_pv(
     let agent_id: Uuid = agent_row.get("id");
 
     let intervention = sqlx::query(
-        "SELECT id, commune_id, sujet_paiement, montant, montant_fcfa, delai_paiement_jours, taux_penalite, active FROM interventions WHERE id = $1 AND deleted_at IS NULL",
+        r#"
+        SELECT
+            id, commune_id, sujet_paiement,
+            montant::DOUBLE PRECISION AS montant,
+            montant_fcfa, delai_paiement_jours,
+            taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            active
+        FROM interventions
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
     )
     .bind(payload.intervention_id)
     .fetch_optional(&mut *tx)
@@ -507,7 +527,14 @@ async fn verify_pv_public(
     )?;
 
     let row = sqlx::query(
-        "SELECT id, commune_id, status, amount_initial, amount_initial_fcfa, created_at FROM pvs WHERE pv_number = $1 AND deleted_at IS NULL",
+        r#"
+        SELECT
+            id, commune_id, status,
+            amount_initial::DOUBLE PRECISION AS amount_initial,
+            amount_initial_fcfa, created_at
+        FROM pvs
+        WHERE pv_number = $1 AND deleted_at IS NULL
+        "#,
     )
     .bind(&pv_number)
     .fetch_optional(&state.db)
@@ -529,7 +556,19 @@ async fn verify_pv_public(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
-    let row = sqlx::query("SELECT * FROM pvs WHERE id = $1 AND deleted_at IS NULL")
+    let row = sqlx::query(
+        r#"
+        SELECT
+            id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            verbalized_name, verbalized_identifier, vehicle_plate,
+            location_description, gps_latitude, gps_longitude,
+            amount_initial::DOUBLE PRECISION AS amount_initial,
+            amount_initial_fcfa, status, notes_internes, created_by,
+            created_at, updated_at
+        FROM pvs
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
         .bind(id)
         .fetch_optional(pool)
         .await?

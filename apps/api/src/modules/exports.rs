@@ -61,7 +61,7 @@ async fn export_pvs(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
-        SELECT p.pv_number, p.status, p.amount_initial, p.verbalized_name,
+        SELECT p.pv_number, p.status, p.amount_initial_fcfa, p.verbalized_name,
                p.vehicle_plate, p.location_description,
                p.created_at, c.nom AS commune_nom, a.matricule AS agent_matricule,
                a.full_name AS agent_nom, i.nom AS intervention_nom
@@ -89,7 +89,7 @@ async fn export_pvs(
     for row in &rows {
         let pv_number: String = row.get("pv_number");
         let status: String = row.get("status");
-        let amount: Option<f64> = row.get("amount_initial");
+        let amount: Option<i64> = row.get("amount_initial_fcfa");
         let verbalized: Option<String> = row.get("verbalized_name");
         let plate: Option<String> = row.get("vehicle_plate");
         let location: Option<String> = row.get("location_description");
@@ -103,7 +103,7 @@ async fn export_pvs(
             "{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_field(&pv_number),
             csv_field(&status),
-            amount.map(|a| format!("{:.0}", a)).unwrap_or_default(),
+            amount.map(|a| a.to_string()).unwrap_or_default(),
             csv_field(&verbalized.unwrap_or_default()),
             csv_field(&plate.unwrap_or_default()),
             csv_field(&location.unwrap_or_default()),
@@ -147,8 +147,8 @@ async fn export_payments(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
-        SELECT pay.receipt_number, pay.amount_due, pay.amount_penalty, pay.amount_total,
-               pay.amount_paid, pay.status, pay.paid_at,
+        SELECT pay.receipt_number, pay.amount_due_fcfa, pay.amount_penalty_fcfa, pay.amount_total_fcfa,
+               pay.amount_paid_fcfa, pay.status, pay.paid_at,
                pv.pv_number, c.nom AS commune_nom,
                u.email AS receveur_email
         FROM payments pay
@@ -175,23 +175,23 @@ async fn export_payments(
     for row in &rows {
         let receipt: Option<String> = row.get("receipt_number");
         let pv_num: String = row.get("pv_number");
-        let amount_due: f64 = row.get("amount_due");
-        let penalty: f64 = row.get("amount_penalty");
-        let total: f64 = row.get("amount_total");
-        let paid: f64 = row.get("amount_paid");
+        let amount_due: Option<i64> = row.get("amount_due_fcfa");
+        let penalty: i64 = row.get("amount_penalty_fcfa");
+        let total: Option<i64> = row.get("amount_total_fcfa");
+        let paid: Option<i64> = row.get("amount_paid_fcfa");
         let status: String = row.get("status");
         let paid_at: Option<DateTime<Utc>> = row.get("paid_at");
         let commune_nom: String = row.get("commune_nom");
         let receveur: String = row.get("receveur_email");
 
         csv.push_str(&format!(
-            "{},{},{:.0},{:.0},{:.0},{:.0},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{}\n",
             csv_field(&receipt.unwrap_or_default()),
             csv_field(&pv_num),
-            amount_due,
+            amount_due.map(|v| v.to_string()).unwrap_or_default(),
             penalty,
-            total,
-            paid,
+            total.map(|v| v.to_string()).unwrap_or_default(),
+            paid.map(|v| v.to_string()).unwrap_or_default(),
             csv_field(&status),
             paid_at
                 .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
