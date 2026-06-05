@@ -9,6 +9,7 @@ pub mod rate_limit;
 pub mod routes;
 pub mod sequences;
 pub mod state;
+pub mod storage;
 
 use axum::http::{
     header::{AUTHORIZATION, CONTENT_TYPE},

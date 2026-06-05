@@ -88,6 +88,8 @@ flutter run --dart-define=API_URL=http://10.0.2.2:8080 --dart-define=APP_ENV=dev
 | Web admin | http://localhost:4200 |
 | Adminer (DB UI) | http://localhost:8081 |
 | PostgreSQL | localhost:5432 |
+| MinIO S3 API | http://localhost:9000 |
+| MinIO console | http://localhost:9001 (apmtrack / apmtrack_dev_password) |
 
 ---
 
@@ -107,6 +109,11 @@ flutter run --dart-define=API_URL=http://10.0.2.2:8080 --dart-define=APP_ENV=dev
 | `RATE_LIMIT_WINDOW_SECONDS` | ❌ | 60 | Rolling window size |
 | `RATE_LIMIT_LOGIN_MAX` | ❌ | 10 | Max login attempts per window per IP |
 | `RATE_LIMIT_PUBLIC_MAX` | ❌ | 60 | Max public endpoint requests per window per IP |
+| `S3_ENDPOINT` | ❌ | — | Object storage (MinIO/S3) for PV photos. If unset, photo endpoints report storage disabled |
+| `S3_REGION` | ❌ | `us-east-1` | |
+| `S3_BUCKET` | ❌ | `apmtrack-pv-photos` | |
+| `S3_ACCESS_KEY` | ❌ | — | Required (with secret + endpoint) to enable photo storage |
+| `S3_SECRET_KEY` | ❌ | — | |
 
 See `apps/api/.env.example` for a full template.
 
@@ -133,6 +140,7 @@ See `apps/api/.env.example` for a full template.
   /zones/...               ← modules::zones::router()
   /referentiel/...         ← modules::referentiel::router()
   /pvs/...                 ← modules::pvs::router()
+    /pvs/:id/photos        ← POST upload (multipart) / GET list; :photo_id GET content / DELETE — object storage
   /payments/...            ← modules::payments::router()
   /signalements/...        ← modules::signalements::router()
   /patrouilles/...         ← modules::patrouilles::router()
@@ -228,7 +236,13 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 20260603000003 — pvs, pv_status_history, payments, signalements
 20260603000004 — patrouilles, patrouille_agents
 20260603000005 — constraint fixes (cascade, FK rules, drop redundant category_id)
+20260603000007 — geospatial PostGIS (geom on pvs/signalements, boundary on zones/communes, patrouille_positions)
 ```
+
+**PostGIS** — the Postgres image is `postgis/postgis` (see `docker-compose.dev.yml`). Migration 7 runs
+`CREATE EXTENSION postgis`. Geometry columns use SRID 4326. Never decode `geometry` into Rust directly:
+read via `ST_AsGeoJSON(col)` → `serde_json::Value`, write via `ST_SetSRID(ST_GeomFromGeoJSON($n), 4326)`.
+Point columns (`pvs.geom`, `signalements.geom`) are `GENERATED ALWAYS` from `gps_longitude/gps_latitude`.
 
 **Important**: `interventions.category_id` was removed (migration 5). Retrieve `category_id` via `JOIN intervention_types it ON i.type_id = it.id` — never read it directly from the `interventions` table.
 
@@ -269,6 +283,12 @@ validate_gps(latitude, longitude)                       // → Result<()> (range
 
 // CSV safety (injection prevention)
 csv_safe_field(value)                                   // → String (prefixes =+-@, quotes commas)
+
+// Géospatial (PostGIS — voir module `geo`)
+parse_bbox("minLon,minLat,maxLon,maxLat")               // → Result<(f64,f64,f64,f64)>
+validate_geojson_polygon(&value)                        // → Result<()> (Polygon/MultiPolygon fermé)
+feature_collection(features)                             // → Value (GeoJSON FeatureCollection)
+geo_feature(geometry, properties)                       // → Value (GeoJSON Feature)
 ```
 
 ---

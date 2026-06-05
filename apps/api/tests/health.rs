@@ -77,6 +77,8 @@ async fn openapi_contract_is_served() {
         "/api/v1/pvs/{id}/status",
         "/api/v1/pvs/{id}/qr",
         "/api/v1/pvs/{id}/pdf",
+        "/api/v1/pvs/{id}/photos",
+        "/api/v1/pvs/{id}/photos/{photo_id}",
         "/api/v1/public/pvs/{pv_number}",
         "/api/v1/payments",
         "/api/v1/payments/pending",
@@ -87,12 +89,23 @@ async fn openapi_contract_is_served() {
         "/api/v1/signalements/{id}/status",
         "/api/v1/public/signalements",
         "/api/v1/public/signalements/{numero_suivi}",
+        "/api/v1/mobile/me",
+        "/api/v1/mobile/interventions",
+        "/api/v1/mobile/patrouille-active",
         "/api/v1/patrouilles",
         "/api/v1/patrouilles/{id}",
         "/api/v1/patrouilles/{id}/start",
         "/api/v1/patrouilles/{id}/end",
         "/api/v1/patrouilles/{id}/agents",
         "/api/v1/patrouilles/{id}/agents/{agent_id}",
+        "/api/v1/patrouilles/{id}/positions",
+        "/api/v1/patrouilles/{id}/track",
+        "/api/v1/geo/overview",
+        "/api/v1/geo/pvs",
+        "/api/v1/geo/signalements",
+        "/api/v1/geo/zones",
+        "/api/v1/geo/communes",
+        "/api/v1/geo/nearby",
         "/api/v1/dashboard/summary",
         "/api/v1/dashboard/pvs",
         "/api/v1/dashboard/payments",
@@ -112,6 +125,14 @@ async fn openapi_contract_is_served() {
         .as_object()
         .expect("pv properties")
         .contains_key("amount_initial_fcfa"));
+    assert!(openapi["components"]["schemas"]["Pv"]["properties"]
+        .as_object()
+        .expect("pv properties")
+        .contains_key("interventions"));
+    assert!(openapi["components"]["schemas"]["Pv"]["properties"]
+        .as_object()
+        .expect("pv properties")
+        .contains_key("subject_type"));
     assert!(openapi["components"]["schemas"]["Payment"]["properties"]
         .as_object()
         .expect("payment properties")
@@ -126,6 +147,18 @@ async fn openapi_contract_is_served() {
         .as_object()
         .expect("audit properties")
         .contains_key("commune_id"));
+    assert!(openapi["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .contains_key("MobileMe"));
+    assert!(openapi["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .contains_key("MobilePatrouilleActive"));
+    assert!(openapi["components"]["schemas"]
+        .as_object()
+        .expect("schemas")
+        .contains_key("RecordPositionRequest"));
 }
 
 fn test_state() -> AppState {
@@ -147,6 +180,7 @@ fn test_state() -> AppState {
         rate_limit_window_seconds: 60,
         rate_limit_login_max: 10,
         rate_limit_public_max: 60,
+        s3: None,
     };
 
     AppState::try_new(config).expect("valid lazy database pool")

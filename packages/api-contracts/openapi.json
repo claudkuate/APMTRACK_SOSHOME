@@ -1261,6 +1261,42 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "patch": {
+        "summary": "Modifie un PV non pay?/non annul?",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchPvRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "PV",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pv"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/pvs/{id}/status": {
@@ -1610,6 +1646,78 @@
         }
       }
     },
+    "/api/v1/mobile/me": {
+      "get": {
+        "summary": "Retourne le contexte mobile de l'agent authentifie",
+        "responses": {
+          "200": {
+            "description": "Contexte mobile agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileMe"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/interventions": {
+      "get": {
+        "summary": "Liste les interventions actives disponibles pour l'agent mobile",
+        "responses": {
+          "200": {
+            "description": "Interventions actives",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MobileIntervention"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/mobile/patrouille-active": {
+      "get": {
+        "summary": "Retourne la patrouille en cours affectee a l'agent mobile",
+        "responses": {
+          "200": {
+            "description": "Patrouille active ou null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobilePatrouilleActive"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
     "/api/v1/patrouilles": {
       "get": {
         "summary": "Liste les patrouilles",
@@ -1830,6 +1938,219 @@
         "responses": {
           "204": {
             "description": "Aucun contenu"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/patrouilles/{id}/positions": {
+      "post": {
+        "summary": "Enregistre une position GPS sur une patrouille en cours",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordPositionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Position enregistree",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionRecordedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/patrouilles/{id}/track": {
+      "get": {
+        "summary": "Retourne la trace GeoJSON d'une patrouille",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trace GeoJSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/overview": {
+      "get": {
+        "summary": "Retourne une vue GeoJSON multi-couches",
+        "responses": {
+          "200": {
+            "description": "GeoJSON multi-couches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/pvs": {
+      "get": {
+        "summary": "Retourne les PV geolocalises en GeoJSON",
+        "responses": {
+          "200": {
+            "description": "PV GeoJSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/signalements": {
+      "get": {
+        "summary": "Retourne les signalements geolocalises en GeoJSON",
+        "responses": {
+          "200": {
+            "description": "Signalements GeoJSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/zones": {
+      "get": {
+        "summary": "Retourne les zones en GeoJSON",
+        "responses": {
+          "200": {
+            "description": "Zones GeoJSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/communes": {
+      "get": {
+        "summary": "Retourne les communes en GeoJSON",
+        "responses": {
+          "200": {
+            "description": "Communes GeoJSON",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/api/v1/geo/nearby": {
+      "get": {
+        "summary": "Retourne les objets geographiques proches d'un point",
+        "responses": {
+          "200": {
+            "description": "Objets proches",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericObject"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2092,6 +2413,140 @@
           }
         }
       }
+    },
+    "/api/v1/pvs/{id}/photos": {
+      "get": {
+        "summary": "Liste les photos preuve d?un PV",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Photos PV",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PvPhoto"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Ajoute une photo preuve ? un PV modifiable",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Photo PV",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PvPhoto"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/pvs/{id}/photos/{photo_id}": {
+      "get": {
+        "summary": "T?l?charge une photo preuve",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "photo_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Supprime une photo preuve d?un PV modifiable",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "photo_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Supprim?e"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2329,6 +2784,143 @@
             "$ref": "#/components/schemas/User"
           }
         ]
+      },
+      "MobileMe": {
+        "type": "object",
+        "required": [
+          "user",
+          "commune",
+          "agent"
+        ],
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "commune": {
+            "$ref": "#/components/schemas/Commune"
+          },
+          "agent": {
+            "$ref": "#/components/schemas/Agent"
+          }
+        }
+      },
+      "MobileIntervention": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Intervention"
+          }
+        ]
+      },
+      "MobilePatrouilleActive": {
+        "type": "object",
+        "required": [
+          "patrouille",
+          "agents"
+        ],
+        "properties": {
+          "patrouille": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Patrouille"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MobilePatrouilleAgent"
+            }
+          }
+        }
+      },
+      "MobilePatrouilleAgent": {
+        "type": "object",
+        "required": [
+          "agent_id",
+          "matricule",
+          "full_name",
+          "grade",
+          "role_patrouille"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "matricule": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "grade": {
+            "type": "string"
+          },
+          "role_patrouille": {
+            "type": "string",
+            "enum": [
+              "CHEF",
+              "MEMBRE"
+            ]
+          }
+        }
+      },
+      "RecordPositionRequest": {
+        "type": "object",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "properties": {
+          "latitude": {
+            "type": "number",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "longitude": {
+            "type": "number",
+            "minimum": -180,
+            "maximum": 180
+          },
+          "accuracy_m": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
+      "PositionRecordedResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "patrouille_id",
+          "recorded_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "patrouille_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "User": {
         "type": "object",
@@ -2878,18 +3470,20 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
-          }
-        }
-      },
-      "CreatePvRequest": {
-        "type": "object",
-        "required": [
-          "intervention_id"
-        ],
-        "properties": {
-          "intervention_id": {
+          },
+          "subject_type": {
             "type": "string",
-            "format": "uuid"
+            "enum": [
+              "PERSON_ONLY",
+              "VEHICLE_ONLY",
+              "PERSON_WITH_VEHICLE"
+            ]
+          },
+          "interventions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PvIntervention"
+            }
           },
           "zone_id": {
             "type": [
@@ -2942,6 +3536,95 @@
             "type": [
               "string",
               "null"
+            ]
+          }
+        }
+      },
+      "CreatePvRequest": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "intervention_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Legacy primary intervention. Prefer intervention_ids."
+          },
+          "zone_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "verbalized_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_identifier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_plate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location_description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gps_latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -90,
+            "maximum": 90
+          },
+          "gps_longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -180,
+            "maximum": 180
+          },
+          "notes_internes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "intervention_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "subject_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "PERSON_ONLY",
+              "VEHICLE_ONLY",
+              "PERSON_WITH_VEHICLE",
+              null
             ]
           }
         }
@@ -3372,6 +4055,168 @@
           "created_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "PvIntervention": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "intervention_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "order_index": {
+            "type": "integer"
+          },
+          "nom": {
+            "type": "string"
+          },
+          "sujet_paiement": {
+            "type": "boolean"
+          },
+          "montant_fcfa": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FcfaAmount"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "delai_paiement_jours": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "taux_penalite": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "taux_penalite_basis_points": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "PvPhoto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "pv_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "PatchPvRequest": {
+        "type": "object",
+        "required": [],
+        "properties": {
+          "intervention_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Legacy primary intervention. Prefer intervention_ids."
+          },
+          "zone_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "verbalized_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_identifier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_plate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "location_description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "gps_latitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -90,
+            "maximum": 90
+          },
+          "gps_longitude": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": -180,
+            "maximum": 180
+          },
+          "notes_internes": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "intervention_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "subject_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "PERSON_ONLY",
+              "VEHICLE_ONLY",
+              "PERSON_WITH_VEHICLE",
+              null
+            ]
           }
         }
       }

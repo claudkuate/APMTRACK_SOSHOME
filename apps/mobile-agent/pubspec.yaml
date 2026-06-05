@@ -31,6 +31,15 @@ dependencies:
 
   cupertino_icons: ^1.0.8
   http: ^1.5.0
+  http_parser: ^4.0.2
+  flutter_secure_storage: ^10.3.1
+  mobile_scanner: ^7.2.0
+  geolocator: ^14.0.2
+  connectivity_plus: ^7.1.1
+  intl: ^0.20.2
+  flutter_svg: ^2.3.0
+  image_picker: ^1.1.2
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -43,6 +52,31 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
 
+  # Génère les icônes de lancement (launcher icons) pour toutes les
+  # plateformes à partir des armoiries du Cameroun.
+  flutter_launcher_icons: ^0.14.4
+
+# Configuration des icônes de l'application — armoiries de la République
+# du Cameroun. Régénérer avec : dart run flutter_launcher_icons
+flutter_launcher_icons:
+  image_path: "assets/branding/app_icon.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  web:
+    generate: true
+    image_path: "assets/branding/app_icon.png"
+  windows:
+    generate: true
+    image_path: "assets/branding/app_icon.png"
+    icon_size: 256
+  macos:
+    generate: true
+    image_path: "assets/branding/app_icon.png"
+  # Icône adaptative Android (premier plan dans la zone de sécurité)
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/branding/app_icon_foreground.png"
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 
@@ -53,6 +87,11 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Assets de marque — armoiries de la République du Cameroun.
+  assets:
+    - assets/branding/cameroon_coat_of_arms.png
+    - assets/branding/cameroon_coat_of_arms.svg
 
   # To add assets to your application, add an assets section, like this:
   # assets:

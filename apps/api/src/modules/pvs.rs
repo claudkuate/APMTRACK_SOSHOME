@@ -1,4 +1,4 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::{Json, Router};
@@ -25,10 +25,25 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/pvs", axum::routing::get(list_pvs).post(create_pv))
-        .route("/pvs/{id}", axum::routing::get(get_pv).delete(cancel_pv))
+        .route(
+            "/pvs/{id}",
+            axum::routing::get(get_pv)
+                .patch(patch_pv)
+                .delete(cancel_pv),
+        )
         .route("/pvs/{id}/status", axum::routing::patch(patch_pv_status))
         .route("/pvs/{id}/qr", axum::routing::get(get_pv_qr))
         .route("/pvs/{id}/pdf", axum::routing::get(get_pv_pdf))
+        .route(
+            "/pvs/{id}/photos",
+            axum::routing::get(list_pv_photos)
+                .post(upload_pv_photo)
+                .layer(DefaultBodyLimit::max(MAX_PHOTO_BYTES)),
+        )
+        .route(
+            "/pvs/{id}/photos/{photo_id}",
+            axum::routing::get(get_pv_photo_content).delete(delete_pv_photo),
+        )
 }
 
 pub fn public_router() -> Router<AppState> {
@@ -46,6 +61,8 @@ pub struct PvResponse {
     pub agent_id: Uuid,
     pub pv_number: String,
     pub intervention_id: Uuid,
+    pub interventions: Vec<PvInterventionResponse>,
+    pub subject_type: String,
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
@@ -60,6 +77,19 @@ pub struct PvResponse {
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PvInterventionResponse {
+    pub id: Uuid,
+    pub intervention_id: Uuid,
+    pub order_index: i32,
+    pub nom: String,
+    pub sujet_paiement: bool,
+    pub montant_fcfa: Option<i64>,
+    pub delai_paiement_jours: Option<i32>,
+    pub taux_penalite: Option<f64>,
+    pub taux_penalite_basis_points: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,7 +123,24 @@ pub struct PvFilterQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CreatePvRequest {
-    pub intervention_id: Uuid,
+    pub intervention_id: Option<Uuid>,
+    pub intervention_ids: Option<Vec<Uuid>>,
+    pub subject_type: Option<String>,
+    pub zone_id: Option<Uuid>,
+    pub verbalized_name: Option<String>,
+    pub verbalized_identifier: Option<String>,
+    pub vehicle_plate: Option<String>,
+    pub location_description: Option<String>,
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
+    pub notes_internes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchPvRequest {
+    pub intervention_id: Option<Uuid>,
+    pub intervention_ids: Option<Vec<Uuid>>,
+    pub subject_type: Option<String>,
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
@@ -158,8 +205,11 @@ async fn list_pvs(
         r#"
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            subject_type,
             verbalized_name, verbalized_identifier, vehicle_plate,
-            location_description, gps_latitude, gps_longitude,
+            location_description,
+            gps_latitude::double precision AS gps_latitude,
+            gps_longitude::double precision AS gps_longitude,
             amount_initial::DOUBLE PRECISION AS amount_initial,
             amount_initial_fcfa, status, notes_internes, created_by,
             created_at, updated_at
@@ -179,7 +229,12 @@ async fn list_pvs(
         .push_bind(pagination.offset);
 
     let rows = qb.build().fetch_all(&state.db).await?;
-    let items = rows.into_iter().map(row_to_pv).collect();
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut pv = row_to_pv(row);
+        pv.interventions = load_pv_interventions(&state.db, pv.id).await?;
+        items.push(pv);
+    }
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
 
@@ -212,6 +267,24 @@ async fn create_pv(
         .commune_id
         .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
     validate_gps(payload.gps_latitude, payload.gps_longitude)?;
+    let intervention_ids = normalize_intervention_ids(payload.intervention_id, payload.intervention_ids)?;
+    let verbalized_name = clean_optional(payload.verbalized_name);
+    let verbalized_identifier = clean_optional(payload.verbalized_identifier);
+    let vehicle_plate = clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let location_description = clean_optional(payload.location_description);
+    let notes_internes = clean_optional(payload.notes_internes);
+    let subject_type = normalize_subject_type(
+        payload.subject_type.as_deref(),
+        verbalized_name.as_deref(),
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+    )?;
+    validate_subject_fields(
+        &subject_type,
+        verbalized_name.as_deref(),
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+    )?;
 
     let mut tx = state.db.begin().await?;
 
@@ -230,45 +303,17 @@ async fn create_pv(
     }
     let agent_id: Uuid = agent_row.get("id");
 
-    let intervention = sqlx::query(
-        r#"
-        SELECT
-            id, commune_id, sujet_paiement,
-            montant::DOUBLE PRECISION AS montant,
-            montant_fcfa, delai_paiement_jours,
-            taux_penalite::DOUBLE PRECISION AS taux_penalite,
-            active
-        FROM interventions
-        WHERE id = $1 AND deleted_at IS NULL
-        "#,
+    let interventions =
+        load_intervention_snapshots_tx(&mut tx, commune_id, &intervention_ids).await?;
+    check_double_verbalisation(
+        &mut tx,
+        commune_id,
+        &intervention_ids,
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+        None,
     )
-    .bind(payload.intervention_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| ApiError::not_found("Intervention introuvable"))?;
-
-    let interv_commune: Uuid = intervention.get("commune_id");
-    if interv_commune != commune_id {
-        return Err(ApiError::forbidden(
-            "L'intervention n'appartient pas a votre commune",
-        ));
-    }
-
-    let active: bool = intervention.get("active");
-    if !active {
-        return Err(ApiError::bad_request(
-            "L'intervention selectionnee est inactive",
-        ));
-    }
-
-    let sujet_paiement: bool = intervention.get("sujet_paiement");
-    let montant: Option<f64> = intervention.get("montant");
-    let montant_fcfa: Option<i64> = intervention.get("montant_fcfa");
-
-    let verb_id = payload.verbalized_identifier.as_deref();
-    let plate = payload.vehicle_plate.as_deref();
-    check_double_verbalisation(&mut tx, commune_id, payload.intervention_id, verb_id, plate)
-        .await?;
+    .await?;
 
     let commune_code: String = sqlx::query_scalar("SELECT code FROM communes WHERE id = $1")
         .bind(commune_id)
@@ -288,10 +333,24 @@ async fn create_pv(
     );
     let qr_svg = generate_qr_svg(&public_url)?;
 
-    let initial_status = if sujet_paiement {
+    let amount_initial_fcfa = total_amount_fcfa(&interventions);
+    let amount_initial = amount_initial_fcfa.map(|amount| amount as f64);
+    let initial_status = if amount_initial_fcfa.unwrap_or(0) > 0 {
         "EN_ATTENTE_PAIEMENT"
     } else {
         "NON_PAYANT"
+    };
+
+    // Auto-résolution de la zone par point-dans-polygone si non fournie explicitement.
+    let resolved_zone_id = match payload.zone_id {
+        Some(zone_id) => Some(zone_id),
+        None => resolve_zone_from_point(
+            &mut tx,
+            commune_id,
+            payload.gps_latitude,
+            payload.gps_longitude,
+        )
+        .await?,
     };
 
     let id = Uuid::new_v4();
@@ -299,15 +358,15 @@ async fn create_pv(
     sqlx::query(
         r#"
         INSERT INTO pvs (
-            id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            id, commune_id, agent_id, pv_number, intervention_id, subject_type, zone_id,
             verbalized_name, verbalized_identifier, vehicle_plate,
             location_description, gps_latitude, gps_longitude,
             amount_initial, amount_initial_fcfa, status, qr_code_svg, notes_internes, created_by
         ) VALUES (
-            $1, $2, $3, $4, $5, $6,
-            $7, $8, $9,
-            $10, $11, $12,
-            $13, $14, $15, $16, $17, $18
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10,
+            $11, $12, $13,
+            $14, $15, $16, $17, $18, $19
         )
         "#,
     )
@@ -315,24 +374,26 @@ async fn create_pv(
     .bind(commune_id)
     .bind(agent_id)
     .bind(&pv_number)
-    .bind(payload.intervention_id)
-    .bind(payload.zone_id)
-    .bind(clean_optional(payload.verbalized_name))
-    .bind(clean_optional(payload.verbalized_identifier))
-    .bind(clean_optional(payload.vehicle_plate))
-    .bind(clean_optional(payload.location_description))
+    .bind(intervention_ids[0])
+    .bind(&subject_type)
+    .bind(resolved_zone_id)
+    .bind(verbalized_name.clone())
+    .bind(verbalized_identifier.clone())
+    .bind(vehicle_plate.clone())
+    .bind(location_description.clone())
     .bind(payload.gps_latitude)
     .bind(payload.gps_longitude)
-    .bind(montant)
-    .bind(montant_fcfa)
+    .bind(amount_initial)
+    .bind(amount_initial_fcfa)
     .bind(initial_status)
     .bind(&qr_svg)
-    .bind(clean_optional(payload.notes_internes))
+    .bind(notes_internes.clone())
     .bind(auth_user.id)
     .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
 
+    replace_pv_interventions_tx(&mut tx, id, &interventions).await?;
     record_status_change_tx(&mut tx, id, None, initial_status, auth_user.id, None).await;
 
     audit::record_for_commune_tx(
@@ -347,7 +408,8 @@ async fn create_pv(
             "pv_number": pv_number,
             "commune_id": commune_id,
             "agent_id": agent_id,
-            "intervention_id": payload.intervention_id,
+            "intervention_ids": intervention_ids,
+            "subject_type": subject_type,
             "status": initial_status
         })),
         auth_user.ip_address.clone(),
@@ -358,6 +420,170 @@ async fn create_pv(
     tx.commit().await?;
 
     Ok((StatusCode::CREATED, Json(load_pv(&state.db, id).await?)))
+}
+
+async fn patch_pv(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<PatchPvRequest>,
+) -> Result<Json<PvResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+    ])?;
+
+    validate_gps(payload.gps_latitude, payload.gps_longitude)?;
+
+    let mut tx = state.db.begin().await?;
+    let existing = load_pv_for_update_tx(&mut tx, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+    require_pv_write_access(&mut tx, &auth_user, &existing).await?;
+    ensure_pv_editable(&existing.status)?;
+
+    let intervention_ids = match payload.intervention_ids {
+        Some(ids) => normalize_intervention_ids(payload.intervention_id, Some(ids))?,
+        None => match payload.intervention_id {
+            Some(id) => normalize_intervention_ids(Some(id), None)?,
+            None => existing
+                .interventions
+                .iter()
+                .map(|item| item.intervention_id)
+                .collect(),
+        },
+    };
+    if intervention_ids.is_empty() {
+        return Err(ApiError::bad_request("Au moins une infraction est requise"));
+    }
+
+    let verbalized_name = clean_optional(payload.verbalized_name);
+    let verbalized_identifier = clean_optional(payload.verbalized_identifier);
+    let vehicle_plate = clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let location_description = clean_optional(payload.location_description);
+    let notes_internes = clean_optional(payload.notes_internes);
+    let subject_type = normalize_subject_type(
+        payload.subject_type.as_deref(),
+        verbalized_name.as_deref(),
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+    )?;
+    validate_subject_fields(
+        &subject_type,
+        verbalized_name.as_deref(),
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+    )?;
+
+    let interventions =
+        load_intervention_snapshots_tx(&mut tx, existing.commune_id, &intervention_ids).await?;
+    check_double_verbalisation(
+        &mut tx,
+        existing.commune_id,
+        &intervention_ids,
+        verbalized_identifier.as_deref(),
+        vehicle_plate.as_deref(),
+        Some(id),
+    )
+    .await?;
+    let amount_initial_fcfa = total_amount_fcfa(&interventions);
+    let amount_initial = amount_initial_fcfa.map(|amount| amount as f64);
+    let next_status = if amount_initial_fcfa.unwrap_or(0) > 0 {
+        match existing.status.as_str() {
+            "NON_PAYANT" => "EN_ATTENTE_PAIEMENT",
+            current => current,
+        }
+    } else {
+        "NON_PAYANT"
+    };
+
+    let resolved_zone_id = match payload.zone_id {
+        Some(zone_id) => Some(zone_id),
+        None => resolve_zone_from_point(
+            &mut tx,
+            existing.commune_id,
+            payload.gps_latitude,
+            payload.gps_longitude,
+        )
+        .await?,
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE pvs
+        SET intervention_id = $2,
+            subject_type = $3,
+            zone_id = $4,
+            verbalized_name = $5,
+            verbalized_identifier = $6,
+            vehicle_plate = $7,
+            location_description = $8,
+            gps_latitude = $9,
+            gps_longitude = $10,
+            amount_initial = $11,
+            amount_initial_fcfa = $12,
+            status = $13,
+            notes_internes = $14,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(intervention_ids[0])
+    .bind(&subject_type)
+    .bind(resolved_zone_id)
+    .bind(verbalized_name.clone())
+    .bind(verbalized_identifier.clone())
+    .bind(vehicle_plate.clone())
+    .bind(location_description.clone())
+    .bind(payload.gps_latitude)
+    .bind(payload.gps_longitude)
+    .bind(amount_initial)
+    .bind(amount_initial_fcfa)
+    .bind(next_status)
+    .bind(notes_internes.clone())
+    .execute(&mut *tx)
+    .await
+    .map_err(map_database_error)?;
+
+    replace_pv_interventions_tx(&mut tx, id, &interventions).await?;
+    if next_status != existing.status {
+        record_status_change_tx(
+            &mut tx,
+            id,
+            Some(&existing.status),
+            next_status,
+            auth_user.id,
+            Some("Mise a jour des infractions"),
+        )
+        .await;
+    }
+
+    audit::record_for_commune_tx(
+        &mut tx,
+        Some(existing.commune_id),
+        Some(auth_user.id),
+        "PV_UPDATED",
+        "pvs",
+        Some(id),
+        Some(json!({
+            "status": existing.status,
+            "amount_initial_fcfa": existing.amount_initial_fcfa
+        })),
+        Some(json!({
+            "intervention_ids": intervention_ids,
+            "subject_type": subject_type,
+            "amount_initial_fcfa": amount_initial_fcfa,
+            "status": next_status
+        })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    tx.commit().await?;
+    Ok(Json(load_pv(&state.db, id).await?))
 }
 async fn patch_pv_status(
     State(state): State<AppState>,
@@ -560,8 +786,11 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
         r#"
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            subject_type,
             verbalized_name, verbalized_identifier, vehicle_plate,
-            location_description, gps_latitude, gps_longitude,
+            location_description,
+            gps_latitude::double precision AS gps_latitude,
+            gps_longitude::double precision AS gps_longitude,
             amount_initial::DOUBLE PRECISION AS amount_initial,
             amount_initial_fcfa, status, notes_internes, created_by,
             created_at, updated_at
@@ -573,7 +802,9 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| ApiError::not_found("PV introuvable"))?;
-    Ok(row_to_pv(row))
+    let mut pv = row_to_pv(row);
+    pv.interventions = load_pv_interventions(pool, pv.id).await?;
+    Ok(pv)
 }
 
 async fn require_pv_read_access(
@@ -619,6 +850,37 @@ async fn active_agent_id_for_user(
     Ok(agent_id)
 }
 
+/// Trouve la zone (de la commune) contenant le point GPS, si les coordonnées sont fournies
+/// et qu'une zone dotée d'un contour les englobe. Renvoie `None` sinon.
+async fn resolve_zone_from_point(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+) -> Result<Option<Uuid>, ApiError> {
+    let (Some(lat), Some(lon)) = (latitude, longitude) else {
+        return Ok(None);
+    };
+    let zone_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM zones
+        WHERE commune_id = $1
+          AND deleted_at IS NULL
+          AND boundary IS NOT NULL
+          AND ST_Contains(boundary, ST_SetSRID(ST_MakePoint($2, $3), 4326))
+        ORDER BY ST_Area(boundary) ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(commune_id)
+    .bind(lon)
+    .bind(lat)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(zone_id)
+}
+
 fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
     PvResponse {
         id: row.get("id"),
@@ -626,6 +888,8 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
         agent_id: row.get("agent_id"),
         pv_number: row.get("pv_number"),
         intervention_id: row.get("intervention_id"),
+        interventions: Vec::new(),
+        subject_type: row.get("subject_type"),
         zone_id: row.get("zone_id"),
         verbalized_name: row.get("verbalized_name"),
         verbalized_identifier: row.get("verbalized_identifier"),
@@ -644,6 +908,318 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
 }
 
 /// Génère un numéro PV unique : PV-{CODE}-{YEAR}-{SEQ:06}
+#[derive(Debug, Clone)]
+struct InterventionSnapshot {
+    intervention_id: Uuid,
+    order_index: i32,
+    nom: String,
+    sujet_paiement: bool,
+    montant_fcfa: Option<i64>,
+    delai_paiement_jours: Option<i32>,
+    taux_penalite: Option<f64>,
+    taux_penalite_basis_points: Option<i32>,
+}
+
+async fn load_pv_for_update_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<PvResponse, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            id, commune_id, agent_id, pv_number, intervention_id, zone_id,
+            subject_type,
+            verbalized_name, verbalized_identifier, vehicle_plate,
+            location_description,
+            gps_latitude::double precision AS gps_latitude,
+            gps_longitude::double precision AS gps_longitude,
+            amount_initial::DOUBLE PRECISION AS amount_initial,
+            amount_initial_fcfa, status, notes_internes, created_by,
+            created_at, updated_at
+        FROM pvs
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| ApiError::not_found("PV introuvable"))?;
+
+    let mut pv = row_to_pv(row);
+    pv.interventions = load_pv_interventions_tx(tx, id).await?;
+    Ok(pv)
+}
+
+async fn load_pv_interventions(
+    pool: &PgPool,
+    pv_id: Uuid,
+) -> Result<Vec<PvInterventionResponse>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, intervention_id, order_index, nom, sujet_paiement, montant_fcfa,
+            delai_paiement_jours,
+            taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            taux_penalite_basis_points
+        FROM pv_interventions
+        WHERE pv_id = $1
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(pv_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(row_to_pv_intervention).collect())
+}
+
+async fn load_pv_interventions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pv_id: Uuid,
+) -> Result<Vec<PvInterventionResponse>, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id, intervention_id, order_index, nom, sujet_paiement, montant_fcfa,
+            delai_paiement_jours,
+            taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            taux_penalite_basis_points
+        FROM pv_interventions
+        WHERE pv_id = $1
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(pv_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows.into_iter().map(row_to_pv_intervention).collect())
+}
+
+fn row_to_pv_intervention(row: sqlx::postgres::PgRow) -> PvInterventionResponse {
+    PvInterventionResponse {
+        id: row.get("id"),
+        intervention_id: row.get("intervention_id"),
+        order_index: row.get("order_index"),
+        nom: row.get("nom"),
+        sujet_paiement: row.get("sujet_paiement"),
+        montant_fcfa: row.get("montant_fcfa"),
+        delai_paiement_jours: row.get("delai_paiement_jours"),
+        taux_penalite: row.get("taux_penalite"),
+        taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+    }
+}
+
+async fn load_intervention_snapshots_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    intervention_ids: &[Uuid],
+) -> Result<Vec<InterventionSnapshot>, ApiError> {
+    let mut snapshots = Vec::with_capacity(intervention_ids.len());
+    for (index, intervention_id) in intervention_ids.iter().enumerate() {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, commune_id, nom, sujet_paiement, montant_fcfa,
+                delai_paiement_jours,
+                taux_penalite::DOUBLE PRECISION AS taux_penalite,
+                taux_penalite_basis_points,
+                active
+            FROM interventions
+            WHERE id = $1 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(intervention_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Intervention introuvable"))?;
+
+        let interv_commune: Uuid = row.get("commune_id");
+        if interv_commune != commune_id {
+            return Err(ApiError::forbidden(
+                "Une intervention n'appartient pas a votre commune",
+            ));
+        }
+        let active: bool = row.get("active");
+        if !active {
+            return Err(ApiError::bad_request(
+                "Une intervention selectionnee est inactive",
+            ));
+        }
+
+        snapshots.push(InterventionSnapshot {
+            intervention_id: row.get("id"),
+            order_index: index as i32,
+            nom: row.get("nom"),
+            sujet_paiement: row.get("sujet_paiement"),
+            montant_fcfa: row.get("montant_fcfa"),
+            delai_paiement_jours: row.get("delai_paiement_jours"),
+            taux_penalite: row.get("taux_penalite"),
+            taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+        });
+    }
+    Ok(snapshots)
+}
+
+async fn replace_pv_interventions_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pv_id: Uuid,
+    interventions: &[InterventionSnapshot],
+) -> Result<(), ApiError> {
+    sqlx::query("DELETE FROM pv_interventions WHERE pv_id = $1")
+        .bind(pv_id)
+        .execute(&mut **tx)
+        .await?;
+
+    for item in interventions {
+        sqlx::query(
+            r#"
+            INSERT INTO pv_interventions (
+                pv_id, intervention_id, order_index, nom, sujet_paiement,
+                montant_fcfa, delai_paiement_jours, taux_penalite,
+                taux_penalite_basis_points
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "#,
+        )
+        .bind(pv_id)
+        .bind(item.intervention_id)
+        .bind(item.order_index)
+        .bind(&item.nom)
+        .bind(item.sujet_paiement)
+        .bind(item.montant_fcfa)
+        .bind(item.delai_paiement_jours)
+        .bind(item.taux_penalite)
+        .bind(item.taux_penalite_basis_points)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_database_error)?;
+    }
+    Ok(())
+}
+
+fn total_amount_fcfa(interventions: &[InterventionSnapshot]) -> Option<i64> {
+    let total = interventions
+        .iter()
+        .filter(|item| item.sujet_paiement)
+        .map(|item| item.montant_fcfa.unwrap_or(0))
+        .sum::<i64>();
+    (total > 0).then_some(total)
+}
+
+fn normalize_intervention_ids(
+    primary: Option<Uuid>,
+    ids: Option<Vec<Uuid>>,
+) -> Result<Vec<Uuid>, ApiError> {
+    let source = ids.unwrap_or_else(|| primary.into_iter().collect());
+    let mut normalized = Vec::with_capacity(source.len());
+    for id in source {
+        if !normalized.contains(&id) {
+            normalized.push(id);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request("Au moins une infraction est requise"));
+    }
+    Ok(normalized)
+}
+
+fn normalize_subject_type(
+    requested: Option<&str>,
+    verbalized_name: Option<&str>,
+    verbalized_identifier: Option<&str>,
+    vehicle_plate: Option<&str>,
+) -> Result<String, ApiError> {
+    if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+        return match value {
+            "PERSON_ONLY" | "VEHICLE_ONLY" | "PERSON_WITH_VEHICLE" => Ok(value.to_string()),
+            other => Err(ApiError::bad_request(format!(
+                "subject_type invalide: {other}"
+            ))),
+        };
+    }
+
+    let has_person = verbalized_name.is_some() || verbalized_identifier.is_some();
+    let has_vehicle = vehicle_plate.is_some();
+    match (has_person, has_vehicle) {
+        (true, true) => Ok("PERSON_WITH_VEHICLE".to_string()),
+        (true, false) => Ok("PERSON_ONLY".to_string()),
+        (false, true) => Ok("VEHICLE_ONLY".to_string()),
+        (false, false) => Err(ApiError::bad_request(
+            "Un PV doit identifier un usager ou un vehicule",
+        )),
+    }
+}
+
+fn validate_subject_fields(
+    subject_type: &str,
+    verbalized_name: Option<&str>,
+    verbalized_identifier: Option<&str>,
+    vehicle_plate: Option<&str>,
+) -> Result<(), ApiError> {
+    let has_person = verbalized_name.is_some() || verbalized_identifier.is_some();
+    let has_vehicle = vehicle_plate.is_some();
+    match subject_type {
+        "PERSON_ONLY" if !has_person => Err(ApiError::bad_request(
+            "Un PV usager sans vehicule requiert un nom ou un identifiant",
+        )),
+        "PERSON_ONLY" if has_vehicle => Err(ApiError::bad_request(
+            "Un PV usager sans vehicule ne doit pas contenir de plaque",
+        )),
+        "VEHICLE_ONLY" if !has_vehicle => Err(ApiError::bad_request(
+            "Un PV vehicule sans conducteur requiert une plaque",
+        )),
+        "VEHICLE_ONLY" if has_person => Err(ApiError::bad_request(
+            "Un PV vehicule sans conducteur ne doit pas contenir de conducteur",
+        )),
+        "PERSON_WITH_VEHICLE" if !has_vehicle || !has_person => Err(ApiError::bad_request(
+            "Un PV usager avec vehicule requiert une plaque et un usager",
+        )),
+        "PERSON_ONLY" | "VEHICLE_ONLY" | "PERSON_WITH_VEHICLE" => Ok(()),
+        _ => Err(ApiError::bad_request("subject_type invalide")),
+    }
+}
+
+fn ensure_pv_editable(status: &str) -> Result<(), ApiError> {
+    if status == "PAYE" || status == "ANNULE" {
+        return Err(ApiError::conflict(
+            "Un PV paye ou annule est consultable uniquement",
+        ));
+    }
+    Ok(())
+}
+
+async fn require_pv_write_access(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    auth_user: &AuthUser,
+    pv: &PvResponse,
+) -> Result<(), ApiError> {
+    if !is_agent_only(auth_user) {
+        return Ok(());
+    }
+    let commune_id = auth_user
+        .commune_id
+        .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
+    let agent_id: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM agents
+        WHERE user_id = $1
+          AND commune_id = $2
+          AND status = 'ACTIF'
+          AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(auth_user.id)
+    .bind(commune_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if agent_id != Some(pv.agent_id) {
+        return Err(ApiError::forbidden("Acces refuse a ce PV"));
+    }
+    Ok(())
+}
+
 fn generate_qr_svg(data: &str) -> Result<String, ApiError> {
     use qrcode::render::svg;
     use qrcode::{EcLevel, QrCode};
@@ -660,9 +1236,10 @@ fn generate_qr_svg(data: &str) -> Result<String, ApiError> {
 async fn check_double_verbalisation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commune_id: Uuid,
-    intervention_id: Uuid,
+    intervention_ids: &[Uuid],
     verbalized_identifier: Option<&str>,
     vehicle_plate: Option<&str>,
+    exclude_pv_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     let bloquant: bool =
         sqlx::query_scalar("SELECT double_verbalisation_bloquant FROM communes WHERE id = $1")
@@ -674,60 +1251,72 @@ async fn check_double_verbalisation(
         return Ok(());
     }
 
-    if let Some(vid) = verbalized_identifier {
-        if !vid.trim().is_empty() {
-            lock_double_verbalisation(tx, commune_id, intervention_id, "identifier", vid).await?;
-            let existing: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT pv_number FROM pvs
-                WHERE commune_id = $1
-                  AND intervention_id = $2
-                  AND verbalized_identifier = $3
-                  AND status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
-                  AND deleted_at IS NULL
-                LIMIT 1
-                "#,
-            )
-            .bind(commune_id)
-            .bind(intervention_id)
-            .bind(vid)
-            .fetch_optional(&mut **tx)
-            .await?;
+    for intervention_id in intervention_ids {
+        if let Some(vid) = verbalized_identifier {
+            if !vid.trim().is_empty() {
+                lock_double_verbalisation(tx, commune_id, *intervention_id, "identifier", vid)
+                    .await?;
+                let existing: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT p.pv_number
+                    FROM pvs p
+                    JOIN pv_interventions pi ON pi.pv_id = p.id
+                    WHERE p.commune_id = $1
+                      AND pi.intervention_id = $2
+                      AND p.verbalized_identifier = $3
+                      AND p.status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
+                      AND p.deleted_at IS NULL
+                      AND ($4::uuid IS NULL OR p.id <> $4)
+                    LIMIT 1
+                    "#,
+                )
+                .bind(commune_id)
+                .bind(*intervention_id)
+                .bind(vid)
+                .bind(exclude_pv_id)
+                .fetch_optional(&mut **tx)
+                .await?;
 
-            if let Some(pv_num) = existing {
-                return Err(ApiError::conflict(format!(
-                    "Double verbalisation detectee: PV {} existe deja pour cet identifiant",
-                    pv_num
-                )));
+                if let Some(pv_num) = existing {
+                    return Err(ApiError::conflict(format!(
+                        "Double verbalisation detectee: PV {} existe deja pour cet identifiant",
+                        pv_num
+                    )));
+                }
             }
         }
-    }
 
-    if let Some(plate) = vehicle_plate {
-        if !plate.trim().is_empty() {
-            lock_double_verbalisation(tx, commune_id, intervention_id, "plate", plate).await?;
-            let existing: Option<String> = sqlx::query_scalar(
-                r#"
-                SELECT pv_number FROM pvs
-                WHERE commune_id = $1
-                  AND intervention_id = $2
-                  AND vehicle_plate = $3
-                  AND status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
-                  AND deleted_at IS NULL
-                LIMIT 1
-                "#,
-            )
-            .bind(commune_id)
-            .bind(intervention_id)
-            .bind(plate)
-            .fetch_optional(&mut **tx)
-            .await?;
+        if let Some(plate) = vehicle_plate {
+            if !plate.trim().is_empty() {
+                lock_double_verbalisation(tx, commune_id, *intervention_id, "plate", plate)
+                    .await?;
+                let existing: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT p.pv_number
+                    FROM pvs p
+                    JOIN pv_interventions pi ON pi.pv_id = p.id
+                    WHERE p.commune_id = $1
+                      AND pi.intervention_id = $2
+                      AND p.vehicle_plate = $3
+                      AND p.status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
+                      AND p.deleted_at IS NULL
+                      AND ($4::uuid IS NULL OR p.id <> $4)
+                    LIMIT 1
+                    "#,
+                )
+                .bind(commune_id)
+                .bind(*intervention_id)
+                .bind(plate)
+                .bind(exclude_pv_id)
+                .fetch_optional(&mut **tx)
+                .await?;
 
-            if let Some(pv_num) = existing {
-                return Err(ApiError::conflict(format!(
-                    "Double verbalisation detectee: PV {} existe deja pour cette plaque",
-                    pv_num
-                )));
+                if let Some(pv_num) = existing {
+                    return Err(ApiError::conflict(format!(
+                        "Double verbalisation detectee: PV {} existe deja pour cette plaque",
+                        pv_num
+                    )));
+                }
             }
         }
     }
@@ -843,4 +1432,262 @@ fn clean_optional(value: Option<String>) -> Option<String> {
 // Ré-export pour payments
 pub fn pv_due_date(created_at: DateTime<Utc>, delai_jours: i32) -> DateTime<Utc> {
     created_at + Duration::days(delai_jours as i64)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Photos preuve (object storage MinIO/S3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAX_PHOTO_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+pub struct PvPhotoResponse {
+    pub id: Uuid,
+    pub pv_id: Uuid,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+fn photo_extension(content_type: &str) -> &'static str {
+    match content_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/heic" | "image/heif" => "heic",
+        "image/gif" => "gif",
+        _ => "jpg",
+    }
+}
+
+async fn list_pv_photos(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<PvPhotoResponse>>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let pv = load_pv(&state.db, id).await?;
+    auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, pv_id, content_type, size_bytes, created_at
+        FROM pv_photos
+        WHERE pv_id = $1 AND deleted_at IS NULL
+        ORDER BY created_at ASC
+        "#,
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|row| PvPhotoResponse {
+            id: row.get("id"),
+            pv_id: row.get("pv_id"),
+            content_type: row.get("content_type"),
+            size_bytes: row.get("size_bytes"),
+            created_at: row.get("created_at"),
+        })
+        .collect();
+    Ok(Json(items))
+}
+
+async fn upload_pv_photo(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<PvPhotoResponse>), ApiError> {
+    auth_user.require_any_role(&[Role::ApmAgent, Role::AdminCommune, Role::SuperAdmin])?;
+    let pv = load_pv(&state.db, id).await?;
+    auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
+    ensure_pv_editable(&pv.status)?;
+
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Stockage des photos non configure"))?;
+
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?
+        .ok_or_else(|| ApiError::bad_request("Fichier manquant"))?;
+
+    let content_type = field
+        .content_type()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if !content_type.starts_with("image/") {
+        return Err(ApiError::bad_request("Le fichier doit etre une image"));
+    }
+
+    let data = field
+        .bytes()
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    if data.is_empty() {
+        return Err(ApiError::bad_request("Fichier vide"));
+    }
+    if data.len() > MAX_PHOTO_BYTES {
+        return Err(ApiError::bad_request("Image trop volumineuse (max 8 Mo)"));
+    }
+    let size_bytes = data.len() as i64;
+
+    let photo_id = Uuid::new_v4();
+    let object_key = format!("pv/{}/{}.{}", pv.id, photo_id, photo_extension(&content_type));
+    storage
+        .put(&object_key, data.as_ref(), &content_type)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "pv photo upload failed");
+            ApiError::internal("Echec de l'enregistrement de la photo")
+        })?;
+
+    let created_at: DateTime<Utc> = sqlx::query_scalar(
+        r#"
+        INSERT INTO pv_photos (id, pv_id, commune_id, object_key, content_type, size_bytes, uploaded_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING created_at
+        "#,
+    )
+    .bind(photo_id)
+    .bind(pv.id)
+    .bind(pv.commune_id)
+    .bind(&object_key)
+    .bind(&content_type)
+    .bind(size_bytes)
+    .bind(auth_user.id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record_for_commune(
+        &state.db,
+        Some(pv.commune_id),
+        Some(auth_user.id),
+        "PV_PHOTO_UPLOADED",
+        "pv_photos",
+        Some(photo_id),
+        None,
+        Some(json!({ "pv_id": pv.id, "content_type": content_type, "size_bytes": size_bytes })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PvPhotoResponse {
+            id: photo_id,
+            pv_id: pv.id,
+            content_type,
+            size_bytes,
+            created_at,
+        }),
+    ))
+}
+
+async fn get_pv_photo_content(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id, photo_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let pv = load_pv(&state.db, id).await?;
+    auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
+
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Stockage des photos non configure"))?;
+
+    let row = sqlx::query(
+        r#"
+        SELECT object_key, content_type
+        FROM pv_photos
+        WHERE id = $1 AND pv_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(photo_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Photo introuvable"))?;
+
+    let object_key: String = row.get("object_key");
+    let content_type: String = row.get("content_type");
+    let bytes = storage.get(&object_key).await.map_err(|error| {
+        tracing::error!(%error, "pv photo download failed");
+        ApiError::internal("Echec du telechargement de la photo")
+    })?;
+
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
+async fn delete_pv_photo(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id, photo_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, ApiError> {
+    auth_user.require_any_role(&[Role::ApmAgent, Role::AdminCommune, Role::SuperAdmin])?;
+    let pv = load_pv(&state.db, id).await?;
+    auth_user.require_commune_access(pv.commune_id)?;
+    require_pv_read_access(&state.db, &auth_user, &pv).await?;
+    ensure_pv_editable(&pv.status)?;
+
+    let row = sqlx::query(
+        r#"
+        UPDATE pv_photos
+        SET deleted_at = now()
+        WHERE id = $1 AND pv_id = $2 AND deleted_at IS NULL
+        RETURNING object_key
+        "#,
+    )
+    .bind(photo_id)
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Photo introuvable"))?;
+
+    let object_key: String = row.get("object_key");
+    if let Some(storage) = state.storage.as_ref() {
+        if let Err(error) = storage.delete(&object_key).await {
+            tracing::warn!(%error, "pv photo object delete failed");
+        }
+    }
+
+    audit::record_for_commune(
+        &state.db,
+        Some(pv.commune_id),
+        Some(auth_user.id),
+        "PV_PHOTO_DELETED",
+        "pv_photos",
+        Some(photo_id),
+        None,
+        None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -1,5 +1,11 @@
 import { Component, HostListener, OnDestroy, OnInit, inject, signal } from '@angular/core';
-import { FormControl, FormGroup, FormsModule, ReactiveFormsModule, Validators } from '@angular/forms';
+import {
+  FormControl,
+  FormGroup,
+  FormsModule,
+  ReactiveFormsModule,
+  Validators,
+} from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 
@@ -12,8 +18,13 @@ import {
   ResourceConfig,
   ResourceField,
   ResourceFilter,
+  SelectOption,
   resourceConfigs,
 } from '../../shared/resource-config';
+import { PatrouilleAgentsDialog } from '../patrouilles/patrouille-agents.dialog';
+import { LocationPickerComponent } from '../../shared/map/location-picker.component';
+import { ZoneEditorComponent } from '../../shared/map/zone-editor.component';
+import { GeoGeometry } from '../../core/services/geo.service';
 
 type Row = Record<string, unknown>;
 type LookupState = Record<string, LookupOption[]>;
@@ -28,24 +39,51 @@ interface PendingAction {
   row: Row;
 }
 
+interface StatusContext {
+  action: ResourceAction;
+  row: Row;
+  options: SelectOption[];
+  current: string;
+}
+
+interface AgentsDialogContext {
+  patrouilleId: string;
+  communeId: string | null;
+  nom: string;
+  status: string;
+}
+
 @Component({
   selector: 'app-resource-page',
-  imports: [FormsModule, ReactiveFormsModule, RouterLink],
+  imports: [
+    FormsModule,
+    ReactiveFormsModule,
+    RouterLink,
+    PatrouilleAgentsDialog,
+    LocationPickerComponent,
+    ZoneEditorComponent,
+  ],
   template: `
     @if (config(); as cfg) {
       <section class="grid gap-5">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Donnees operationnelles</p>
+            <p class="text-xs font-bold uppercase text-[var(--text-muted)]">
+              Donnees operationnelles
+            </p>
             <h2 class="text-2xl font-black">{{ cfg.title }}</h2>
             <p class="mt-1 max-w-3xl text-sm text-[var(--text-muted)]">{{ cfg.description }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             @if (canExportCurrentRows()) {
-              <button type="button" class="btn-secondary" (click)="exportCurrentRows(cfg)">Exporter</button>
+              <button type="button" class="btn-secondary" (click)="exportCurrentRows(cfg)">
+                Exporter
+              </button>
             }
             @if (cfg.key === 'agents' && canMutate(cfg)) {
-              <button type="button" class="btn-secondary" (click)="openImportDialog()">Importer CSV</button>
+              <button type="button" class="btn-secondary" (click)="openImportDialog()">
+                Importer CSV
+              </button>
             }
             @if (canCreate(cfg)) {
               <button type="button" class="btn-primary" (click)="openForm()">
@@ -57,136 +95,194 @@ interface PendingAction {
         </div>
 
         @if (message()) {
-          <div class="panel border-green-200 bg-green-50 p-3 text-sm font-semibold text-green-800">{{ message() }}</div>
+          <div class="panel border-green-200 bg-green-50 p-3 text-sm font-semibold text-green-800">
+            {{ message() }}
+          </div>
         }
         @if (error()) {
-          <div class="panel border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">{{ error() }}</div>
+          <div class="panel border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+            {{ error() }}
+          </div>
         }
 
-        @if (showForm() && canCreate(cfg)) {
-          <div class="modal-backdrop" role="dialog" aria-modal="true" [attr.aria-label]="createLabel(cfg)" (keydown.escape)="closeForm()">
+        @if (showForm() && canOpenForm(cfg)) {
+          <div
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            [attr.aria-label]="formTitle(cfg)"
+            (keydown.escape)="closeForm()"
+          >
             <div class="modal-panel modal-panel--wide" (click)="$event.stopPropagation()">
-            <header class="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line-subtle)] pb-4">
-              <div>
-                <h3 class="text-lg font-black">{{ createLabel(cfg) }}</h3>
-                <p class="mt-1 text-sm text-[var(--text-muted)]">
-                  Les champs critiques restent valides par l'API. Les identifiants techniques sont remplaces par des listes.
-                </p>
-              </div>
-              @if (cfg.key === 'pvs') {
-                <span class="status-badge warn">Montant non modifiable</span>
-              }
-              <button type="button" class="btn-ghost" (click)="closeForm()">Fermer</button>
-            </header>
-
-            <form class="mt-4 grid gap-5" [formGroup]="form" (ngSubmit)="create(cfg)">
-              @for (section of formSections(cfg.createFields ?? []); track section.title) {
-                <fieldset class="grid gap-4">
-                  <legend class="text-sm font-black text-[var(--text-strong)]">{{ section.title }}</legend>
-                  <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    @for (field of section.fields; track field.key) {
-                      <div class="field" [class.field-wide]="field.type === 'textarea'">
-                        <label [for]="field.key">
-                          {{ field.label }}
-                          @if (field.required) {
-                            <span class="text-[var(--cameroon-red)]">*</span>
-                          }
-                        </label>
-
-                        @if (field.type === 'textarea') {
-                          <textarea [id]="field.key" [formControlName]="field.key" [placeholder]="field.placeholder ?? ''"></textarea>
-                        } @else if (field.type === 'checkbox') {
-                          <label class="toggle-field">
-                            <input type="checkbox" [formControlName]="field.key" />
-                            <span>Oui</span>
-                          </label>
-                        } @else if (field.type === 'relation') {
-                          <select [id]="field.key" [formControlName]="field.key">
-                            <option value="">Choisir...</option>
-                            @for (option of optionsFor(field.key); track option.id) {
-                              <option [value]="option.id">{{ optionLabel(option) }}</option>
-                            }
-                          </select>
-                        } @else if (field.type === 'select' || field.type === 'status') {
-                          <select [id]="field.key" [formControlName]="field.key">
-                            <option value="">Choisir...</option>
-                            @for (option of field.options ?? []; track option.value) {
-                              <option [value]="option.value">{{ option.label }}</option>
-                            }
-                          </select>
-                        } @else {
-                          <input
-                            [id]="field.key"
-                            [type]="inputType(field)"
-                            [formControlName]="field.key"
-                            [placeholder]="field.placeholder ?? ''"
-                          />
-                        }
-
-                        @if (field.help) {
-                          <p class="field-help">{{ field.help }}</p>
-                        }
-                      </div>
-                    }
-                  </div>
-                </fieldset>
-              }
-
-              @if (cfg.key === 'pvs') {
-                <div class="rounded-md border border-[var(--line-subtle)] bg-[var(--surface-muted)] p-3 text-sm">
-                  <strong class="block">Recapitulatif montant</strong>
-                  <span class="text-[var(--text-muted)]">{{ selectedInterventionMeta() }}</span>
+              <header
+                class="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--line-subtle)] pb-4"
+              >
+                <div>
+                  <h3 class="text-lg font-black">{{ formTitle(cfg) }}</h3>
+                  <p class="mt-1 text-sm text-[var(--text-muted)]">
+                    Les champs critiques restent valides par l'API. Les identifiants techniques sont
+                    remplaces par des listes.
+                  </p>
                 </div>
-              }
+                @if (cfg.key === 'pvs') {
+                  <span class="status-badge warn">Montant non modifiable</span>
+                }
+                <button type="button" class="btn-ghost" (click)="closeForm()">Fermer</button>
+              </header>
 
-              <div class="flex flex-wrap items-center gap-2">
-                <button type="submit" class="btn-primary" [disabled]="form.invalid || saving()">
-                  {{ saving() ? 'Enregistrement...' : 'Enregistrer' }}
-                </button>
-                <button type="button" class="btn-secondary" (click)="closeForm()">Annuler</button>
-              </div>
-            </form>
+              <form class="mt-4 grid gap-5" [formGroup]="form" (ngSubmit)="submit(cfg)">
+                @for (section of formSections(effectiveFields(cfg)); track section.title) {
+                  <fieldset class="grid gap-4">
+                    <legend class="text-sm font-black text-[var(--text-strong)]">
+                      {{ section.title }}
+                    </legend>
+                    <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                      @for (field of section.fields; track field.key) {
+                        <div class="field" [class.field-wide]="isWideField(field)">
+                          <label [for]="field.key">
+                            {{ field.label }}
+                            @if (field.required) {
+                              <span class="text-[var(--cameroon-red)]">*</span>
+                            }
+                          </label>
+
+                          @if (field.type === 'geopoint') {
+                            <app-location-picker
+                              [latitude]="geoNumber(field.latKey ?? field.key)"
+                              (latitudeChange)="setControl(field.latKey ?? field.key, $event)"
+                              [longitude]="geoNumber(field.lonKey ?? 'gps_longitude')"
+                              (longitudeChange)="
+                                setControl(field.lonKey ?? 'gps_longitude', $event)
+                              "
+                              (addressResolved)="onAddressResolved($event)"
+                            />
+                          } @else if (field.type === 'geopolygon') {
+                            <app-zone-editor
+                              [boundary]="geoBoundary(field.key)"
+                              (boundaryChange)="setControl(field.key, $event)"
+                              [layer]="cfg.key === 'communes' ? 'communes' : 'zones'"
+                            />
+                          } @else if (field.type === 'textarea') {
+                            <textarea
+                              [id]="field.key"
+                              [formControlName]="field.key"
+                              [placeholder]="field.placeholder ?? ''"
+                            ></textarea>
+                          } @else if (field.type === 'checkbox') {
+                            <label class="toggle-field">
+                              <input type="checkbox" [formControlName]="field.key" />
+                              <span>Oui</span>
+                            </label>
+                          } @else if (field.type === 'relation_multi') {
+                            <select [id]="field.key" [formControlName]="field.key" multiple>
+                              @for (option of optionsFor(field.key); track option.id) {
+                                <option [value]="option.id">{{ optionLabel(option) }}</option>
+                              }
+                            </select>
+                          } @else if (field.type === 'relation') {
+                            <select [id]="field.key" [formControlName]="field.key">
+                              <option value="">Choisir...</option>
+                              @for (option of optionsFor(field.key); track option.id) {
+                                <option [value]="option.id">{{ optionLabel(option) }}</option>
+                              }
+                            </select>
+                          } @else if (field.type === 'select' || field.type === 'status') {
+                            <select [id]="field.key" [formControlName]="field.key">
+                              <option value="">Choisir...</option>
+                              @for (option of field.options ?? []; track option.value) {
+                                <option [value]="option.value">{{ option.label }}</option>
+                              }
+                            </select>
+                          } @else {
+                            <input
+                              [id]="field.key"
+                              [type]="inputType(field)"
+                              [formControlName]="field.key"
+                              [placeholder]="field.placeholder ?? ''"
+                            />
+                          }
+
+                          @if (field.help) {
+                            <p class="field-help">{{ field.help }}</p>
+                          }
+                        </div>
+                      }
+                    </div>
+                  </fieldset>
+                }
+
+                @if (cfg.key === 'pvs') {
+                  <div
+                    class="rounded-md border border-[var(--line-subtle)] bg-[var(--surface-muted)] p-3 text-sm"
+                  >
+                    <strong class="block">Recapitulatif montant</strong>
+                    <span class="text-[var(--text-muted)]">{{ selectedInterventionMeta() }}</span>
+                  </div>
+                }
+
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="submit" class="btn-primary" [disabled]="form.invalid || saving()">
+                    {{ saving() ? 'Enregistrement...' : 'Enregistrer' }}
+                  </button>
+                  <button type="button" class="btn-secondary" (click)="closeForm()">Annuler</button>
+                </div>
+              </form>
             </div>
           </div>
         }
 
         @if (showImportDialog() && cfg.key === 'agents' && canMutate(cfg)) {
-          <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Import CSV agents" (keydown.escape)="closeImportDialog()">
+          <div
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Import CSV agents"
+            (keydown.escape)="closeImportDialog()"
+          >
             <div class="modal-panel modal-panel--wide" (click)="$event.stopPropagation()">
-            <div>
-              <div class="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Reprise de donnees</p>
-                  <h3 class="font-black">Import CSV agents</h3>
+              <div>
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p class="text-xs font-bold uppercase text-[var(--text-muted)]">
+                      Reprise de donnees
+                    </p>
+                    <h3 class="font-black">Import CSV agents</h3>
+                  </div>
+                  <button type="button" class="btn-ghost" (click)="closeImportDialog()">
+                    Fermer
+                  </button>
                 </div>
-                <button type="button" class="btn-ghost" (click)="closeImportDialog()">Fermer</button>
+                <p class="text-sm text-[var(--text-muted)]">
+                  Utilise ce bloc pour une reprise initiale. Pour le quotidien, privilegie le
+                  formulaire guide.
+                </p>
               </div>
-              <p class="text-sm text-[var(--text-muted)]">
-                Utilise ce bloc pour une reprise initiale. Pour le quotidien, privilegie le formulaire guide.
-              </p>
-            </div>
-            <div class="mt-4 grid gap-3 md:grid-cols-[280px_1fr]">
-              <div class="field">
-                <label>Commune</label>
-                <select [(ngModel)]="importCommuneId">
-                  <option value="">Choisir...</option>
-                  @for (option of optionsFor('commune_id'); track option.id) {
-                    <option [value]="option.id">{{ optionLabel(option) }}</option>
-                  }
-                </select>
+              <div class="mt-4 grid gap-3 md:grid-cols-[280px_1fr]">
+                <div class="field">
+                  <label>Commune</label>
+                  <select [(ngModel)]="importCommuneId">
+                    <option value="">Choisir...</option>
+                    @for (option of optionsFor('commune_id'); track option.id) {
+                      <option [value]="option.id">{{ optionLabel(option) }}</option>
+                    }
+                  </select>
+                </div>
+                <div class="field">
+                  <label>CSV</label>
+                  <textarea [(ngModel)]="importCsv"></textarea>
+                </div>
               </div>
-              <div class="field">
-                <label>CSV</label>
-                <textarea [(ngModel)]="importCsv"></textarea>
+              @if (importResult()) {
+                <p class="mt-3 text-sm font-semibold text-[var(--text-muted)]">
+                  {{ importResult() }}
+                </p>
+              }
+              <div class="mt-5 flex flex-wrap justify-end gap-2">
+                <button type="button" class="btn-secondary" (click)="closeImportDialog()">
+                  Annuler
+                </button>
+                <button type="button" class="btn-primary" (click)="importAgents()">Importer</button>
               </div>
-            </div>
-            @if (importResult()) {
-              <p class="mt-3 text-sm font-semibold text-[var(--text-muted)]">{{ importResult() }}</p>
-            }
-            <div class="mt-5 flex flex-wrap justify-end gap-2">
-              <button type="button" class="btn-secondary" (click)="closeImportDialog()">Annuler</button>
-              <button type="button" class="btn-primary" (click)="importAgents()">Importer</button>
-            </div>
             </div>
           </div>
         }
@@ -196,12 +292,16 @@ interface PendingAction {
             <div class="flex flex-wrap items-end justify-between gap-3">
               <div>
                 <h3 class="font-black">Table de travail</h3>
-                <p class="text-sm text-[var(--text-muted)]">Filtre, trie, ouvre le detail, puis applique les actions utiles.</p>
+                <p class="text-sm text-[var(--text-muted)]">
+                  Filtre, trie, ouvre le detail, puis applique les actions utiles.
+                </p>
               </div>
               <span class="status-badge">{{ total() }} element(s)</span>
             </div>
 
-            <div class="grid gap-3 lg:grid-cols-[minmax(260px,1.2fr)_repeat(3,minmax(180px,0.6fr))]">
+            <div
+              class="grid gap-3 lg:grid-cols-[minmax(260px,1.2fr)_repeat(3,minmax(180px,0.6fr))]"
+            >
               <div class="field">
                 <label>Recherche dans la page</label>
                 <input
@@ -214,14 +314,20 @@ interface PendingAction {
                 <div class="field">
                   <label>{{ filter.label }}</label>
                   @if (filter.type === 'relation') {
-                    <select [(ngModel)]="filterValues[filter.key]" (ngModelChange)="filterChanged()">
+                    <select
+                      [(ngModel)]="filterValues[filter.key]"
+                      (ngModelChange)="filterChanged()"
+                    >
                       <option value="">Tous</option>
                       @for (option of optionsFor(filter.key); track option.id) {
                         <option [value]="option.id">{{ optionLabel(option) }}</option>
                       }
                     </select>
                   } @else {
-                    <select [(ngModel)]="filterValues[filter.key]" (ngModelChange)="filterChanged()">
+                    <select
+                      [(ngModel)]="filterValues[filter.key]"
+                      (ngModelChange)="filterChanged()"
+                    >
                       <option value="">Tous</option>
                       @for (option of filter.options ?? []; track option.value) {
                         <option [value]="option.value">{{ option.label }}</option>
@@ -250,10 +356,16 @@ interface PendingAction {
               </thead>
               <tbody>
                 @for (row of visibleRows(); track row['id'] ?? row) {
-                  <tr class="cursor-pointer" [class.is-selected]="selectedRow()?.['id'] === row['id']" (click)="selectRow(row)">
+                  <tr
+                    class="cursor-pointer"
+                    [class.is-selected]="selectedRow()?.['id'] === row['id']"
+                    (click)="selectRow(row)"
+                  >
                     @for (column of cfg.columns; track column) {
                       <td>
-                        <span [class]="badgeClass(column, row[column])">{{ display(column, row[column]) }}</span>
+                        <span [class]="badgeClass(column, row[column])">{{
+                          display(column, row[column])
+                        }}</span>
                       </td>
                     }
                     <td>
@@ -276,25 +388,63 @@ interface PendingAction {
                             [style.left.px]="menuPos()?.left"
                             (click)="$event.stopPropagation()"
                           >
-                            <button type="button" class="context-menu-item" role="menuitem" (click)="selectRowFromMenu(row, $event)">
+                            <button
+                              type="button"
+                              class="context-menu-item"
+                              role="menuitem"
+                              (click)="selectRowFromMenu(row, $event)"
+                            >
                               Detail
                             </button>
-                            <button type="button" class="context-menu-item" role="menuitem" (click)="exportRow(cfg, row, $event)">
+                            @if (canMutate(cfg) && hasEditableFields(cfg)) {
+                              <button
+                                type="button"
+                                class="context-menu-item"
+                                role="menuitem"
+                                (click)="openEditFromMenu(cfg, row, $event)"
+                              >
+                                Editer
+                              </button>
+                            }
+                            @if (cfg.manageAgents && canMutate(cfg)) {
+                              <button
+                                type="button"
+                                class="context-menu-item"
+                                role="menuitem"
+                                (click)="openAgentsFromMenu(cfg, row, $event)"
+                              >
+                                Gerer les agents
+                              </button>
+                            }
+                            <button
+                              type="button"
+                              class="context-menu-item"
+                              role="menuitem"
+                              (click)="exportRow(cfg, row, $event)"
+                            >
                               Exporter ligne
                             </button>
-                          @for (action of cfg.actions ?? []; track action.label) {
-                            <button type="button" class="context-menu-item" role="menuitem" (click)="runAction(action, row, $event)">
-                              {{ action.label }}
-                            </button>
-                          }
+                            @for (action of visibleActions(cfg); track action.label) {
+                              <button
+                                type="button"
+                                class="context-menu-item"
+                                role="menuitem"
+                                (click)="runAction(action, row, $event)"
+                              >
+                                {{ action.label }}
+                              </button>
+                            }
                           </div>
                         }
-                        </div>
-                      </td>
+                      </div>
+                    </td>
                   </tr>
                 } @empty {
                   <tr>
-                    <td class="px-4 py-8 text-center text-[var(--text-muted)]" [attr.colspan]="cfg.columns.length + 1">
+                    <td
+                      class="px-4 py-8 text-center text-[var(--text-muted)]"
+                      [attr.colspan]="cfg.columns.length + 1"
+                    >
                       Aucune donnee exploitable avec ces filtres.
                     </td>
                   </tr>
@@ -303,15 +453,27 @@ interface PendingAction {
             </table>
           </div>
 
-          <footer class="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line-subtle)] px-4 py-3">
+          <footer
+            class="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--line-subtle)] px-4 py-3"
+          >
             <span class="text-sm text-[var(--text-muted)]">
               Page {{ page() }} - {{ visibleRows().length }} affiche(s)
             </span>
             <div class="flex gap-2">
-              <button type="button" class="btn-secondary" [disabled]="page() <= 1" (click)="previousPage()">
+              <button
+                type="button"
+                class="btn-secondary"
+                [disabled]="page() <= 1"
+                (click)="previousPage()"
+              >
                 Precedent
               </button>
-              <button type="button" class="btn-secondary" [disabled]="page() * pageSize() >= total()" (click)="nextPage()">
+              <button
+                type="button"
+                class="btn-secondary"
+                [disabled]="page() * pageSize() >= total()"
+                (click)="nextPage()"
+              >
                 Suivant
               </button>
             </div>
@@ -319,21 +481,40 @@ interface PendingAction {
         </section>
 
         @if (selectedRow(); as row) {
-          <aside class="detail-drawer" role="dialog" aria-modal="true" [attr.aria-label]="'Detail ' + rowTitle(cfg, row)" (click)="selectedRow.set(null)">
+          <aside
+            class="detail-drawer"
+            role="dialog"
+            aria-modal="true"
+            [attr.aria-label]="'Detail ' + rowTitle(cfg, row)"
+            (click)="selectedRow.set(null)"
+          >
             <div class="detail-drawer__panel" (click)="$event.stopPropagation()">
-              <header class="flex items-start justify-between gap-3 border-b border-[var(--line-subtle)] p-4">
+              <header
+                class="flex items-start justify-between gap-3 border-b border-[var(--line-subtle)] p-4"
+              >
                 <div>
                   <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Detail</p>
                   <h3 class="text-lg font-black">{{ rowTitle(cfg, row) }}</h3>
                 </div>
-                <button type="button" class="btn-ghost" (click)="selectedRow.set(null)">Fermer</button>
+                <div class="flex items-center gap-2">
+                  @if (canMutate(cfg) && hasEditableFields(cfg)) {
+                    <button type="button" class="btn-secondary" (click)="openEdit(cfg, row)">
+                      Editer
+                    </button>
+                  }
+                  <button type="button" class="btn-ghost" (click)="selectedRow.set(null)">
+                    Fermer
+                  </button>
+                </div>
               </header>
               <dl class="grid gap-3 p-4 sm:grid-cols-2">
                 @for (field of detailFields(cfg); track field) {
                   <div class="detail-item">
                     <dt>{{ label(cfg, field) }}</dt>
                     <dd>
-                      <span [class]="badgeClass(field, row[field])">{{ display(field, row[field]) }}</span>
+                      <span [class]="badgeClass(field, row[field])">{{
+                        display(field, row[field])
+                      }}</span>
                     </dd>
                   </div>
                 }
@@ -343,24 +524,138 @@ interface PendingAction {
         }
 
         @if (pendingAction(); as pending) {
-          <div class="modal-backdrop" role="dialog" aria-modal="true" (click)="pendingAction.set(null)">
+          <div
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            (click)="pendingAction.set(null)"
+          >
             <div class="modal-panel" (click)="$event.stopPropagation()">
-              <h3 class="text-lg font-black">{{ pending.action.confirmTitle ?? 'Confirmer cette action ?' }}</h3>
+              <h3 class="text-lg font-black">
+                {{ pending.action.confirmTitle ?? 'Confirmer cette action ?' }}
+              </h3>
               <p class="mt-2 text-sm text-[var(--text-muted)]">
-                {{ pending.action.confirmMessage ? pending.action.confirmMessage(pending.row) : 'Cette action sera appliquee immediatement.' }}
+                {{
+                  pending.action.confirmMessage
+                    ? pending.action.confirmMessage(pending.row)
+                    : 'Cette action sera appliquee immediatement.'
+                }}
               </p>
               <div class="mt-5 flex flex-wrap justify-end gap-2">
-                <button type="button" class="btn-secondary" (click)="pendingAction.set(null)">Annuler</button>
-                <button type="button" class="btn-primary" (click)="confirmPendingAction()">Confirmer</button>
+                <button type="button" class="btn-secondary" (click)="pendingAction.set(null)">
+                  Annuler
+                </button>
+                <button type="button" class="btn-primary" (click)="confirmPendingAction()">
+                  Confirmer
+                </button>
               </div>
             </div>
           </div>
+        }
+
+        @if (statusContext(); as ctx) {
+          <div
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            [attr.aria-label]="ctx.action.label"
+            (keydown.escape)="statusContext.set(null)"
+            (click)="statusContext.set(null)"
+          >
+            <div class="modal-panel" (click)="$event.stopPropagation()">
+              <h3 class="text-lg font-black">{{ ctx.action.label }}</h3>
+              <p class="mt-1 text-sm text-[var(--text-muted)]">
+                Statut courant :
+                <span [class]="badgeClass('status', ctx.current)">{{
+                  display('status', ctx.current)
+                }}</span>
+              </p>
+              @if (ctx.options.length === 0) {
+                <p class="panel mt-4 p-3 text-sm text-[var(--text-muted)]">
+                  Aucune transition disponible depuis ce statut.
+                </p>
+                <div class="mt-5 flex justify-end">
+                  <button type="button" class="btn-secondary" (click)="statusContext.set(null)">
+                    Fermer
+                  </button>
+                </div>
+              } @else {
+                <form
+                  class="mt-4 grid gap-4"
+                  [formGroup]="statusForm"
+                  (ngSubmit)="submitStatus(ctx)"
+                >
+                  <div class="field">
+                    <label for="status-target"
+                      >Nouveau statut <span class="text-[var(--cameroon-red)]">*</span></label
+                    >
+                    <select id="status-target" formControlName="status">
+                      <option value="">Choisir...</option>
+                      @for (opt of ctx.options; track opt.value) {
+                        <option [value]="opt.value">{{ opt.label }}</option>
+                      }
+                    </select>
+                  </div>
+                  @for (extra of ctx.action.statusExtra ?? []; track extra.key) {
+                    <div class="field">
+                      <label [for]="'status-extra-' + extra.key">{{ extra.label }}</label>
+                      @if (extra.type === 'textarea') {
+                        <textarea
+                          [id]="'status-extra-' + extra.key"
+                          [formControlName]="extra.key"
+                          [placeholder]="extra.placeholder ?? ''"
+                        ></textarea>
+                      } @else if (extra.type === 'relation') {
+                        <select [id]="'status-extra-' + extra.key" [formControlName]="extra.key">
+                          <option value="">Choisir...</option>
+                          @for (option of optionsFor(extra.key); track option.id) {
+                            <option [value]="option.id">{{ optionLabel(option) }}</option>
+                          }
+                        </select>
+                      } @else {
+                        <input
+                          [id]="'status-extra-' + extra.key"
+                          type="text"
+                          [formControlName]="extra.key"
+                          [placeholder]="extra.placeholder ?? ''"
+                        />
+                      }
+                    </div>
+                  }
+                  <div class="flex flex-wrap justify-end gap-2">
+                    <button type="button" class="btn-secondary" (click)="statusContext.set(null)">
+                      Annuler
+                    </button>
+                    <button
+                      type="submit"
+                      class="btn-primary"
+                      [disabled]="statusForm.invalid || saving()"
+                    >
+                      {{ saving() ? 'Application...' : 'Appliquer' }}
+                    </button>
+                  </div>
+                </form>
+              }
+            </div>
+          </div>
+        }
+
+        @if (agentsDialog(); as ctx) {
+          <app-patrouille-agents-dialog
+            [patrouilleId]="ctx.patrouilleId"
+            [communeId]="ctx.communeId"
+            [patrouilleNom]="ctx.nom"
+            [patrouilleStatus]="ctx.status"
+            (closed)="agentsDialog.set(null)"
+          />
         }
       </section>
     } @else {
       <section class="panel p-5">
         <h2 class="text-xl font-black">Module indisponible</h2>
-        <p class="mt-2 text-[var(--text-muted)]">La route demandee ne correspond a aucun module du MVP.</p>
+        <p class="mt-2 text-[var(--text-muted)]">
+          La route demandee ne correspond a aucun module du MVP.
+        </p>
         <a routerLink="/dashboard" class="btn-primary mt-4">Retour dashboard</a>
       </section>
     }
@@ -390,14 +685,20 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected readonly importResult = signal<string | null>(null);
   protected readonly rowMenuKey = signal<string | null>(null);
   protected readonly menuPos = signal<{ top: number; left: number } | null>(null);
+  protected readonly formMode = signal<'create' | 'edit'>('create');
+  protected readonly editingId = signal<string | null>(null);
+  protected readonly statusContext = signal<StatusContext | null>(null);
+  protected readonly agentsDialog = signal<AgentsDialogContext | null>(null);
 
   protected search = '';
   protected sortKey = '';
   protected sortDirection: 'asc' | 'desc' = 'asc';
   protected filterValues: Record<string, string> = {};
   protected importCommuneId = '';
-  protected importCsv = 'matricule,full_name,grade,date_prise_fonction,formation_nasla,telephone,email\n';
+  protected importCsv =
+    'matricule,full_name,grade,date_prise_fonction,formation_nasla,telephone,email\n';
   protected form = new FormGroup<Record<string, FormControl<unknown>>>({});
+  protected statusForm = new FormGroup<Record<string, FormControl<unknown>>>({});
 
   ngOnInit(): void {
     this.subscription = this.route.paramMap.subscribe((params) => {
@@ -405,7 +706,7 @@ export class ResourcePage implements OnInit, OnDestroy {
       const cfg = resourceConfigs[key] ?? null;
       this.config.set(cfg);
       this.resetPageState();
-      this.buildForm(cfg);
+      this.buildForm(cfg?.createFields ?? []);
       if (cfg) {
         this.loadLookups(cfg);
         this.load();
@@ -418,12 +719,64 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   protected openForm(): void {
+    const cfg = this.config();
+    this.formMode.set('create');
+    this.editingId.set(null);
+    this.buildForm(cfg?.createFields ?? []);
     this.showForm.set(true);
     this.rowMenuKey.set(null);
   }
 
+  protected openEdit(cfg: ResourceConfig, row: Row): void {
+    const fields = cfg.patchFields ?? cfg.createFields ?? [];
+    this.formMode.set('edit');
+    this.editingId.set(String(row['id'] ?? ''));
+    this.buildForm(fields);
+    this.patchForm(fields, row);
+    this.selectedRow.set(null);
+    this.showForm.set(true);
+    this.rowMenuKey.set(null);
+  }
+
+  protected openEditFromMenu(cfg: ResourceConfig, row: Row, event: MouseEvent): void {
+    event.stopPropagation();
+    this.openEdit(cfg, row);
+  }
+
+  protected openAgentsFromMenu(cfg: ResourceConfig, row: Row, event: MouseEvent): void {
+    event.stopPropagation();
+    this.rowMenuKey.set(null);
+    this.agentsDialog.set({
+      patrouilleId: String(row['id'] ?? ''),
+      communeId: row['commune_id'] ? String(row['commune_id']) : null,
+      nom: String(row['nom'] ?? 'Patrouille'),
+      status: String(row['status'] ?? ''),
+    });
+  }
+
   protected closeForm(): void {
     this.showForm.set(false);
+    this.formMode.set('create');
+    this.editingId.set(null);
+  }
+
+  protected effectiveFields(cfg: ResourceConfig): ResourceField[] {
+    if (this.formMode() === 'edit') {
+      return cfg.patchFields ?? cfg.createFields ?? [];
+    }
+    return cfg.createFields ?? [];
+  }
+
+  protected formTitle(cfg: ResourceConfig): string {
+    return this.formMode() === 'edit' ? `Modifier - ${cfg.title}` : this.createLabel(cfg);
+  }
+
+  protected canOpenForm(cfg: ResourceConfig): boolean {
+    return this.formMode() === 'edit' ? this.canMutate(cfg) : this.canCreate(cfg);
+  }
+
+  protected hasEditableFields(cfg: ResourceConfig): boolean {
+    return Boolean(cfg.editable) && Boolean((cfg.patchFields ?? cfg.createFields)?.length);
   }
 
   protected openImportDialog(): void {
@@ -455,23 +808,30 @@ export class ResourcePage implements OnInit, OnDestroy {
           this.total.set(response.total);
           this.applyTableState();
         },
-        error: () => this.error.set('Chargement impossible. Verifie les droits ou la disponibilite API.'),
+        error: () =>
+          this.error.set('Chargement impossible. Verifie les droits ou la disponibilite API.'),
       });
   }
 
-  protected create(cfg: ResourceConfig): void {
+  protected submit(cfg: ResourceConfig): void {
     if (this.form.invalid) {
       this.form.markAllAsTouched();
       return;
     }
+    const fields = this.effectiveFields(cfg);
+    const payload = this.formPayload(fields);
+    const editing = this.formMode() === 'edit';
     this.saving.set(true);
     this.error.set(null);
-    this.api.post<Row>(cfg.endpoint, this.formPayload(cfg.createFields ?? [])).subscribe({
+    const request = editing
+      ? this.api.patch<Row>(`${cfg.endpoint}/${this.editingId()}`, payload)
+      : this.api.post<Row>(cfg.endpoint, payload);
+    request.subscribe({
       next: () => {
         this.saving.set(false);
         this.closeForm();
-        this.message.set('Enregistrement effectue.');
-        this.buildForm(cfg);
+        this.message.set(editing ? 'Modifications enregistrees.' : 'Enregistrement effectue.');
+        this.buildForm(cfg.createFields ?? []);
         this.load();
       },
       error: () => {
@@ -487,15 +847,17 @@ export class ResourcePage implements OnInit, OnDestroy {
       return;
     }
     this.api
-      .postText<{ created: number; updated: number; skipped: number }>(
-        '/api/v1/agents/import-csv',
-        this.importCsv,
-        { commune_id: this.importCommuneId.trim() },
-      )
+      .postText<{
+        created: number;
+        updated: number;
+        skipped: number;
+      }>('/api/v1/agents/import-csv', this.importCsv, { commune_id: this.importCommuneId.trim() })
       .subscribe({
         next: (result) => {
           this.showImportDialog.set(false);
-          this.message.set(`${result.created} cree(s), ${result.updated} mis a jour, ${result.skipped} ignore(s).`);
+          this.message.set(
+            `${result.created} cree(s), ${result.updated} mis a jour, ${result.skipped} ignore(s).`,
+          );
           this.load();
         },
         error: () => this.importResult.set("Import refuse. Verifie le CSV et les droits d'acces."),
@@ -509,11 +871,83 @@ export class ResourcePage implements OnInit, OnDestroy {
       this.api.openDownload(action.path(row), action.filename?.(row) ?? 'document');
       return;
     }
+    if (action.kind === 'status') {
+      this.openStatus(action, row);
+      return;
+    }
     if (action.sensitive || action.kind === 'delete') {
       this.pendingAction.set({ action, row });
       return;
     }
     this.executeAction(action, row);
+  }
+
+  protected visibleActions(cfg: ResourceConfig): ResourceAction[] {
+    return (cfg.actions ?? []).filter((action) => this.actionAllowed(cfg, action));
+  }
+
+  private actionAllowed(cfg: ResourceConfig, action: ResourceAction): boolean {
+    if (action.roles) {
+      return this.auth.hasAnyRole(action.roles);
+    }
+    if (action.kind === 'download') {
+      return true;
+    }
+    return this.canMutate(cfg);
+  }
+
+  private openStatus(action: ResourceAction, row: Row): void {
+    const current = String(row[action.statusFromKey ?? 'status'] ?? '');
+    const options = this.allowedStatusOptions(action, current);
+    const controls: Record<string, FormControl<unknown>> = {
+      status: new FormControl('', [Validators.required]),
+    };
+    for (const extra of action.statusExtra ?? []) {
+      controls[extra.key] = new FormControl('', extra.required ? [Validators.required] : []);
+    }
+    this.statusForm = new FormGroup(controls);
+    this.statusContext.set({ action, row, options, current });
+  }
+
+  private allowedStatusOptions(action: ResourceAction, current: string): SelectOption[] {
+    const all = action.statusOptions ?? [];
+    if (action.statusTransitions) {
+      const allowed = action.statusTransitions[current] ?? [];
+      return all.filter((opt) => allowed.includes(String(opt.value)));
+    }
+    return all.filter((opt) => String(opt.value) !== current);
+  }
+
+  protected submitStatus(ctx: StatusContext): void {
+    if (this.statusForm.invalid) {
+      this.statusForm.markAllAsTouched();
+      return;
+    }
+    const raw = this.statusForm.getRawValue() as Record<string, unknown>;
+    const payload: Record<string, unknown> = { status: raw['status'] };
+    for (const extra of ctx.action.statusExtra ?? []) {
+      const value = raw[extra.key];
+      if (value !== '' && value !== null && value !== undefined) {
+        payload[extra.key] = value;
+      }
+    }
+    this.saving.set(true);
+    this.error.set(null);
+    this.api.patch(ctx.action.path(ctx.row), payload).subscribe({
+      next: () => {
+        this.saving.set(false);
+        this.statusContext.set(null);
+        this.message.set('Statut mis a jour.');
+        this.load();
+      },
+      error: () => {
+        this.saving.set(false);
+        this.statusContext.set(null);
+        this.error.set(
+          "Changement de statut refuse par l'API (transition non autorisee ou droits insuffisants).",
+        );
+      },
+    });
   }
 
   protected confirmPendingAction(): void {
@@ -617,7 +1051,11 @@ export class ResourcePage implements OnInit, OnDestroy {
   /** Escape closes the top-most open overlay (most transient first). */
   @HostListener('document:keydown.escape')
   protected dismissOnEscape(): void {
-    if (this.pendingAction()) {
+    if (this.agentsDialog()) {
+      this.agentsDialog.set(null);
+    } else if (this.statusContext()) {
+      this.statusContext.set(null);
+    } else if (this.pendingAction()) {
       this.pendingAction.set(null);
     } else if (this.showForm()) {
       this.closeForm();
@@ -681,7 +1119,10 @@ export class ResourcePage implements OnInit, OnDestroy {
       const title = field.section ?? 'Informations';
       sections.set(title, [...(sections.get(title) ?? []), field]);
     }
-    return Array.from(sections.entries()).map(([title, sectionFields]) => ({ title, fields: sectionFields }));
+    return Array.from(sections.entries()).map(([title, sectionFields]) => ({
+      title,
+      fields: sectionFields,
+    }));
   }
 
   protected optionsFor(key: string): LookupOption[] {
@@ -693,15 +1134,25 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   protected selectedInterventionMeta(): string {
-    const interventionId = String(this.form.controls['intervention_id']?.value ?? '');
-    if (!interventionId) {
-      return 'Choisis une intervention pour afficher le montant officiel connu du referentiel.';
+    const selected = this.selectedInterventionIds();
+    if (!selected.length) {
+      return 'Choisis une ou plusieurs infractions pour afficher le montant officiel connu du referentiel.';
     }
-    const option = this.optionsFor('intervention_id').find((item) => item.id === interventionId);
-    if (!option) {
-      return 'Intervention selectionnee. Le backend calculera le montant officiel.';
+    const options = selected
+      .map(
+        (id) =>
+          this.optionsFor('intervention_ids').find((item) => item.id === id) ??
+          this.optionsFor('intervention_id').find((item) => item.id === id),
+      )
+      .filter((item): item is LookupOption => Boolean(item));
+    if (!options.length) {
+      return `${selected.length} infraction(s) selectionnee(s). Le backend calculera le montant officiel.`;
     }
-    return option.meta ? `${option.label} - ${option.meta} FCFA` : `${option.label} - montant calcule par le backend.`;
+    const total = options.reduce((sum, option) => sum + Number(option.meta ?? 0), 0);
+    const labels = options.map((option) => option.label).join(', ');
+    return total > 0
+      ? `${labels} - total connu ${total.toLocaleString('fr-FR')} FCFA`
+      : `${labels} - montant calcule par le backend.`;
   }
 
   protected detailFields(cfg: ResourceConfig): string[] {
@@ -725,6 +1176,12 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected display(column: string, value: unknown): string {
     if (value === null || value === undefined || value === '') {
       return '-';
+    }
+    if (column === 'subject_type') {
+      return this.displaySubjectType(value);
+    }
+    if (column === 'interventions') {
+      return this.displayInterventions(value);
     }
     const relation = this.lookupLabel(column, value);
     if (relation) {
@@ -778,11 +1235,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     let rows = this.rows().filter((row) => this.matchesLocalFilters(cfg, row));
 
     if (query) {
-      rows = rows.filter((row) =>
-        this.searchableText(row)
-          .toLowerCase()
-          .includes(query),
-      );
+      rows = rows.filter((row) => this.searchableText(row).toLowerCase().includes(query));
     }
 
     if (this.sortKey) {
@@ -862,6 +1315,13 @@ export class ResourcePage implements OnInit, OnDestroy {
         relations.set(filter.key, filter.relation);
       }
     }
+    for (const action of cfg.actions ?? []) {
+      for (const extra of action.statusExtra ?? []) {
+        if (extra.relation) {
+          relations.set(extra.key, extra.relation);
+        }
+      }
+    }
     return relations;
   }
 
@@ -871,8 +1331,12 @@ export class ResourcePage implements OnInit, OnDestroy {
     return {
       id,
       label: String(row[relation.labelKey] ?? id),
-      meta: row[relation.metaKey ?? ''] === undefined ? undefined : String(row[relation.metaKey ?? '']),
-      status: row[relation.statusKey ?? ''] === undefined ? undefined : String(row[relation.statusKey ?? '']),
+      meta:
+        row[relation.metaKey ?? ''] === undefined ? undefined : String(row[relation.metaKey ?? '']),
+      status:
+        row[relation.statusKey ?? ''] === undefined
+          ? undefined
+          : String(row[relation.statusKey ?? '']),
     };
   }
 
@@ -882,35 +1346,152 @@ export class ResourcePage implements OnInit, OnDestroy {
     return option?.label ?? null;
   }
 
-  private buildForm(cfg: ResourceConfig | null): void {
+  private buildForm(fields: ResourceField[]): void {
     const controls: Record<string, FormControl<unknown>> = {};
-    for (const field of cfg?.createFields ?? []) {
-      controls[field.key] = new FormControl(this.defaultValue(field), field.required ? [Validators.required] : []);
+    for (const field of fields) {
+      if (field.type === 'geopoint') {
+        controls[field.latKey ?? field.key] = new FormControl(null);
+        controls[field.lonKey ?? 'gps_longitude'] = new FormControl(null);
+        continue;
+      }
+      if (field.type === 'geopolygon') {
+        controls[field.key] = new FormControl(null);
+        continue;
+      }
+      if (field.type === 'relation_multi') {
+        controls[field.key] = new FormControl([], field.required ? [Validators.required] : []);
+        continue;
+      }
+      controls[field.key] = new FormControl(
+        this.defaultValue(field),
+        field.required ? [Validators.required] : [],
+      );
     }
     this.form = new FormGroup(controls);
+  }
+
+  private patchForm(fields: ResourceField[], row: Row): void {
+    for (const field of fields) {
+      if (field.type === 'geopoint') {
+        const latKey = field.latKey ?? field.key;
+        const lonKey = field.lonKey ?? 'gps_longitude';
+        this.form.controls[latKey]?.setValue(this.numOrNull(row[latKey]));
+        this.form.controls[lonKey]?.setValue(this.numOrNull(row[lonKey]));
+        continue;
+      }
+      if (field.type === 'geopolygon') {
+        this.form.controls[field.key]?.setValue(row[field.key] ?? null);
+        continue;
+      }
+      const control = this.form.controls[field.key];
+      if (!control) {
+        continue;
+      }
+      const raw = row[field.key];
+      if (field.type === 'checkbox') {
+        control.setValue(Boolean(raw));
+      } else if (field.type === 'relation_multi') {
+        control.setValue(this.relationMultiValue(field.key, row));
+      } else if (field.key === 'roles') {
+        control.setValue(Array.isArray(raw) ? String(raw[0] ?? '') : String(raw ?? ''));
+      } else if (raw === null || raw === undefined) {
+        control.setValue('');
+      } else if (field.type === 'relation') {
+        control.setValue(String(raw));
+      } else {
+        control.setValue(raw);
+      }
+    }
   }
 
   private defaultValue(field: ResourceField): unknown {
     if (field.type === 'checkbox') {
       return field.key === 'active' ? true : false;
     }
+    if (field.type === 'relation_multi') {
+      return [];
+    }
     return '';
+  }
+
+  private numOrNull(value: unknown): number | null {
+    return value === '' || value === null || value === undefined ? null : Number(value);
+  }
+
+  /** Champs occupant toute la largeur du formulaire (zone d'édition large). */
+  protected isWideField(field: ResourceField): boolean {
+    return field.type === 'textarea' || field.type === 'geopoint' || field.type === 'geopolygon';
+  }
+
+  protected geoNumber(key: string): number | null {
+    return this.numOrNull(this.form.get(key)?.value);
+  }
+
+  protected geoBoundary(key: string): GeoGeometry | null {
+    const value = this.form.get(key)?.value;
+    return (value ?? null) as GeoGeometry | null;
+  }
+
+  protected setControl(key: string, value: unknown): void {
+    const control = this.form.get(key);
+    if (control) {
+      control.setValue(value);
+      control.markAsDirty();
+    }
+  }
+
+  /** Pré-remplit le champ "Lieu" d'un PV avec l'adresse géocodée s'il est vide. */
+  protected onAddressResolved(address: string): void {
+    const control = this.form.get('location_description');
+    if (control && !String(control.value ?? '').trim()) {
+      control.setValue(address);
+    }
   }
 
   private formPayload(fields: ResourceField[]): Record<string, unknown> {
     const raw = this.form.getRawValue() as Record<string, unknown>;
     const payload: Record<string, unknown> = {};
     for (const field of fields) {
+      if (field.type === 'geopoint') {
+        const latKey = field.latKey ?? field.key;
+        const lonKey = field.lonKey ?? 'gps_longitude';
+        payload[latKey] = this.numOrNull(raw[latKey]);
+        payload[lonKey] = this.numOrNull(raw[lonKey]);
+        continue;
+      }
+      if (field.type === 'geopolygon') {
+        const boundary = raw[field.key];
+        if (boundary && typeof boundary === 'object') {
+          payload[field.key] = boundary;
+        }
+        continue;
+      }
       const value = raw[field.key];
       if (field.type === 'checkbox') {
         payload[field.key] = Boolean(value);
       } else if (field.type === 'number' || field.type === 'money') {
         payload[field.key] = value === '' || value === null ? null : Number(value);
+      } else if (field.type === 'relation_multi') {
+        const values = Array.isArray(value)
+          ? value.map((item) => String(item)).filter(Boolean)
+          : String(value ?? '')
+              .split(',')
+              .map((item) => item.trim())
+              .filter(Boolean);
+        if (values.length) {
+          payload[field.key] = values;
+          if (field.key === 'intervention_ids') {
+            payload['intervention_id'] = values[0];
+          }
+        }
       } else if (field.type === 'array') {
-        payload[field.key] = String(value ?? '')
+        const values = String(value ?? '')
           .split(',')
           .map((item) => item.trim())
           .filter(Boolean);
+        if (values.length) {
+          payload[field.key] = values;
+        }
       } else if (field.key === 'roles') {
         payload[field.key] = value ? [String(value)] : [];
       } else if (value !== '' && value !== null && value !== undefined) {
@@ -965,6 +1546,10 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.lookups.set({});
     this.selectedRow.set(null);
     this.pendingAction.set(null);
+    this.statusContext.set(null);
+    this.agentsDialog.set(null);
+    this.formMode.set('create');
+    this.editingId.set(null);
     this.error.set(null);
     this.message.set(null);
     this.showForm.set(false);
@@ -987,6 +1572,62 @@ export class ResourcePage implements OnInit, OnDestroy {
       .split('_')
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
       .join(' ');
+  }
+
+  private selectedInterventionIds(): string[] {
+    const multi = this.form.controls['intervention_ids']?.value;
+    if (Array.isArray(multi)) {
+      return multi.map((item) => String(item)).filter(Boolean);
+    }
+    const legacy = this.form.controls['intervention_id']?.value;
+    return legacy ? [String(legacy)] : [];
+  }
+
+  private relationMultiValue(key: string, row: Row): string[] {
+    const raw = row[key];
+    if (Array.isArray(raw)) {
+      return raw.map((item) => String(item)).filter(Boolean);
+    }
+    if (key === 'intervention_ids' && Array.isArray(row['interventions'])) {
+      return row['interventions']
+        .map((item) => (this.isRecord(item) ? item['intervention_id'] : null))
+        .filter((item): item is string => typeof item === 'string' && item.length > 0);
+    }
+    return [];
+  }
+
+  private displaySubjectType(value: unknown): string {
+    switch (String(value)) {
+      case 'PERSON_ONLY':
+        return 'Usager sans vehicule';
+      case 'VEHICLE_ONLY':
+        return 'Vehicule sans conducteur';
+      case 'PERSON_WITH_VEHICLE':
+        return 'Usager avec vehicule';
+      default:
+        return String(value);
+    }
+  }
+
+  private displayInterventions(value: unknown): string {
+    if (!Array.isArray(value)) {
+      return this.display('intervention_id', value);
+    }
+    const labels = value
+      .map((item) => {
+        if (!this.isRecord(item)) {
+          return String(item);
+        }
+        const name = String(item['nom'] ?? item['intervention_id'] ?? '').trim();
+        const amount = Number(item['montant_fcfa'] ?? 0);
+        return amount > 0 ? `${name} (${amount.toLocaleString('fr-FR')} FCFA)` : name;
+      })
+      .filter(Boolean);
+    return labels.length ? labels.join(', ') : '-';
+  }
+
+  private isRecord(value: unknown): value is Row {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
   }
 
   private canUse(roles: RoleCode[] | undefined): boolean {

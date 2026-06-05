@@ -6,6 +6,8 @@ pub mod communes;
 pub mod dashboard;
 pub mod demo_seed;
 pub mod exports;
+pub mod geo;
+pub mod mobile;
 pub mod patrouilles;
 pub mod payments;
 pub mod pdf;

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
-use crate::helpers::resolve_commune_filter;
+use crate::helpers::{resolve_commune_filter, validate_gps};
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -57,9 +57,18 @@ pub struct SignalementResponse {
     pub description: String,
     pub contact_anonyme: bool,
     pub status: String,
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// Colonnes exposées par les SELECT (lat/lon castées en double precision).
+const SIGNALEMENT_COLUMNS: &str = "id, commune_id, signalement_number, type_incident, \
+    location_description, description, contact_anonyme, status, \
+    gps_latitude::double precision AS gps_latitude, \
+    gps_longitude::double precision AS gps_longitude, \
+    created_at, updated_at";
 
 #[derive(Debug, Serialize)]
 pub struct SignalementCreatedResponse {
@@ -85,6 +94,8 @@ pub struct CreateSignalementRequest {
     pub description: String,
     pub contact_anonyme: Option<bool>,
     pub contact_info: Option<String>,
+    pub gps_latitude: Option<f64>,
+    pub gps_longitude: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,6 +170,7 @@ async fn create_signalement_public(
     let type_incident = required_text(payload.type_incident, "type_incident")?;
     let location = required_text(payload.location_description, "location_description")?;
     let description = required_text(payload.description, "description")?;
+    validate_gps(payload.gps_latitude, payload.gps_longitude)?;
 
     let mut tx = state.db.begin().await?;
 
@@ -183,8 +195,9 @@ async fn create_signalement_public(
         r#"
         INSERT INTO signalements (
             id, commune_id, signalement_number, type_incident,
-            location_description, description, contact_anonyme, contact_info
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            location_description, description, contact_anonyme, contact_info,
+            gps_latitude, gps_longitude
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(id)
@@ -195,6 +208,8 @@ async fn create_signalement_public(
     .bind(&description)
     .bind(anonyme)
     .bind(contact_info)
+    .bind(payload.gps_latitude)
+    .bind(payload.gps_longitude)
     .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
@@ -230,8 +245,9 @@ async fn list_signalements(
     apply_filters(&mut count_qb, commune_filter, query.status.as_deref());
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let mut qb: QueryBuilder<sqlx::Postgres> =
-        QueryBuilder::new("SELECT * FROM signalements WHERE 1=1");
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
+        "SELECT {SIGNALEMENT_COLUMNS} FROM signalements WHERE 1=1"
+    ));
     apply_filters(&mut qb, commune_filter, query.status.as_deref());
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(pagination.limit)
@@ -309,11 +325,13 @@ async fn patch_signalement_status(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn load_signalement(pool: &PgPool, id: Uuid) -> Result<SignalementResponse, ApiError> {
-    let row = sqlx::query("SELECT * FROM signalements WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Signalement introuvable"))?;
+    let row = sqlx::query(&format!(
+        "SELECT {SIGNALEMENT_COLUMNS} FROM signalements WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Signalement introuvable"))?;
     Ok(row_to_signalement(row))
 }
 
@@ -327,6 +345,8 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
         description: row.get("description"),
         contact_anonyme: row.get("contact_anonyme"),
         status: row.get("status"),
+        gps_latitude: row.get("gps_latitude"),
+        gps_longitude: row.get("gps_longitude"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

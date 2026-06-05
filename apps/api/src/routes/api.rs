@@ -1,4 +1,4 @@
-use axum::{extract::State, Json, Router};
+use axum::{Json, Router, extract::State};
 use serde::Serialize;
 
 use crate::modules;
@@ -17,7 +17,9 @@ pub fn router() -> Router<AppState> {
         .merge(modules::payments::router())
         .merge(modules::signalements::router())
         .merge(modules::patrouilles::router())
+        .merge(modules::mobile::router())
         .merge(modules::dashboard::router())
+        .merge(modules::geo::router())
         .merge(modules::audit_logs::router())
         .merge(modules::exports::router())
         .merge(modules::search::router())

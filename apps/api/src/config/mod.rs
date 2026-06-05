@@ -20,6 +20,18 @@ pub struct AppConfig {
     pub rate_limit_window_seconds: u64,
     pub rate_limit_login_max: u32,
     pub rate_limit_public_max: u32,
+    pub s3: Option<S3Config>,
+}
+
+/// Object storage (MinIO/S3) configuration for PV photos. Optional: when the
+/// required variables are absent, photo endpoints report storage as disabled.
+#[derive(Clone, Debug)]
+pub struct S3Config {
+    pub endpoint: String,
+    pub region: String,
+    pub bucket: String,
+    pub access_key: String,
+    pub secret_key: String,
 }
 
 #[derive(Debug, Error)]
@@ -84,6 +96,8 @@ impl AppConfig {
         let rate_limit_public_max =
             optional_u32("RATE_LIMIT_PUBLIC_MAX", 60, "RATE_LIMIT_PUBLIC_MAX")?;
 
+        let s3 = load_s3_config();
+
         Ok(Self {
             app_env,
             app_port,
@@ -101,8 +115,26 @@ impl AppConfig {
             rate_limit_window_seconds,
             rate_limit_login_max,
             rate_limit_public_max,
+            s3,
         })
     }
+}
+
+fn load_s3_config() -> Option<S3Config> {
+    let endpoint = env::var("S3_ENDPOINT").ok().filter(|v| !v.trim().is_empty())?;
+    let access_key = env::var("S3_ACCESS_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
+    let secret_key = env::var("S3_SECRET_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
+    Some(S3Config {
+        endpoint,
+        region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+        bucket: env::var("S3_BUCKET").unwrap_or_else(|_| "apmtrack-pv-photos".to_string()),
+        access_key,
+        secret_key,
+    })
 }
 
 fn required_env(name: &'static str) -> Result<String, ConfigError> {

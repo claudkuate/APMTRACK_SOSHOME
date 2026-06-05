@@ -90,6 +90,13 @@ pub struct ValidatePaymentRequest {
     pub amount_paid: Option<f64>,
 }
 
+struct PaymentComputation {
+    amount_due_fcfa: i64,
+    amount_penalty_fcfa: i64,
+    amount_total_fcfa: i64,
+    due_date: DateTime<Utc>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handlers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -182,13 +189,8 @@ async fn list_pending(
             p.id AS pv_id,
             p.pv_number,
             p.commune_id,
-            p.amount_initial::DOUBLE PRECISION AS amount_initial,
-            p.amount_initial_fcfa,
-            p.created_at,
-            i.delai_paiement_jours,
-            i.taux_penalite::DOUBLE PRECISION AS taux_penalite
+            p.created_at
         FROM pvs p
-        JOIN interventions i ON p.intervention_id = i.id
         WHERE p.status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
           AND p.deleted_at IS NULL
         "#,
@@ -203,37 +205,25 @@ async fn list_pending(
         .push_bind(pagination.offset);
 
     let rows = qb.build().fetch_all(&state.db).await?;
-    let now = Utc::now();
-
-    let items = rows
-        .into_iter()
-        .map(|row| {
-            let amount_due: f64 = row.get::<Option<f64>, _>("amount_initial").unwrap_or(0.0);
-            let amount_due_fcfa: Option<i64> = row.get("amount_initial_fcfa");
-            let delai: i32 = row
-                .get::<Option<i32>, _>("delai_paiement_jours")
-                .unwrap_or(30);
-            let rate: f64 = row.get::<Option<f64>, _>("taux_penalite").unwrap_or(0.0);
-            let created_at: DateTime<Utc> = row.get("created_at");
-            let due_date = created_at + Duration::days(delai as i64);
-            let penalty = calculate_penalty(amount_due, rate, due_date, now);
-            let penalty_fcfa =
-                calculate_penalty_fcfa(amount_due_fcfa.unwrap_or(0), rate, due_date, now);
-            PendingPvResponse {
-                pv_id: row.get("pv_id"),
-                pv_number: row.get("pv_number"),
-                commune_id: row.get("commune_id"),
-                amount_due,
-                amount_penalty: penalty,
-                amount_total: amount_due + penalty,
-                amount_due_fcfa,
-                amount_penalty_fcfa: penalty_fcfa,
-                amount_total_fcfa: amount_due_fcfa.map(|amount| amount + penalty_fcfa),
-                due_date,
-                created_at,
-            }
-        })
-        .collect();
+    let mut items = Vec::with_capacity(rows.len());
+    for row in rows {
+        let pv_id: Uuid = row.get("pv_id");
+        let created_at: DateTime<Utc> = row.get("created_at");
+        let computed = payment_computation_pool(&state.db, pv_id, created_at).await?;
+        items.push(PendingPvResponse {
+            pv_id,
+            pv_number: row.get("pv_number"),
+            commune_id: row.get("commune_id"),
+            amount_due: computed.amount_due_fcfa as f64,
+            amount_penalty: computed.amount_penalty_fcfa as f64,
+            amount_total: computed.amount_total_fcfa as f64,
+            amount_due_fcfa: Some(computed.amount_due_fcfa),
+            amount_penalty_fcfa: computed.amount_penalty_fcfa,
+            amount_total_fcfa: Some(computed.amount_total_fcfa),
+            due_date: computed.due_date,
+            created_at,
+        });
+    }
 
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
@@ -269,9 +259,7 @@ async fn validate_payment(
     let pv_row = sqlx::query(
         r#"
         SELECT
-            id, commune_id, status, intervention_id, pv_number,
-            amount_initial::DOUBLE PRECISION AS amount_initial,
-            amount_initial_fcfa, created_at
+            id, commune_id, status, pv_number, created_at
         FROM pvs
         WHERE id = $1 AND deleted_at IS NULL
         FOR UPDATE
@@ -308,40 +296,14 @@ async fn validate_payment(
         return Err(ApiError::conflict("Ce PV a deja un paiement valide"));
     }
 
-    let intervention_id: Uuid = pv_row.get("intervention_id");
-    let interv_row = sqlx::query(
-        r#"
-        SELECT
-            delai_paiement_jours,
-            taux_penalite::DOUBLE PRECISION AS taux_penalite
-        FROM interventions
-        WHERE id = $1
-        "#,
-    )
-    .bind(intervention_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
-    let delai: i32 = interv_row
-        .get::<Option<i32>, _>("delai_paiement_jours")
-        .unwrap_or(30);
-    let rate: f64 = interv_row
-        .get::<Option<f64>, _>("taux_penalite")
-        .unwrap_or(0.0);
-
-    let amount_due = pv_row
-        .get::<Option<f64>, _>("amount_initial")
-        .unwrap_or(0.0);
-    let amount_due_fcfa = pv_row
-        .get::<Option<i64>, _>("amount_initial_fcfa")
-        .unwrap_or_else(|| amount_due.round() as i64);
     let created_at: DateTime<Utc> = pv_row.get("created_at");
-    let due_date = created_at + Duration::days(delai as i64);
-    let now = Utc::now();
-    let amount_penalty = calculate_penalty(amount_due, rate, due_date, now);
-    let amount_penalty_fcfa = calculate_penalty_fcfa(amount_due_fcfa, rate, due_date, now);
-    let amount_total = amount_due + amount_penalty;
-    let amount_total_fcfa = amount_due_fcfa + amount_penalty_fcfa;
+    let computed = payment_computation_tx(&mut tx, pv_id, created_at).await?;
+    let amount_due_fcfa = computed.amount_due_fcfa;
+    let amount_penalty_fcfa = computed.amount_penalty_fcfa;
+    let amount_total_fcfa = computed.amount_total_fcfa;
+    let amount_due = amount_due_fcfa as f64;
+    let amount_penalty = amount_penalty_fcfa as f64;
+    let amount_total = amount_total_fcfa as f64;
 
     if amount_paid_fcfa < amount_total_fcfa {
         return Err(ApiError::bad_request(format!(
@@ -508,6 +470,83 @@ fn row_to_payment(row: sqlx::postgres::PgRow) -> PaymentResponse {
 }
 
 /// Pénalité = montant × taux% si la date d'échéance est dépassée.
+async fn payment_computation_pool(
+    pool: &PgPool,
+    pv_id: Uuid,
+    created_at: DateTime<Utc>,
+) -> Result<PaymentComputation, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT montant_fcfa, delai_paiement_jours,
+               taux_penalite::DOUBLE PRECISION AS taux_penalite
+        FROM pv_interventions
+        WHERE pv_id = $1 AND sujet_paiement = TRUE
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(pv_id)
+    .fetch_all(pool)
+    .await?;
+    payment_computation_from_rows(rows, created_at)
+}
+
+async fn payment_computation_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    pv_id: Uuid,
+    created_at: DateTime<Utc>,
+) -> Result<PaymentComputation, ApiError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT montant_fcfa, delai_paiement_jours,
+               taux_penalite::DOUBLE PRECISION AS taux_penalite
+        FROM pv_interventions
+        WHERE pv_id = $1 AND sujet_paiement = TRUE
+        ORDER BY order_index ASC
+        "#,
+    )
+    .bind(pv_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    payment_computation_from_rows(rows, created_at)
+}
+
+fn payment_computation_from_rows(
+    rows: Vec<sqlx::postgres::PgRow>,
+    created_at: DateTime<Utc>,
+) -> Result<PaymentComputation, ApiError> {
+    if rows.is_empty() {
+        return Err(ApiError::conflict("Ce PV n'a aucune infraction payante"));
+    }
+
+    let now = Utc::now();
+    let mut amount_due_fcfa = 0_i64;
+    let mut amount_penalty_fcfa = 0_i64;
+    let mut earliest_due_date: Option<DateTime<Utc>> = None;
+    for row in rows {
+        let amount = row.get::<Option<i64>, _>("montant_fcfa").unwrap_or(0);
+        let delay = row
+            .get::<Option<i32>, _>("delai_paiement_jours")
+            .unwrap_or(30);
+        let rate = row
+            .get::<Option<f64>, _>("taux_penalite")
+            .unwrap_or(0.0);
+        let due_date = created_at + Duration::days(delay as i64);
+        amount_due_fcfa += amount;
+        amount_penalty_fcfa += calculate_penalty_fcfa(amount, rate, due_date, now);
+        earliest_due_date = Some(match earliest_due_date {
+            Some(existing) if existing <= due_date => existing,
+            _ => due_date,
+        });
+    }
+
+    Ok(PaymentComputation {
+        amount_due_fcfa,
+        amount_penalty_fcfa,
+        amount_total_fcfa: amount_due_fcfa + amount_penalty_fcfa,
+        due_date: earliest_due_date.unwrap_or(created_at),
+    })
+}
+
 pub fn calculate_penalty(
     amount_due: f64,
     penalty_rate: f64,

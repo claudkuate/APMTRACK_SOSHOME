@@ -1,3 +1,4 @@
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::errors::ApiError;
@@ -107,6 +108,113 @@ pub fn validate_gps(latitude: Option<f64>, longitude: Option<f64>) -> Result<(),
         }
     }
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Géospatial
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Limite serveur du nombre d'objets renvoyés par couche cartographique.
+pub const GEO_MAX_FEATURES: i64 = 5000;
+
+/// Parse une bbox `minLon,minLat,maxLon,maxLat` (ordre GeoJSON / Leaflet `toBBoxString`).
+pub fn parse_bbox(value: &str) -> Result<(f64, f64, f64, f64), ApiError> {
+    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 4 {
+        return Err(ApiError::bad_request(
+            "bbox doit etre au format minLon,minLat,maxLon,maxLat",
+        ));
+    }
+    let mut nums = [0.0_f64; 4];
+    for (i, raw) in parts.iter().enumerate() {
+        nums[i] = raw
+            .parse::<f64>()
+            .map_err(|_| ApiError::bad_request("bbox contient une valeur non numerique"))?;
+    }
+    let (min_lon, min_lat, max_lon, max_lat) = (nums[0], nums[1], nums[2], nums[3]);
+    validate_gps(Some(min_lat), Some(min_lon))?;
+    validate_gps(Some(max_lat), Some(max_lon))?;
+    if min_lon > max_lon || min_lat > max_lat {
+        return Err(ApiError::bad_request("bbox: les bornes min/max sont inversees"));
+    }
+    Ok((min_lon, min_lat, max_lon, max_lat))
+}
+
+/// Valide qu'une valeur JSON est une géométrie GeoJSON `Polygon` ou `MultiPolygon`
+/// dont les anneaux sont fermés (premier point == dernier point).
+pub fn validate_geojson_polygon(value: &Value) -> Result<(), ApiError> {
+    let geom_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("boundary: GeoJSON sans champ 'type'"))?;
+
+    let rings: Vec<&Value> = match geom_type {
+        "Polygon" => value
+            .get("coordinates")
+            .and_then(Value::as_array)
+            .map(|rings| rings.iter().collect())
+            .ok_or_else(|| ApiError::bad_request("boundary: Polygon sans 'coordinates'"))?,
+        "MultiPolygon" => {
+            let polys = value
+                .get("coordinates")
+                .and_then(Value::as_array)
+                .ok_or_else(|| ApiError::bad_request("boundary: MultiPolygon sans 'coordinates'"))?;
+            polys
+                .iter()
+                .filter_map(Value::as_array)
+                .flatten()
+                .collect()
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "boundary: type GeoJSON non supporte '{other}' (attendu Polygon ou MultiPolygon)"
+            )))
+        }
+    };
+
+    if rings.is_empty() {
+        return Err(ApiError::bad_request("boundary: aucun anneau de coordonnees"));
+    }
+
+    for ring in rings {
+        let points = ring
+            .as_array()
+            .ok_or_else(|| ApiError::bad_request("boundary: anneau invalide"))?;
+        if points.len() < 4 {
+            return Err(ApiError::bad_request(
+                "boundary: un anneau doit comporter au moins 4 points (ferme)",
+            ));
+        }
+        for point in points {
+            let coords = point
+                .as_array()
+                .filter(|c| c.len() >= 2)
+                .ok_or_else(|| ApiError::bad_request("boundary: point [lon, lat] invalide"))?;
+            let lon = coords[0]
+                .as_f64()
+                .ok_or_else(|| ApiError::bad_request("boundary: longitude invalide"))?;
+            let lat = coords[1]
+                .as_f64()
+                .ok_or_else(|| ApiError::bad_request("boundary: latitude invalide"))?;
+            validate_gps(Some(lat), Some(lon))?;
+        }
+        if points.first() != points.last() {
+            return Err(ApiError::bad_request(
+                "boundary: chaque anneau doit etre ferme (premier point == dernier point)",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Construit une `FeatureCollection` GeoJSON à partir de features déjà assemblées.
+pub fn feature_collection(features: Vec<Value>) -> Value {
+    json!({ "type": "FeatureCollection", "features": features })
+}
+
+/// Construit une `Feature` GeoJSON à partir d'une géométrie (déjà GeoJSON) et de propriétés.
+pub fn geo_feature(geometry: Value, properties: Value) -> Value {
+    json!({ "type": "Feature", "geometry": geometry, "properties": properties })
 }
 
 pub fn csv_safe_field(value: &str) -> String {

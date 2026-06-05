@@ -11,6 +11,7 @@ import { RoleCode, SearchResult } from '../shared/api-types';
 
 type IconKey =
   | 'dashboard'
+  | 'map'
   | 'pv'
   | 'payments'
   | 'signalements'
@@ -42,6 +43,7 @@ interface NavGroup {
 const ICONS: Record<IconKey, string> = {
   dashboard:
     '<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>',
+  map: '<path d="m9 4 6 2 5-2v14l-5 2-6-2-5 2V6z"/><path d="M9 4v14M15 6v14"/><circle cx="12" cy="10" r="1.4"/>',
   pv: '<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/><path d="M9 9h1M9 13h6M9 17h6"/>',
   payments:
     '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/><path d="M6 15h4"/>',
@@ -403,6 +405,7 @@ export class AppShellComponent implements OnDestroy {
       label: 'Pilotage',
       items: [
         { label: 'Tableau de bord', route: '/dashboard', icon: 'dashboard' },
+        { label: 'Carte', route: '/carte', icon: 'map' },
         { label: 'Procès-verbaux', route: '/pvs', icon: 'pv' },
         { label: 'Caisse & paiements', route: '/payments', icon: 'payments', badge: 'payments', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'RECEVEUR', 'SUPERVISEUR'] },
         { label: 'Signalements', route: '/signalements', icon: 'signalements', badge: 'signalements', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },

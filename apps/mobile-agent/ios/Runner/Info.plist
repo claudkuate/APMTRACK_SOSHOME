@@ -49,6 +49,12 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>APMTRACK utilise la camera pour scanner les QR codes des PV et photographier des preuves.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>APMTRACK permet de joindre des photos preuve depuis votre galerie a un PV.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>APMTRACK utilise la position pour rattacher un PV ou une patrouille au terrain.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

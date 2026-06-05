@@ -70,6 +70,11 @@ export const routes: Routes = [
           import('./features/status/status').then((module) => module.Status),
       },
       {
+        path: 'carte',
+        loadComponent: () =>
+          import('./features/carte/carte-map.page').then((module) => module.CarteMapPage),
+      },
+      {
         path: 'payments',
         loadComponent: () =>
           import('./features/payments/payments.page').then((module) => module.PaymentsPage),
@@ -81,8 +86,8 @@ export const routes: Routes = [
       },
       {
         path: 'search',
-        redirectTo: 'dashboard',
-        pathMatch: 'full',
+        loadComponent: () =>
+          import('./features/search/search.page').then((module) => module.SearchPage),
       },
       {
         path: 'exports',

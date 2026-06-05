@@ -3,12 +3,14 @@ use apmtrack_api::database;
 use apmtrack_api::modules::auth::{assign_roles, hash_password};
 use apmtrack_api::modules::rbac::Role;
 use apmtrack_api::state::AppState;
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sqlx::Row;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
@@ -17,6 +19,7 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
         return;
     }
 
+    let _db_guard = DB_TEST_LOCK.lock().await;
     let state = test_state();
     database::run_migrations(&state.db)
         .await
@@ -179,6 +182,277 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
     assert_eq!(old_refresh_rejected.status, StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
+    if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
+        return;
+    }
+
+    let _db_guard = DB_TEST_LOCK.lock().await;
+    let state = test_state();
+    database::run_migrations(&state.db)
+        .await
+        .expect("migrations");
+    reset_database(&state).await;
+    let super_admin = seed_test_super_admin(&state).await;
+    let app = apmtrack_api::build_app(state.clone());
+
+    let admin_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({
+            "email": super_admin.email,
+            "password": super_admin.password
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(admin_login.status, StatusCode::OK);
+    let admin_token = admin_login.body["access_token"]
+        .as_str()
+        .expect("admin token");
+
+    let commune = create_commune(&app, admin_token, "YDE1", "Yaounde 1").await;
+    let commune_id = commune["id"].as_str().expect("commune id");
+
+    let agent_user = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/users",
+        json!({
+            "email": "agent.mobile@example.test",
+            "password": "agent-mobile-password",
+            "full_name": "Agent Mobile",
+            "commune_id": commune_id,
+            "roles": ["APM_AGENT"]
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(agent_user.status, StatusCode::OK);
+    let agent_user_id = agent_user.body["id"].as_str().expect("agent user id");
+
+    let agent = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/agents",
+        json!({
+            "matricule": "APM-YDE1-MOB",
+            "full_name": "Agent Mobile",
+            "commune_id": commune_id,
+            "grade": "Agent",
+            "user_id": agent_user_id
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(agent.status, StatusCode::OK);
+    let agent_id = agent.body["id"].as_str().expect("agent id");
+
+    let category = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/categories",
+        json!({
+            "commune_id": commune_id,
+            "nom": "Circulation",
+            "description": "Infractions circulation"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(category.status, StatusCode::OK);
+    let category_id = category.body["id"].as_str().expect("category id");
+
+    let intervention_type = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/types",
+        json!({
+            "commune_id": commune_id,
+            "category_id": category_id,
+            "nom": "Stationnement"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(intervention_type.status, StatusCode::OK);
+    let type_id = intervention_type.body["id"].as_str().expect("type id");
+
+    let intervention = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/interventions",
+        json!({
+            "commune_id": commune_id,
+            "type_id": type_id,
+            "nom": "Stationnement interdit",
+            "sujet_paiement": true,
+            "montant_fcfa": 10000,
+            "delai_paiement_jours": 7,
+            "reference_deliberation": "DEL-YDE1-TEST"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(
+        intervention.status,
+        StatusCode::OK,
+        "create intervention response: {:?}",
+        intervention.body
+    );
+    let intervention_id = intervention.body["id"].as_str().expect("intervention id");
+
+    let patrouille = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/patrouilles",
+        json!({
+            "commune_id": commune_id,
+            "nom": "Patrouille mobile test"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(patrouille.status, StatusCode::CREATED);
+    let patrouille_id = patrouille.body["id"].as_str().expect("patrouille id");
+
+    let assigned = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/patrouilles/{patrouille_id}/agents"),
+        json!({
+            "agent_id": agent_id,
+            "role_patrouille": "CHEF"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(assigned.status, StatusCode::CREATED);
+
+    let started = request_empty(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/patrouilles/{patrouille_id}/start"),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(started.status, StatusCode::OK);
+
+    let agent_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({
+            "email": "agent.mobile@example.test",
+            "password": "agent-mobile-password"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(agent_login.status, StatusCode::OK);
+    let agent_token = agent_login.body["access_token"]
+        .as_str()
+        .expect("agent token");
+
+    let mobile_me = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/mobile/me",
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(mobile_me.status, StatusCode::OK);
+    assert_eq!(mobile_me.body["agent"]["id"], agent_id);
+
+    let mobile_interventions = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/mobile/interventions",
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(mobile_interventions.status, StatusCode::OK);
+    assert_eq!(
+        mobile_interventions
+            .body
+            .as_array()
+            .expect("interventions")
+            .len(),
+        1
+    );
+
+    let mobile_patrouille = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/mobile/patrouille-active",
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(mobile_patrouille.status, StatusCode::OK);
+    assert_eq!(mobile_patrouille.body["patrouille"]["id"], patrouille_id);
+
+    let position = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/patrouilles/{patrouille_id}/positions"),
+        json!({
+            "latitude": 3.8667,
+            "longitude": 11.5167,
+            "accuracy_m": 8.5
+        }),
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(position.status, StatusCode::CREATED);
+
+    let pv = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_id": intervention_id,
+            "vehicle_plate": "CE123AB",
+            "location_description": "Carrefour test",
+            "gps_latitude": 3.8667,
+            "gps_longitude": 11.5167
+        }),
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(pv.status, StatusCode::CREATED);
+    assert_eq!(pv.body["amount_initial_fcfa"], 10000);
+
+    let agent_pvs = request_empty(app.clone(), Method::GET, "/api/v1/pvs", Some(agent_token)).await;
+    assert_eq!(agent_pvs.status, StatusCode::OK);
+    assert_eq!(agent_pvs.body["total"], 1);
+
+    let suspended = request_empty(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/agents/{agent_id}/suspend"),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::OK);
+
+    let rejected_pv = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_id": intervention_id,
+            "vehicle_plate": "CE999AB",
+            "location_description": "Carrefour test"
+        }),
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(rejected_pv.status, StatusCode::FORBIDDEN);
+}
+
 struct TestUser {
     email: String,
     password: String,
@@ -210,6 +484,7 @@ fn test_state() -> AppState {
         rate_limit_window_seconds: 60,
         rate_limit_login_max: 10,
         rate_limit_public_max: 60,
+        s3: None,
     };
 
     AppState::try_new(config).expect("state")

@@ -32,13 +32,7 @@ pub async fn generate_pv_pdf(pool: &PgPool, pv: &PvResponse) -> Result<Vec<u8>, 
         })
         .unwrap_or_else(|| (String::new(), String::new()));
 
-    let interv_nom: String = sqlx::query_scalar("SELECT nom FROM interventions WHERE id = $1")
-        .bind(pv.intervention_id)
-        .fetch_optional(pool)
-        .await?
-        .unwrap_or_else(|| "Intervention".to_string());
-
-    let bytes = build_pv_pdf(pv, &commune_nom, &agent_matricule, &agent_nom, &interv_nom)?;
+    let bytes = build_pv_pdf(pv, &commune_nom, &agent_matricule, &agent_nom)?;
     Ok(bytes)
 }
 
@@ -66,7 +60,6 @@ fn build_pv_pdf(
     commune_nom: &str,
     agent_matricule: &str,
     agent_nom: &str,
-    interv_nom: &str,
 ) -> Result<Vec<u8>, ApiError> {
     let (doc, page1, layer1) = PdfDocument::new("Procès-Verbal", Mm(210.0), Mm(297.0), "Page 1");
     let current_layer = doc.get_page(page1).get_layer(layer1);
@@ -158,39 +151,60 @@ fn build_pv_pdf(
         );
     }
 
-    // Infraction
-    current_layer.use_text("INFRACTION CONSTATÉE", 11.0, Mm(20.0), Mm(167.0), &font);
-    current_layer.use_text(
-        format!("Nature : {interv_nom}"),
-        10.0,
-        Mm(20.0),
-        Mm(159.0),
-        &font_regular,
-    );
+    // Infractions
+    current_layer.use_text("INFRACTIONS CONSTATÉES", 11.0, Mm(20.0), Mm(167.0), &font);
+    let mut y = 159.0;
+    if pv.interventions.is_empty() {
+        current_layer.use_text("Nature : -", 10.0, Mm(20.0), Mm(y), &font_regular);
+    } else {
+        for item in pv.interventions.iter().take(5) {
+            let amount = item
+                .montant_fcfa
+                .map(|value| format!(" - {value} FCFA"))
+                .unwrap_or_default();
+            current_layer.use_text(
+                format!("{}. {}{}", item.order_index + 1, item.nom, amount),
+                9.0,
+                Mm(20.0),
+                Mm(y),
+                &font_regular,
+            );
+            y -= 6.0;
+        }
+        if pv.interventions.len() > 5 {
+            current_layer.use_text(
+                format!("+ {} autre(s) infraction(s)", pv.interventions.len() - 5),
+                9.0,
+                Mm(20.0),
+                Mm(y),
+                &font_regular,
+            );
+        }
+    }
     if let Some(loc) = &pv.location_description {
         current_layer.use_text(
             format!("Lieu : {loc}"),
             10.0,
             Mm(20.0),
-            Mm(152.0),
+            Mm(128.0),
             &font_regular,
         );
     }
 
     // Montant
-    current_layer.use_text("MONTANT DE L'AMENDE", 11.0, Mm(20.0), Mm(139.0), &font);
+    current_layer.use_text("MONTANT DE L'AMENDE", 11.0, Mm(20.0), Mm(116.0), &font);
     let montant_str = pv
-        .amount_initial
-        .map(|m| format!("{:.0} FCFA", m))
+        .amount_initial_fcfa
+        .map(|m| format!("{m} FCFA"))
         .unwrap_or_else(|| "Non applicable".to_string());
-    current_layer.use_text(&montant_str, 13.0, Mm(20.0), Mm(131.0), &font);
+    current_layer.use_text(&montant_str, 13.0, Mm(20.0), Mm(108.0), &font);
 
     // Statut
     current_layer.use_text(
         format!("Statut : {}", pv.status),
         10.0,
         Mm(20.0),
-        Mm(120.0),
+        Mm(98.0),
         &font_regular,
     );
 

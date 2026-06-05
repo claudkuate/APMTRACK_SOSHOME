@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::validate_geojson_polygon;
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -39,6 +40,8 @@ struct CreateCommuneRequest {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: Option<bool>,
+    /// Contour GeoJSON (Polygon ou MultiPolygon) optionnel.
+    boundary: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,8 @@ struct PatchCommuneRequest {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: Option<bool>,
+    /// Contour GeoJSON (Polygon ou MultiPolygon) optionnel — remplace l'existant si fourni.
+    boundary: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -70,9 +75,19 @@ pub struct CommuneResponse {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: bool,
+    /// Contour GeoJSON (MultiPolygon) ou null.
+    boundary: Option<serde_json::Value>,
+    /// Centre GeoJSON (Point) calculé depuis le contour, ou null.
+    centre: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
+
+/// Colonnes exposées par les SELECT (le contour est converti en GeoJSON texte).
+const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, adresse, telephone, email, \
+    site_web, logo_url, theme_color, active, \
+    ST_AsGeoJSON(boundary) AS boundary_geojson, ST_AsGeoJSON(centre) AS centre_geojson, \
+    created_at, updated_at";
 
 async fn get_commune(
     State(state): State<AppState>,
@@ -112,15 +127,15 @@ async fn list_communes(
             .fetch_one(&state.db)
             .await?
             .get("total");
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT *
+            SELECT {COMMUNE_COLUMNS}
             FROM communes
             WHERE deleted_at IS NULL
             ORDER BY created_at DESC
             LIMIT $1 OFFSET $2
-            "#,
-        )
+            "#
+        ))
         .bind(pagination.limit)
         .bind(pagination.offset)
         .fetch_all(&state.db)
@@ -137,14 +152,14 @@ async fn list_communes(
         .fetch_one(&state.db)
         .await?
         .get("total");
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             r#"
-            SELECT *
+            SELECT {COMMUNE_COLUMNS}
             FROM communes
             WHERE id = $1 AND deleted_at IS NULL
             LIMIT $2 OFFSET $3
-            "#,
-        )
+            "#
+        ))
         .bind(commune_id)
         .bind(pagination.limit)
         .bind(pagination.offset)
@@ -164,14 +179,20 @@ async fn create_commune(
 ) -> Result<Json<CommuneResponse>, ApiError> {
     auth_user.require_any_role(&[Role::SuperAdmin])?;
 
+    let boundary_json = prepare_boundary(payload.boundary)?;
     let commune_id = Uuid::new_v4();
+    // $13 (contour GeoJSON) alimente `boundary` (forcé MultiPolygon) et le `centre` (centroïde).
     sqlx::query(
         r#"
         INSERT INTO communes (
             id, code, nom, region, departement, adresse, telephone,
-            email, site_web, logo_url, theme_color, active
+            email, site_web, logo_url, theme_color, active, boundary, centre
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+            ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)),
+            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326))
+        )
         "#,
     )
     .bind(commune_id)
@@ -186,6 +207,7 @@ async fn create_commune(
     .bind(clean_optional(payload.logo_url))
     .bind(clean_optional(payload.theme_color))
     .bind(payload.active.unwrap_or(true))
+    .bind(&boundary_json)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -235,7 +257,9 @@ async fn patch_commune(
         .map_or(Ok(existing.departement.clone()), |value| {
             required_text(value, "departement")
         })?;
+    let boundary_json = prepare_boundary(payload.boundary)?;
 
+    // Le contour ($13) n'est mis à jour que s'il est fourni (COALESCE conserve l'existant sinon).
     sqlx::query(
         r#"
         UPDATE communes
@@ -250,6 +274,8 @@ async fn patch_commune(
             logo_url = $10,
             theme_color = $11,
             active = $12,
+            boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)), boundary),
+            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)), centre),
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -266,6 +292,7 @@ async fn patch_commune(
     .bind(payload.logo_url.or(existing.logo_url.clone()))
     .bind(payload.theme_color.or(existing.theme_color.clone()))
     .bind(payload.active.unwrap_or(existing.active))
+    .bind(&boundary_json)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -288,13 +315,13 @@ async fn patch_commune(
 }
 
 pub async fn load_commune(pool: &PgPool, commune_id: Uuid) -> Result<CommuneResponse, ApiError> {
-    let row = sqlx::query(
+    let row = sqlx::query(&format!(
         r#"
-        SELECT *
+        SELECT {COMMUNE_COLUMNS}
         FROM communes
         WHERE id = $1 AND deleted_at IS NULL
-        "#,
-    )
+        "#
+    ))
     .bind(commune_id)
     .fetch_optional(pool)
     .await?
@@ -317,8 +344,25 @@ fn row_to_commune(row: sqlx::postgres::PgRow) -> CommuneResponse {
         logo_url: row.get("logo_url"),
         theme_color: row.get("theme_color"),
         active: row.get("active"),
+        boundary: row
+            .get::<Option<String>, _>("boundary_geojson")
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        centre: row
+            .get::<Option<String>, _>("centre_geojson")
+            .and_then(|s| serde_json::from_str(&s).ok()),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+/// Valide un contour GeoJSON optionnel et le sérialise en texte pour `ST_GeomFromGeoJSON`.
+fn prepare_boundary(boundary: Option<serde_json::Value>) -> Result<Option<String>, ApiError> {
+    match boundary {
+        Some(value) if !value.is_null() => {
+            validate_geojson_polygon(&value)?;
+            Ok(Some(value.to_string()))
+        }
+        _ => Ok(None),
     }
 }
 

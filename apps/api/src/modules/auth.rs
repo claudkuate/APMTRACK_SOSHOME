@@ -1041,6 +1041,7 @@ mod tests {
             rate_limit_window_seconds: 60,
             rate_limit_login_max: 10,
             rate_limit_public_max: 60,
+            s3: None,
         };
         let user_id = Uuid::new_v4();
         let token = create_access_token(

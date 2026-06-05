@@ -2,9 +2,17 @@ import { HttpErrorResponse, HttpInterceptorFn } from '@angular/common/http';
 import { inject } from '@angular/core';
 import { catchError, switchMap, throwError } from 'rxjs';
 
+import { apiBaseUrl } from '../config/runtime-config';
 import { AuthService } from '../services/auth.service';
 
 export const authInterceptor: HttpInterceptorFn = (request, next) => {
+  // Ne jamais joindre le jeton ni les cookies aux requêtes externes (ex. Nominatim/OSM).
+  const isApiRequest =
+    request.url.startsWith(apiBaseUrl()) || request.url.startsWith('/api/');
+  if (!isApiRequest) {
+    return next(request);
+  }
+
   const auth = inject(AuthService);
   const token = auth.accessToken();
   const isAuthRoute = request.url.includes('/api/v1/auth/');

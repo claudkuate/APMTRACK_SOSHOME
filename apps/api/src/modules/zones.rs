@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
-use crate::helpers::resolve_commune_filter;
+use crate::helpers::{resolve_commune_filter, validate_geojson_polygon};
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
@@ -53,6 +53,8 @@ struct CreateZoneRequest {
     type_zone: String,
     parent_id: Option<Uuid>,
     active: Option<bool>,
+    /// Contour GeoJSON (Polygon) optionnel.
+    boundary: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +63,8 @@ struct PatchZoneRequest {
     type_zone: Option<String>,
     parent_id: Option<Uuid>,
     active: Option<bool>,
+    /// Contour GeoJSON (Polygon) optionnel — remplace le contour existant si fourni.
+    boundary: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -71,9 +75,18 @@ pub struct ZoneResponse {
     pub type_zone: String,
     pub parent_id: Option<Uuid>,
     pub active: bool,
+    /// Contour GeoJSON (Polygon) ou null.
+    pub boundary: Option<serde_json::Value>,
+    /// Centre GeoJSON (Point) calculé depuis le contour, ou null.
+    pub centre: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+/// Colonnes exposées par les SELECT (le contour est converti en GeoJSON texte).
+const ZONE_COLUMNS: &str = "id, commune_id, nom, type_zone, parent_id, active, \
+    ST_AsGeoJSON(boundary) AS boundary_geojson, ST_AsGeoJSON(centre) AS centre_geojson, \
+    created_at, updated_at";
 
 async fn list_zones(
     State(state): State<AppState>,
@@ -113,8 +126,9 @@ async fn list_zones(
     }
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
-    let mut qb: QueryBuilder<sqlx::Postgres> =
-        QueryBuilder::new("SELECT * FROM zones WHERE deleted_at IS NULL");
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
+        "SELECT {ZONE_COLUMNS} FROM zones WHERE deleted_at IS NULL"
+    ));
     if let Some(id) = commune_filter {
         qb.push(" AND commune_id = ").push_bind(id);
     }
@@ -161,6 +175,7 @@ async fn create_zone(
 
     let nom = required_text(payload.nom, "nom")?;
     let type_zone = validate_type_zone(payload.type_zone)?;
+    let boundary_json = prepare_boundary(payload.boundary)?;
 
     if let Some(parent_id) = payload.parent_id {
         let parent = load_zone(&state.db, parent_id).await?;
@@ -173,10 +188,15 @@ async fn create_zone(
 
     let zone_id = Uuid::new_v4();
     // Pas de vérification de cycle ici car la zone n'existe pas encore.
+    // $7 (contour GeoJSON) alimente à la fois `boundary` et le `centre` (centroïde).
     sqlx::query(
         r#"
-        INSERT INTO zones (id, commune_id, nom, type_zone, parent_id, active)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO zones (id, commune_id, nom, type_zone, parent_id, active, boundary, centre)
+        VALUES (
+            $1, $2, $3, $4, $5, $6,
+            ST_SetSRID(ST_GeomFromGeoJSON($7), 4326),
+            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($7), 4326))
+        )
         "#,
     )
     .bind(zone_id)
@@ -185,6 +205,7 @@ async fn create_zone(
     .bind(&type_zone)
     .bind(payload.parent_id)
     .bind(payload.active.unwrap_or(true))
+    .bind(&boundary_json)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -224,6 +245,7 @@ async fn patch_zone(
         Some(v) => validate_type_zone(v)?,
         None => existing.type_zone.clone(),
     };
+    let boundary_json = prepare_boundary(payload.boundary)?;
 
     if let Some(parent_id) = payload.parent_id {
         if parent_id == zone_id {
@@ -241,10 +263,17 @@ async fn patch_zone(
         check_zone_cycle(&state.db, zone_id, parent_id).await?;
     }
 
+    // Le contour ($6) n'est mis à jour que s'il est fourni (COALESCE conserve l'existant sinon).
     sqlx::query(
         r#"
         UPDATE zones
-        SET nom = $2, type_zone = $3, parent_id = $4, active = $5, updated_at = now()
+        SET nom = $2,
+            type_zone = $3,
+            parent_id = $4,
+            active = $5,
+            boundary = COALESCE(ST_SetSRID(ST_GeomFromGeoJSON($6), 4326), boundary),
+            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($6), 4326)), centre),
+            updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -253,6 +282,7 @@ async fn patch_zone(
     .bind(&type_zone)
     .bind(payload.parent_id.or(existing.parent_id))
     .bind(payload.active.unwrap_or(existing.active))
+    .bind(&boundary_json)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -320,12 +350,19 @@ async fn delete_zone(
 }
 
 pub async fn load_zone(pool: &PgPool, zone_id: Uuid) -> Result<ZoneResponse, ApiError> {
-    let row = sqlx::query("SELECT * FROM zones WHERE id = $1 AND deleted_at IS NULL")
-        .bind(zone_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("Zone introuvable"))?;
+    let row = sqlx::query(&format!(
+        "SELECT {ZONE_COLUMNS} FROM zones WHERE id = $1 AND deleted_at IS NULL"
+    ))
+    .bind(zone_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Zone introuvable"))?;
     Ok(row_to_zone(row))
+}
+
+fn parse_geojson_column(row: &sqlx::postgres::PgRow, column: &str) -> Option<serde_json::Value> {
+    row.get::<Option<String>, _>(column)
+        .and_then(|s| serde_json::from_str(&s).ok())
 }
 
 fn row_to_zone(row: sqlx::postgres::PgRow) -> ZoneResponse {
@@ -336,8 +373,22 @@ fn row_to_zone(row: sqlx::postgres::PgRow) -> ZoneResponse {
         type_zone: row.get("type_zone"),
         parent_id: row.get("parent_id"),
         active: row.get("active"),
+        boundary: parse_geojson_column(&row, "boundary_geojson"),
+        centre: parse_geojson_column(&row, "centre_geojson"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+/// Valide un contour GeoJSON optionnel et le sérialise en texte pour `ST_GeomFromGeoJSON`.
+/// Renvoie `None` si aucun contour n'est fourni.
+fn prepare_boundary(boundary: Option<serde_json::Value>) -> Result<Option<String>, ApiError> {
+    match boundary {
+        Some(value) if !value.is_null() => {
+            validate_geojson_polygon(&value)?;
+            Ok(Some(value.to_string()))
+        }
+        _ => Ok(None),
     }
 }
 
