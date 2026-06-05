@@ -109,7 +109,9 @@ async fn overview(
     for layer in requested {
         let fc = match layer.as_str() {
             "pvs" => pvs_features(&state.db, commune_filter, bbox, status).await?,
-            "signalements" => signalements_features(&state.db, commune_filter, bbox, status).await?,
+            "signalements" => {
+                signalements_features(&state.db, commune_filter, bbox, status).await?
+            }
             "zones" => zones_features(&state.db, commune_filter, bbox).await?,
             "communes" => communes_features(&state.db, commune_filter, bbox).await?,
             "patrouilles" => patrouilles_features(&state.db, commune_filter).await?,
@@ -295,7 +297,8 @@ async fn pvs_features(
 ) -> Result<Value, ApiError> {
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "SELECT id, pv_number, status, commune_id, agent_id, zone_id, \
-         amount_initial_fcfa, ST_AsGeoJSON(geom) AS geojson \
+         amount_initial_fcfa, verbalized_name, verbalized_identity_number, \
+         vehicle_plate, vehicle_registration_card_number, ST_AsGeoJSON(geom) AS geojson \
          FROM pvs WHERE deleted_at IS NULL AND geom IS NOT NULL",
     );
     if let Some(id) = commune_filter {
@@ -323,6 +326,10 @@ async fn pvs_features(
                     "agent_id": row.get::<Uuid, _>("agent_id"),
                     "zone_id": row.get::<Option<Uuid>, _>("zone_id"),
                     "amount_initial_fcfa": row.get::<Option<i64>, _>("amount_initial_fcfa"),
+                    "verbalized_name": row.get::<Option<String>, _>("verbalized_name"),
+                    "verbalized_identity_number": row.get::<Option<String>, _>("verbalized_identity_number"),
+                    "vehicle_plate": row.get::<Option<String>, _>("vehicle_plate"),
+                    "vehicle_registration_card_number": row.get::<Option<String>, _>("vehicle_registration_card_number"),
                     "route": format!("/pvs/{}", row.get::<Uuid, _>("id")),
                 }),
             )
@@ -387,7 +394,8 @@ async fn zones_features(
         qb.push(" AND commune_id = ").push_bind(id);
     }
     apply_bbox(&mut qb, "boundary", bbox);
-    qb.push(" ORDER BY nom ASC LIMIT ").push_bind(GEO_MAX_FEATURES);
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(GEO_MAX_FEATURES);
 
     let rows = qb.build().fetch_all(pool).await?;
     let features = rows
@@ -423,7 +431,8 @@ async fn communes_features(
         qb.push(" AND id = ").push_bind(id);
     }
     apply_bbox(&mut qb, "boundary", bbox);
-    qb.push(" ORDER BY nom ASC LIMIT ").push_bind(GEO_MAX_FEATURES);
+    qb.push(" ORDER BY nom ASC LIMIT ")
+        .push_bind(GEO_MAX_FEATURES);
 
     let rows = qb.build().fetch_all(pool).await?;
     let features = rows

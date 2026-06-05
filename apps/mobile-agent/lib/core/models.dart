@@ -296,7 +296,18 @@ class Pv {
     this.zoneId,
     this.verbalizedName,
     this.verbalizedIdentifier,
+    this.verbalizedFirstName,
+    this.verbalizedLastName,
+    this.verbalizedIdentityType,
+    this.verbalizedIdentityNumber,
+    this.verbalizedPhone,
+    this.verbalizedAddress,
     this.vehiclePlate,
+    this.vehicleRegistrationCardNumber,
+    this.vehicleMake,
+    this.vehicleModel,
+    this.vehicleColor,
+    this.vehicleOwnerName,
     this.locationDescription,
     this.gpsLatitude,
     this.gpsLongitude,
@@ -312,7 +323,18 @@ class Pv {
   final String? zoneId;
   final String? verbalizedName;
   final String? verbalizedIdentifier;
+  final String? verbalizedFirstName;
+  final String? verbalizedLastName;
+  final String? verbalizedIdentityType;
+  final String? verbalizedIdentityNumber;
+  final String? verbalizedPhone;
+  final String? verbalizedAddress;
   final String? vehiclePlate;
+  final String? vehicleRegistrationCardNumber;
+  final String? vehicleMake;
+  final String? vehicleModel;
+  final String? vehicleColor;
+  final String? vehicleOwnerName;
   final String? locationDescription;
   final double? gpsLatitude;
   final double? gpsLongitude;
@@ -335,6 +357,33 @@ class Pv {
     return '${interventions.length} infractions';
   }
 
+  String? get verbalizedDisplayName {
+    final composed = [verbalizedFirstName, verbalizedLastName]
+        .whereType<String>()
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .join(' ');
+    return composed.isEmpty ? verbalizedName : composed;
+  }
+
+  String? get verbalizedIdentityLabel {
+    final number = verbalizedIdentityNumber ?? verbalizedIdentifier;
+    if (number == null || number.trim().isEmpty) return null;
+    final type = verbalizedIdentityType;
+    return type == null || type.trim().isEmpty ? number : '$type $number';
+  }
+
+  String? get vehicleIdentityLabel {
+    if (vehiclePlate != null && vehiclePlate!.trim().isNotEmpty) {
+      return vehiclePlate;
+    }
+    if (vehicleRegistrationCardNumber != null &&
+        vehicleRegistrationCardNumber!.trim().isNotEmpty) {
+      return 'CG ${vehicleRegistrationCardNumber!}';
+    }
+    return null;
+  }
+
   factory Pv.fromJson(JsonMap json) {
     return Pv(
       id: readString(json, 'id'),
@@ -350,7 +399,27 @@ class Pv {
       zoneId: readOptionalString(json, 'zone_id'),
       verbalizedName: readOptionalString(json, 'verbalized_name'),
       verbalizedIdentifier: readOptionalString(json, 'verbalized_identifier'),
+      verbalizedFirstName: readOptionalString(json, 'verbalized_first_name'),
+      verbalizedLastName: readOptionalString(json, 'verbalized_last_name'),
+      verbalizedIdentityType: readOptionalString(
+        json,
+        'verbalized_identity_type',
+      ),
+      verbalizedIdentityNumber: readOptionalString(
+        json,
+        'verbalized_identity_number',
+      ),
+      verbalizedPhone: readOptionalString(json, 'verbalized_phone'),
+      verbalizedAddress: readOptionalString(json, 'verbalized_address'),
       vehiclePlate: readOptionalString(json, 'vehicle_plate'),
+      vehicleRegistrationCardNumber: readOptionalString(
+        json,
+        'vehicle_registration_card_number',
+      ),
+      vehicleMake: readOptionalString(json, 'vehicle_make'),
+      vehicleModel: readOptionalString(json, 'vehicle_model'),
+      vehicleColor: readOptionalString(json, 'vehicle_color'),
+      vehicleOwnerName: readOptionalString(json, 'vehicle_owner_name'),
       locationDescription: readOptionalString(json, 'location_description'),
       gpsLatitude: readOptionalDouble(json, 'gps_latitude'),
       gpsLongitude: readOptionalDouble(json, 'gps_longitude'),
@@ -370,7 +439,18 @@ class Pv {
     'zone_id': zoneId,
     'verbalized_name': verbalizedName,
     'verbalized_identifier': verbalizedIdentifier,
+    'verbalized_first_name': verbalizedFirstName,
+    'verbalized_last_name': verbalizedLastName,
+    'verbalized_identity_type': verbalizedIdentityType,
+    'verbalized_identity_number': verbalizedIdentityNumber,
+    'verbalized_phone': verbalizedPhone,
+    'verbalized_address': verbalizedAddress,
     'vehicle_plate': vehiclePlate,
+    'vehicle_registration_card_number': vehicleRegistrationCardNumber,
+    'vehicle_make': vehicleMake,
+    'vehicle_model': vehicleModel,
+    'vehicle_color': vehicleColor,
+    'vehicle_owner_name': vehicleOwnerName,
     'location_description': locationDescription,
     'gps_latitude': gpsLatitude,
     'gps_longitude': gpsLongitude,
@@ -447,7 +527,18 @@ class CreatePvPayload {
     this.subjectType = PvSubjectTypes.personWithVehicle,
     this.verbalizedName,
     this.verbalizedIdentifier,
+    this.verbalizedFirstName,
+    this.verbalizedLastName,
+    this.verbalizedIdentityType,
+    this.verbalizedIdentityNumber,
+    this.verbalizedPhone,
+    this.verbalizedAddress,
     this.vehiclePlate,
+    this.vehicleRegistrationCardNumber,
+    this.vehicleMake,
+    this.vehicleModel,
+    this.vehicleColor,
+    this.vehicleOwnerName,
     this.locationDescription,
     this.gpsLatitude,
     this.gpsLongitude,
@@ -459,7 +550,18 @@ class CreatePvPayload {
   final String subjectType;
   final String? verbalizedName;
   final String? verbalizedIdentifier;
+  final String? verbalizedFirstName;
+  final String? verbalizedLastName;
+  final String? verbalizedIdentityType;
+  final String? verbalizedIdentityNumber;
+  final String? verbalizedPhone;
+  final String? verbalizedAddress;
   final String? vehiclePlate;
+  final String? vehicleRegistrationCardNumber;
+  final String? vehicleMake;
+  final String? vehicleModel;
+  final String? vehicleColor;
+  final String? vehicleOwnerName;
   final String? locationDescription;
   final double? gpsLatitude;
   final double? gpsLongitude;
@@ -473,7 +575,18 @@ class CreatePvPayload {
     'subject_type': subjectType,
     'verbalized_name': verbalizedName,
     'verbalized_identifier': verbalizedIdentifier,
+    'verbalized_first_name': verbalizedFirstName,
+    'verbalized_last_name': verbalizedLastName,
+    'verbalized_identity_type': verbalizedIdentityType,
+    'verbalized_identity_number': verbalizedIdentityNumber,
+    'verbalized_phone': verbalizedPhone,
+    'verbalized_address': verbalizedAddress,
     'vehicle_plate': vehiclePlate,
+    'vehicle_registration_card_number': vehicleRegistrationCardNumber,
+    'vehicle_make': vehicleMake,
+    'vehicle_model': vehicleModel,
+    'vehicle_color': vehicleColor,
+    'vehicle_owner_name': vehicleOwnerName,
     'location_description': locationDescription,
     'gps_latitude': gpsLatitude,
     'gps_longitude': gpsLongitude,

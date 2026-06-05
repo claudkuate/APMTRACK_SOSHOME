@@ -7,4 +7,3 @@ const appEnvironment = String.fromEnvironment(
   'APP_ENV',
   defaultValue: 'development',
 );
- 

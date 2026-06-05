@@ -165,8 +165,8 @@ class HomePage extends StatelessWidget {
                         [
                           pv.subjectLabel,
                           pv.infractionsLabel,
-                          pv.vehiclePlate,
-                          pv.verbalizedName,
+                          pv.vehicleIdentityLabel,
+                          pv.verbalizedDisplayName,
                         ].whereType<String>().join(' - '),
                       ),
                       trailing: StatusPill(status: pv.status),

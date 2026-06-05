@@ -11,7 +11,9 @@ interface PvRow {
   status: string;
   amount_initial_fcfa: number | null;
   verbalized_name: string | null;
+  verbalized_identity_number: string | null;
   vehicle_plate: string | null;
+  vehicle_registration_card_number: string | null;
   created_at: string;
 }
 
@@ -192,7 +194,15 @@ interface StatusBar {
                   @for (pv of recentPvs(); track pv.id) {
                     <tr>
                       <td class="num font-semibold">{{ pv.pv_number }}</td>
-                      <td>{{ pv.verbalized_name || pv.vehicle_plate || '—' }}</td>
+                      <td>
+                        {{
+                          pv.verbalized_name ||
+                            pv.vehicle_plate ||
+                            pv.vehicle_registration_card_number ||
+                            pv.verbalized_identity_number ||
+                            '—'
+                        }}
+                      </td>
                       <td class="num">{{ pv.amount_initial_fcfa ? fcfa(pv.amount_initial_fcfa) : '—' }}</td>
                       <td class="text-[var(--text-muted)]">{{ date(pv.created_at) }}</td>
                       <td><span [class]="badgeClass(pv.status)">{{ humanStatus(pv.status) }}</span></td>

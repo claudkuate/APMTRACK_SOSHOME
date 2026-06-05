@@ -72,10 +72,32 @@ class _PvDetailPageState extends State<PvDetailPage> {
                 _DetailRow(label: 'Date', value: formatShortDate(pv.createdAt)),
                 _DetailRow(label: 'Type', value: pv.subjectLabel),
                 _DetailRow(label: 'Plaque', value: pv.vehiclePlate ?? '-'),
-                _DetailRow(label: 'Verbalise', value: pv.verbalizedName ?? '-'),
                 _DetailRow(
-                  label: 'Identifiant',
-                  value: pv.verbalizedIdentifier ?? '-',
+                  label: 'Carte grise',
+                  value: pv.vehicleRegistrationCardNumber ?? '-',
+                ),
+                _DetailRow(label: 'Marque', value: pv.vehicleMake ?? '-'),
+                _DetailRow(label: 'Modele', value: pv.vehicleModel ?? '-'),
+                _DetailRow(label: 'Couleur', value: pv.vehicleColor ?? '-'),
+                _DetailRow(
+                  label: 'Proprietaire',
+                  value: pv.vehicleOwnerName ?? '-',
+                ),
+                _DetailRow(
+                  label: 'Verbalise',
+                  value: pv.verbalizedDisplayName ?? '-',
+                ),
+                _DetailRow(
+                  label: 'Piece',
+                  value: pv.verbalizedIdentityLabel ?? '-',
+                ),
+                _DetailRow(
+                  label: 'Telephone',
+                  value: pv.verbalizedPhone ?? '-',
+                ),
+                _DetailRow(
+                  label: 'Adresse',
+                  value: pv.verbalizedAddress ?? '-',
                 ),
                 _DetailRow(label: 'Lieu', value: pv.locationDescription ?? '-'),
                 _DetailRow(

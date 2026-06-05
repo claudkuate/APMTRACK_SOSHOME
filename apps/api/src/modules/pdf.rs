@@ -122,8 +122,8 @@ fn build_pv_pdf(
         &font_regular,
     );
 
-    // Verbalisé
-    current_layer.use_text("PERSONNE VERBALISÉE", 11.0, Mm(20.0), Mm(202.0), &font);
+    // Verbalise
+    current_layer.use_text("PERSONNE VERBALISEE", 11.0, Mm(20.0), Mm(202.0), &font);
     current_layer.use_text(
         format!("Nom : {}", pv.verbalized_name.as_deref().unwrap_or("-")),
         10.0,
@@ -133,27 +133,75 @@ fn build_pv_pdf(
     );
     current_layer.use_text(
         format!(
-            "Identifiant : {}",
-            pv.verbalized_identifier.as_deref().unwrap_or("-")
+            "Piece : {} {}",
+            pv.verbalized_identity_type.as_deref().unwrap_or("-"),
+            pv.verbalized_identity_number
+                .as_deref()
+                .or(pv.verbalized_identifier.as_deref())
+                .unwrap_or("-")
         ),
         10.0,
         Mm(20.0),
         Mm(187.0),
         &font_regular,
     );
-    if let Some(ref plate) = pv.vehicle_plate {
-        current_layer.use_text(
-            format!("Plaque : {plate}"),
-            10.0,
-            Mm(20.0),
-            Mm(180.0),
-            &font_regular,
-        );
-    }
+    current_layer.use_text(
+        format!(
+            "Telephone : {}",
+            pv.verbalized_phone.as_deref().unwrap_or("-")
+        ),
+        10.0,
+        Mm(20.0),
+        Mm(180.0),
+        &font_regular,
+    );
+    current_layer.use_text(
+        format!(
+            "Adresse : {}",
+            pv.verbalized_address.as_deref().unwrap_or("-")
+        ),
+        10.0,
+        Mm(20.0),
+        Mm(173.0),
+        &font_regular,
+    );
+
+    current_layer.use_text("VEHICULE", 11.0, Mm(20.0), Mm(162.0), &font);
+    current_layer.use_text(
+        format!("Plaque : {}", pv.vehicle_plate.as_deref().unwrap_or("-")),
+        10.0,
+        Mm(20.0),
+        Mm(154.0),
+        &font_regular,
+    );
+    current_layer.use_text(
+        format!(
+            "Carte grise : {}",
+            pv.vehicle_registration_card_number
+                .as_deref()
+                .unwrap_or("-")
+        ),
+        10.0,
+        Mm(20.0),
+        Mm(147.0),
+        &font_regular,
+    );
+    current_layer.use_text(
+        format!(
+            "Vehicule : {} {} {}",
+            pv.vehicle_make.as_deref().unwrap_or("-"),
+            pv.vehicle_model.as_deref().unwrap_or(""),
+            pv.vehicle_color.as_deref().unwrap_or("")
+        ),
+        10.0,
+        Mm(20.0),
+        Mm(140.0),
+        &font_regular,
+    );
 
     // Infractions
-    current_layer.use_text("INFRACTIONS CONSTATÉES", 11.0, Mm(20.0), Mm(167.0), &font);
-    let mut y = 159.0;
+    current_layer.use_text("INFRACTIONS CONSTATEES", 11.0, Mm(20.0), Mm(128.0), &font);
+    let mut y = 120.0;
     if pv.interventions.is_empty() {
         current_layer.use_text("Nature : -", 10.0, Mm(20.0), Mm(y), &font_regular);
     } else {
@@ -186,25 +234,25 @@ fn build_pv_pdf(
             format!("Lieu : {loc}"),
             10.0,
             Mm(20.0),
-            Mm(128.0),
+            Mm(86.0),
             &font_regular,
         );
     }
 
     // Montant
-    current_layer.use_text("MONTANT DE L'AMENDE", 11.0, Mm(20.0), Mm(116.0), &font);
+    current_layer.use_text("MONTANT DE L'AMENDE", 11.0, Mm(20.0), Mm(76.0), &font);
     let montant_str = pv
         .amount_initial_fcfa
         .map(|m| format!("{m} FCFA"))
         .unwrap_or_else(|| "Non applicable".to_string());
-    current_layer.use_text(&montant_str, 13.0, Mm(20.0), Mm(108.0), &font);
+    current_layer.use_text(&montant_str, 13.0, Mm(20.0), Mm(68.0), &font);
 
     // Statut
     current_layer.use_text(
         format!("Statut : {}", pv.status),
         10.0,
         Mm(20.0),
-        Mm(98.0),
+        Mm(58.0),
         &font_regular,
     );
 

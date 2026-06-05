@@ -86,8 +86,8 @@ class PvListPage extends StatelessWidget {
                         [
                           pv.subjectLabel,
                           pv.infractionsLabel,
-                          pv.vehiclePlate,
-                          pv.verbalizedName,
+                          pv.vehicleIdentityLabel,
+                          pv.verbalizedDisplayName,
                           formatFcfa(pv.amountInitialFcfa),
                           formatShortDate(pv.createdAt),
                         ].whereType<String>().join(' - '),
@@ -185,7 +185,11 @@ class _DraftsSection extends StatelessWidget {
                   subtitle: Text(
                     [
                       draft.payload.vehiclePlate,
+                      draft.payload.vehicleRegistrationCardNumber == null
+                          ? null
+                          : 'CG ${draft.payload.vehicleRegistrationCardNumber}',
                       draft.payload.verbalizedName,
+                      draft.payload.verbalizedIdentityNumber,
                       if (draft.photos.isNotEmpty)
                         '${draft.photos.length} preuve(s)',
                       if (draft.amountFcfa != null)

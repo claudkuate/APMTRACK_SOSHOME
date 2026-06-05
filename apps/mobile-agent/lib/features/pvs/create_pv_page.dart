@@ -34,14 +34,23 @@ class _CreatePvPageState extends State<CreatePvPage> {
   ];
 
   final _picker = ImagePicker();
-  final _nameController = TextEditingController();
-  final _identifierController = TextEditingController();
+  final _firstNameController = TextEditingController();
+  final _lastNameController = TextEditingController();
+  final _identityNumberController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _addressController = TextEditingController();
   final _plateController = TextEditingController();
+  final _registrationCardController = TextEditingController();
+  final _vehicleMakeController = TextEditingController();
+  final _vehicleModelController = TextEditingController();
+  final _vehicleColorController = TextEditingController();
+  final _vehicleOwnerController = TextEditingController();
   final _locationController = TextEditingController();
   final _notesController = TextEditingController();
 
   int _step = 0;
   String _subjectType = PvSubjectTypes.personWithVehicle;
+  String? _identityType;
   final Set<String> _selectedInterventionIds = {};
   final List<PvDraftPhoto> _photos = [];
   Position? _position;
@@ -50,6 +59,15 @@ class _CreatePvPageState extends State<CreatePvPage> {
   String? _error;
 
   bool get _editing => widget.initialPv != null;
+
+  static const _identityTypeOptions = [
+    'CNI',
+    'PASSEPORT',
+    'PERMIS_CONDUIRE',
+    'CARTE_SEJOUR',
+    'NIU',
+    'AUTRE',
+  ];
 
   @override
   void initState() {
@@ -62,9 +80,19 @@ class _CreatePvPageState extends State<CreatePvPage> {
       return;
     }
     _subjectType = pv.subjectType;
-    _nameController.text = pv.verbalizedName ?? '';
-    _identifierController.text = pv.verbalizedIdentifier ?? '';
+    _firstNameController.text = pv.verbalizedFirstName ?? '';
+    _lastNameController.text = pv.verbalizedLastName ?? pv.verbalizedName ?? '';
+    _identityType = pv.verbalizedIdentityType;
+    _identityNumberController.text =
+        pv.verbalizedIdentityNumber ?? pv.verbalizedIdentifier ?? '';
+    _phoneController.text = pv.verbalizedPhone ?? '';
+    _addressController.text = pv.verbalizedAddress ?? '';
     _plateController.text = pv.vehiclePlate ?? '';
+    _registrationCardController.text = pv.vehicleRegistrationCardNumber ?? '';
+    _vehicleMakeController.text = pv.vehicleMake ?? '';
+    _vehicleModelController.text = pv.vehicleModel ?? '';
+    _vehicleColorController.text = pv.vehicleColor ?? '';
+    _vehicleOwnerController.text = pv.vehicleOwnerName ?? '';
     _locationController.text = pv.locationDescription ?? '';
     _notesController.text = pv.notesInternes ?? '';
     if (pv.gpsLatitude != null && pv.gpsLongitude != null) {
@@ -90,9 +118,17 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   @override
   void dispose() {
-    _nameController.dispose();
-    _identifierController.dispose();
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _identityNumberController.dispose();
+    _phoneController.dispose();
+    _addressController.dispose();
     _plateController.dispose();
+    _registrationCardController.dispose();
+    _vehicleMakeController.dispose();
+    _vehicleModelController.dispose();
+    _vehicleColorController.dispose();
+    _vehicleOwnerController.dispose();
     _locationController.dispose();
     _notesController.dispose();
     super.dispose();
@@ -278,19 +314,38 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   CreatePvPayload _payload() {
     final ids = _selectedInterventions.map((item) => item.id).toList();
+    final hasPerson = _subjectType != PvSubjectTypes.vehicleOnly;
+    final hasVehicle = _subjectType != PvSubjectTypes.personOnly;
+    final identityNumber = hasPerson
+        ? _clean(_identityNumberController.text)
+        : null;
+    final firstName = hasPerson ? _clean(_firstNameController.text) : null;
+    final lastName = hasPerson ? _clean(_lastNameController.text) : null;
+    final name = [firstName, lastName].whereType<String>().join(' ');
     return CreatePvPayload(
       interventionId: ids.first,
       interventionIds: ids,
       subjectType: _subjectType,
-      verbalizedName: _subjectType == PvSubjectTypes.vehicleOnly
-          ? null
-          : _clean(_nameController.text),
-      verbalizedIdentifier: _subjectType == PvSubjectTypes.vehicleOnly
-          ? null
-          : _clean(_identifierController.text),
-      vehiclePlate: _subjectType == PvSubjectTypes.personOnly
-          ? null
-          : _clean(_plateController.text)?.toUpperCase(),
+      verbalizedName: name.isEmpty ? null : name,
+      verbalizedIdentifier: identityNumber,
+      verbalizedFirstName: firstName,
+      verbalizedLastName: lastName,
+      verbalizedIdentityType: identityNumber == null ? null : _identityType,
+      verbalizedIdentityNumber: identityNumber,
+      verbalizedPhone: hasPerson ? _clean(_phoneController.text) : null,
+      verbalizedAddress: hasPerson ? _clean(_addressController.text) : null,
+      vehiclePlate: hasVehicle
+          ? _clean(_plateController.text)?.toUpperCase()
+          : null,
+      vehicleRegistrationCardNumber: hasVehicle
+          ? _clean(_registrationCardController.text)?.toUpperCase()
+          : null,
+      vehicleMake: hasVehicle ? _clean(_vehicleMakeController.text) : null,
+      vehicleModel: hasVehicle ? _clean(_vehicleModelController.text) : null,
+      vehicleColor: hasVehicle ? _clean(_vehicleColorController.text) : null,
+      vehicleOwnerName: hasVehicle
+          ? _clean(_vehicleOwnerController.text)
+          : null,
       locationDescription: _clean(_locationController.text),
       gpsLatitude: _position?.latitude,
       gpsLongitude: _position?.longitude,
@@ -304,20 +359,31 @@ class _CreatePvPageState extends State<CreatePvPage> {
       return 1;
     }
     final hasPerson =
-        _clean(_nameController.text) != null ||
-        _clean(_identifierController.text) != null;
-    final hasVehicle = _clean(_plateController.text) != null;
+        _clean(_firstNameController.text) != null ||
+        _clean(_lastNameController.text) != null ||
+        _clean(_identityNumberController.text) != null;
+    final hasIdentityNumber = _clean(_identityNumberController.text) != null;
+    final hasIdentityType = _identityType != null && _identityType!.isNotEmpty;
+    final hasVehicle =
+        _clean(_plateController.text) != null ||
+        _clean(_registrationCardController.text) != null;
+    if (_subjectType != PvSubjectTypes.vehicleOnly &&
+        hasIdentityNumber &&
+        !hasIdentityType) {
+      _setError('Type d identite requis avec le numero');
+      return 2;
+    }
     if (_subjectType == PvSubjectTypes.personOnly && !hasPerson) {
-      _setError('Nom ou identifiant requis');
+      _setError('Nom, prenom ou numero d identite requis');
       return 2;
     }
     if (_subjectType == PvSubjectTypes.vehicleOnly && !hasVehicle) {
-      _setError('Plaque vehicule requise');
+      _setError('Plaque ou carte grise requise');
       return 2;
     }
     if (_subjectType == PvSubjectTypes.personWithVehicle &&
         (!hasPerson || !hasVehicle)) {
-      _setError('Usager et plaque requis');
+      _setError('Contrevenant et plaque ou carte grise requis');
       return 2;
     }
     if (_clean(_locationController.text) == null) {
@@ -343,6 +409,11 @@ class _CreatePvPageState extends State<CreatePvPage> {
     if (lower.endsWith('.webp')) return 'image/webp';
     if (lower.endsWith('.heic')) return 'image/heic';
     return 'image/jpeg';
+  }
+
+  String _summaryText(Iterable<String?> values) {
+    final value = values.whereType<String>().join(' - ');
+    return value.isEmpty ? '-' : value;
   }
 
   void _next() {
@@ -538,37 +609,157 @@ class _CreatePvPageState extends State<CreatePvPage> {
   Widget _buildSubjectStep() {
     return SectionPanel(
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_subjectType != PvSubjectTypes.personOnly)
-            TextField(
-              controller: _plateController,
-              textCapitalization: TextCapitalization.characters,
-              decoration: const InputDecoration(
-                labelText: 'Plaque vehicule',
-                prefixIcon: Icon(Icons.directions_car_outlined),
-              ),
-            ),
+          if (_subjectType != PvSubjectTypes.vehicleOnly) _buildPersonFields(),
           if (_subjectType == PvSubjectTypes.personWithVehicle)
-            const SizedBox(height: 12),
-          if (_subjectType != PvSubjectTypes.vehicleOnly) ...[
-            TextField(
-              controller: _nameController,
-              decoration: const InputDecoration(
-                labelText: 'Nom verbalise',
-                prefixIcon: Icon(Icons.person_outline),
+            const SizedBox(height: 16),
+          if (_subjectType != PvSubjectTypes.personOnly) _buildVehicleFields(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPersonFields() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'Contrevenant',
+          style: TextStyle(fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _lastNameController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(
+                  labelText: 'Nom',
+                  prefixIcon: Icon(Icons.person_outline),
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _identifierController,
-              decoration: const InputDecoration(
-                labelText: 'Identifiant',
-                prefixIcon: Icon(Icons.badge_outlined),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _firstNameController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Prenom'),
               ),
             ),
           ],
-        ],
-      ),
+        ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          initialValue: _identityType,
+          decoration: const InputDecoration(
+            labelText: 'Type d identite',
+            prefixIcon: Icon(Icons.badge_outlined),
+          ),
+          items: [
+            const DropdownMenuItem(value: null, child: Text('Choisir...')),
+            ..._identityTypeOptions.map(
+              (value) => DropdownMenuItem(value: value, child: Text(value)),
+            ),
+          ],
+          onChanged: (value) => setState(() => _identityType = value),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _identityNumberController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            labelText: 'Numero d identite',
+            prefixIcon: Icon(Icons.confirmation_number_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _phoneController,
+          keyboardType: TextInputType.phone,
+          decoration: const InputDecoration(
+            labelText: 'Telephone',
+            prefixIcon: Icon(Icons.call_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _addressController,
+          decoration: const InputDecoration(
+            labelText: 'Adresse',
+            prefixIcon: Icon(Icons.home_outlined),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildVehicleFields() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('Vehicule', style: TextStyle(fontWeight: FontWeight.w900)),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _plateController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            labelText: 'Plaque vehicule',
+            prefixIcon: Icon(Icons.directions_car_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          controller: _registrationCardController,
+          textCapitalization: TextCapitalization.characters,
+          decoration: const InputDecoration(
+            labelText: 'Numero carte grise',
+            prefixIcon: Icon(Icons.article_outlined),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _vehicleMakeController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Marque'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _vehicleModelController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Modele'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _vehicleColorController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Couleur'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: TextField(
+                controller: _vehicleOwnerController,
+                textCapitalization: TextCapitalization.words,
+                decoration: const InputDecoration(labelText: 'Proprietaire'),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -704,12 +895,24 @@ class _CreatePvPageState extends State<CreatePvPage> {
           ),
           _ReviewRow(label: 'Montant', value: formatFcfa(_totalFcfa)),
           _ReviewRow(
-            label: 'Sujet',
-            value: [
+            label: 'Contrevenant',
+            value: _summaryText([
+              _clean(_lastNameController.text),
+              _clean(_firstNameController.text),
+              if (_clean(_identityNumberController.text) != null)
+                '${_identityType ?? '-'} ${_clean(_identityNumberController.text)}',
+            ]),
+          ),
+          _ReviewRow(
+            label: 'Vehicule',
+            value: _summaryText([
               _clean(_plateController.text),
-              _clean(_nameController.text),
-              _clean(_identifierController.text),
-            ].whereType<String>().join(' - '),
+              if (_clean(_registrationCardController.text) != null)
+                'CG ${_clean(_registrationCardController.text)}',
+              _clean(_vehicleMakeController.text),
+              _clean(_vehicleModelController.text),
+              _clean(_vehicleColorController.text),
+            ]),
           ),
           _ReviewRow(
             label: 'Lieu',

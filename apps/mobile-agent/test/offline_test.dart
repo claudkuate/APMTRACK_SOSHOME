@@ -60,6 +60,38 @@ void main() {
       expect(controller.drafts.single.amountFcfa, _intervention.montantFcfa);
     });
 
+    test(
+      'preserves enriched subject and vehicle fields in queued draft',
+      () async {
+        final api = _OfflineFakeApi()..createBehavior = _CreateBehavior.network;
+        final controller = build(api)..interventions = [_intervention];
+        const payload = CreatePvPayload(
+          interventionId: 'intervention-1',
+          subjectType: PvSubjectTypes.personWithVehicle,
+          verbalizedName: 'Jean Test',
+          verbalizedFirstName: 'Jean',
+          verbalizedLastName: 'Test',
+          verbalizedIdentityType: 'CNI',
+          verbalizedIdentityNumber: 'ID123',
+          verbalizedPhone: '699000000',
+          vehicleRegistrationCardNumber: 'CG123',
+          vehicleMake: 'Toyota',
+          locationDescription: 'Avenue Kennedy',
+        );
+
+        final outcome = await controller.createPv(payload);
+
+        expect(outcome.queued, isTrue);
+        expect(controller.drafts.single.payload.vehiclePlate, isNull);
+        expect(
+          controller.drafts.single.payload.vehicleRegistrationCardNumber,
+          'CG123',
+        );
+        expect(controller.drafts.single.payload.verbalizedIdentityType, 'CNI');
+        expect(controller.drafts.single.payload.verbalizedFirstName, 'Jean');
+      },
+    );
+
     test('a business rejection (4xx) is surfaced, not queued', () async {
       final api = _OfflineFakeApi()..createBehavior = _CreateBehavior.reject;
       final controller = build(api);

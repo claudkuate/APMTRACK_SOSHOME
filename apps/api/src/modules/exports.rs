@@ -61,8 +61,12 @@ async fn export_pvs(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
-        SELECT p.pv_number, p.status, p.amount_initial_fcfa, p.verbalized_name,
-               p.vehicle_plate, p.location_description,
+        SELECT p.pv_number, p.status, p.amount_initial_fcfa,
+               p.verbalized_name, p.verbalized_identity_type, p.verbalized_identity_number,
+               p.verbalized_phone, p.verbalized_address,
+               p.vehicle_plate, p.vehicle_registration_card_number, p.vehicle_make,
+               p.vehicle_model, p.vehicle_color, p.vehicle_owner_name,
+               p.location_description,
                p.created_at, c.nom AS commune_nom, a.matricule AS agent_matricule,
                a.full_name AS agent_nom, i.nom AS intervention_nom
         FROM pvs p
@@ -85,13 +89,22 @@ async fn export_pvs(
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
-    let mut csv = String::from("Numéro PV,Statut,Montant (FCFA),Verbalisé,Plaque,Lieu,Agent Matricule,Agent Nom,Commune,Intervention,Date\n");
+    let mut csv = String::from("Numero PV,Statut,Montant (FCFA),Verbalise,Type identite,Numero identite,Telephone,Adresse,Plaque,Carte grise,Marque,Modele,Couleur,Proprietaire,Lieu,Agent Matricule,Agent Nom,Commune,Intervention,Date\n");
     for row in &rows {
         let pv_number: String = row.get("pv_number");
         let status: String = row.get("status");
         let amount: Option<i64> = row.get("amount_initial_fcfa");
         let verbalized: Option<String> = row.get("verbalized_name");
+        let identity_type: Option<String> = row.get("verbalized_identity_type");
+        let identity_number: Option<String> = row.get("verbalized_identity_number");
+        let phone: Option<String> = row.get("verbalized_phone");
+        let address: Option<String> = row.get("verbalized_address");
         let plate: Option<String> = row.get("vehicle_plate");
+        let card: Option<String> = row.get("vehicle_registration_card_number");
+        let make: Option<String> = row.get("vehicle_make");
+        let model: Option<String> = row.get("vehicle_model");
+        let color: Option<String> = row.get("vehicle_color");
+        let owner: Option<String> = row.get("vehicle_owner_name");
         let location: Option<String> = row.get("location_description");
         let agent_mat: String = row.get("agent_matricule");
         let agent_nom: String = row.get("agent_nom");
@@ -100,12 +113,21 @@ async fn export_pvs(
         let created_at: DateTime<Utc> = row.get("created_at");
 
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_field(&pv_number),
             csv_field(&status),
             amount.map(|a| a.to_string()).unwrap_or_default(),
             csv_field(&verbalized.unwrap_or_default()),
+            csv_field(&identity_type.unwrap_or_default()),
+            csv_field(&identity_number.unwrap_or_default()),
+            csv_field(&phone.unwrap_or_default()),
+            csv_field(&address.unwrap_or_default()),
             csv_field(&plate.unwrap_or_default()),
+            csv_field(&card.unwrap_or_default()),
+            csv_field(&make.unwrap_or_default()),
+            csv_field(&model.unwrap_or_default()),
+            csv_field(&color.unwrap_or_default()),
+            csv_field(&owner.unwrap_or_default()),
             csv_field(&location.unwrap_or_default()),
             csv_field(&agent_mat),
             csv_field(&agent_nom),

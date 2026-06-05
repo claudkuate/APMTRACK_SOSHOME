@@ -76,9 +76,7 @@ async fn search(
         || auth_user.has_role(Role::AdminCommune)
         || auth_user.has_role(Role::Superviseur)
     {
-        results.extend(
-            search_agents(&state.db, &pattern, commune_filter, per_module_limit).await?,
-        );
+        results.extend(search_agents(&state.db, &pattern, commune_filter, per_module_limit).await?);
     }
 
     if (auth_user.has_role(Role::SuperAdmin)
@@ -114,7 +112,8 @@ async fn search(
         || auth_user.has_role(Role::Receveur)
         || auth_user.has_role(Role::Superviseur)
     {
-        results.extend(search_payments(&state.db, &pattern, commune_filter, per_module_limit).await?);
+        results
+            .extend(search_payments(&state.db, &pattern, commune_filter, per_module_limit).await?);
     }
 
     results.truncate(limit as usize);
@@ -179,7 +178,9 @@ async fn search_pvs(
 ) -> Result<Vec<SearchResult>, ApiError> {
     let rows = sqlx::query(
         r#"
-        SELECT id, pv_number, status, vehicle_plate, verbalized_name, amount_initial_fcfa
+        SELECT
+            id, pv_number, status, vehicle_plate, vehicle_registration_card_number,
+            verbalized_name, verbalized_identity_number, amount_initial_fcfa
         FROM pvs
         WHERE deleted_at IS NULL
           AND ($1::uuid IS NULL OR commune_id = $1)
@@ -187,7 +188,9 @@ async fn search_pvs(
           AND (
             pv_number ILIKE $3
             OR COALESCE(vehicle_plate, '') ILIKE $3
+            OR COALESCE(vehicle_registration_card_number, '') ILIKE $3
             OR COALESCE(verbalized_name, '') ILIKE $3
+            OR COALESCE(verbalized_identity_number, '') ILIKE $3
             OR COALESCE(verbalized_identifier, '') ILIKE $3
             OR status ILIKE $3
           )
@@ -210,9 +213,11 @@ async fn search_pvs(
             let status: String = row.get("status");
             let plate = row
                 .get::<Option<String>, _>("vehicle_plate")
-                .unwrap_or_else(|| "Sans plaque".to_string());
+                .or_else(|| row.get::<Option<String>, _>("vehicle_registration_card_number"))
+                .unwrap_or_else(|| "Vehicule non renseigne".to_string());
             let verbalized = row
                 .get::<Option<String>, _>("verbalized_name")
+                .or_else(|| row.get::<Option<String>, _>("verbalized_identity_number"))
                 .unwrap_or_else(|| "Verbalise non renseigne".to_string());
             let amount = row
                 .get::<Option<i64>, _>("amount_initial_fcfa")

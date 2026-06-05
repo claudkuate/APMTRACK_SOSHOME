@@ -3504,7 +3504,82 @@
               "null"
             ]
           },
+          "verbalized_first_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_last_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_identity_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "CNI",
+              "PASSEPORT",
+              "PERMIS_CONDUIRE",
+              "CARTE_SEJOUR",
+              "NIU",
+              "AUTRE",
+              null
+            ]
+          },
+          "verbalized_identity_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "vehicle_plate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_registration_card_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_make": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_owner_name": {
             "type": [
               "string",
               "null"
@@ -3571,7 +3646,82 @@
               "null"
             ]
           },
+          "verbalized_first_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_last_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_identity_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "CNI",
+              "PASSEPORT",
+              "PERMIS_CONDUIRE",
+              "CARTE_SEJOUR",
+              "NIU",
+              "AUTRE",
+              null
+            ]
+          },
+          "verbalized_identity_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "vehicle_plate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_registration_card_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_make": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_owner_name": {
             "type": [
               "string",
               "null"
@@ -4162,7 +4312,82 @@
               "null"
             ]
           },
+          "verbalized_first_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_last_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_identity_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "CNI",
+              "PASSEPORT",
+              "PERMIS_CONDUIRE",
+              "CARTE_SEJOUR",
+              "NIU",
+              "AUTRE",
+              null
+            ]
+          },
+          "verbalized_identity_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verbalized_address": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "vehicle_plate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_registration_card_number": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_make": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vehicle_owner_name": {
             "type": [
               "string",
               "null"

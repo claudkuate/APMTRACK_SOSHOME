@@ -27,9 +27,7 @@ pub fn router() -> Router<AppState> {
         .route("/pvs", axum::routing::get(list_pvs).post(create_pv))
         .route(
             "/pvs/{id}",
-            axum::routing::get(get_pv)
-                .patch(patch_pv)
-                .delete(cancel_pv),
+            axum::routing::get(get_pv).patch(patch_pv).delete(cancel_pv),
         )
         .route("/pvs/{id}/status", axum::routing::patch(patch_pv_status))
         .route("/pvs/{id}/qr", axum::routing::get(get_pv_qr))
@@ -66,7 +64,18 @@ pub struct PvResponse {
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
+    pub verbalized_first_name: Option<String>,
+    pub verbalized_last_name: Option<String>,
+    pub verbalized_identity_type: Option<String>,
+    pub verbalized_identity_number: Option<String>,
+    pub verbalized_phone: Option<String>,
+    pub verbalized_address: Option<String>,
     pub vehicle_plate: Option<String>,
+    pub vehicle_registration_card_number: Option<String>,
+    pub vehicle_make: Option<String>,
+    pub vehicle_model: Option<String>,
+    pub vehicle_color: Option<String>,
+    pub vehicle_owner_name: Option<String>,
     pub location_description: Option<String>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
@@ -129,7 +138,18 @@ pub struct CreatePvRequest {
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
+    pub verbalized_first_name: Option<String>,
+    pub verbalized_last_name: Option<String>,
+    pub verbalized_identity_type: Option<String>,
+    pub verbalized_identity_number: Option<String>,
+    pub verbalized_phone: Option<String>,
+    pub verbalized_address: Option<String>,
     pub vehicle_plate: Option<String>,
+    pub vehicle_registration_card_number: Option<String>,
+    pub vehicle_make: Option<String>,
+    pub vehicle_model: Option<String>,
+    pub vehicle_color: Option<String>,
+    pub vehicle_owner_name: Option<String>,
     pub location_description: Option<String>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
@@ -144,7 +164,18 @@ pub struct PatchPvRequest {
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
+    pub verbalized_first_name: Option<String>,
+    pub verbalized_last_name: Option<String>,
+    pub verbalized_identity_type: Option<String>,
+    pub verbalized_identity_number: Option<String>,
+    pub verbalized_phone: Option<String>,
+    pub verbalized_address: Option<String>,
     pub vehicle_plate: Option<String>,
+    pub vehicle_registration_card_number: Option<String>,
+    pub vehicle_make: Option<String>,
+    pub vehicle_model: Option<String>,
+    pub vehicle_color: Option<String>,
+    pub vehicle_owner_name: Option<String>,
     pub location_description: Option<String>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
@@ -206,7 +237,11 @@ async fn list_pvs(
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
             subject_type,
-            verbalized_name, verbalized_identifier, vehicle_plate,
+            verbalized_name, verbalized_identifier,
+            verbalized_first_name, verbalized_last_name, verbalized_identity_type,
+            verbalized_identity_number, verbalized_phone, verbalized_address,
+            vehicle_plate, vehicle_registration_card_number,
+            vehicle_make, vehicle_model, vehicle_color, vehicle_owner_name,
             location_description,
             gps_latitude::double precision AS gps_latitude,
             gps_longitude::double precision AS gps_longitude,
@@ -267,23 +302,57 @@ async fn create_pv(
         .commune_id
         .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
     validate_gps(payload.gps_latitude, payload.gps_longitude)?;
-    let intervention_ids = normalize_intervention_ids(payload.intervention_id, payload.intervention_ids)?;
-    let verbalized_name = clean_optional(payload.verbalized_name);
-    let verbalized_identifier = clean_optional(payload.verbalized_identifier);
-    let vehicle_plate = clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let intervention_ids =
+        normalize_intervention_ids(payload.intervention_id, payload.intervention_ids)?;
+    let verbalized_first_name = clean_optional(payload.verbalized_first_name);
+    let verbalized_last_name = clean_optional(payload.verbalized_last_name);
+    let verbalized_name = compose_verbalized_name(
+        clean_optional(payload.verbalized_name),
+        verbalized_first_name.as_deref(),
+        verbalized_last_name.as_deref(),
+    );
+    let explicit_identity_number = clean_optional(payload.verbalized_identity_number);
+    let legacy_identifier = clean_optional(payload.verbalized_identifier);
+    let identity_from_legacy = explicit_identity_number.is_none() && legacy_identifier.is_some();
+    let verbalized_identity_number = explicit_identity_number.or(legacy_identifier);
+    let verbalized_identifier = verbalized_identity_number.clone();
+    let verbalized_identity_type = normalize_identity_type(
+        clean_optional(payload.verbalized_identity_type),
+        verbalized_identity_number.as_deref(),
+        identity_from_legacy,
+    )?;
+    let verbalized_phone = clean_optional(payload.verbalized_phone);
+    let verbalized_address = clean_optional(payload.verbalized_address);
+    let vehicle_plate =
+        clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let vehicle_registration_card_number = clean_optional(payload.vehicle_registration_card_number)
+        .map(|number| number.to_ascii_uppercase());
+    let vehicle_make = clean_optional(payload.vehicle_make);
+    let vehicle_model = clean_optional(payload.vehicle_model);
+    let vehicle_color = clean_optional(payload.vehicle_color);
+    let vehicle_owner_name = clean_optional(payload.vehicle_owner_name);
     let location_description = clean_optional(payload.location_description);
     let notes_internes = clean_optional(payload.notes_internes);
     let subject_type = normalize_subject_type(
         payload.subject_type.as_deref(),
         verbalized_name.as_deref(),
-        verbalized_identifier.as_deref(),
+        verbalized_identity_number.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
     )?;
     validate_subject_fields(
         &subject_type,
         verbalized_name.as_deref(),
-        verbalized_identifier.as_deref(),
+        verbalized_identity_type.as_deref(),
+        verbalized_identity_number.as_deref(),
+        verbalized_phone.as_deref(),
+        verbalized_address.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
+        vehicle_make.as_deref(),
+        vehicle_model.as_deref(),
+        vehicle_color.as_deref(),
+        vehicle_owner_name.as_deref(),
     )?;
 
     let mut tx = state.db.begin().await?;
@@ -309,8 +378,9 @@ async fn create_pv(
         &mut tx,
         commune_id,
         &intervention_ids,
-        verbalized_identifier.as_deref(),
+        verbalized_identity_number.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
         None,
     )
     .await?;
@@ -344,13 +414,15 @@ async fn create_pv(
     // Auto-résolution de la zone par point-dans-polygone si non fournie explicitement.
     let resolved_zone_id = match payload.zone_id {
         Some(zone_id) => Some(zone_id),
-        None => resolve_zone_from_point(
-            &mut tx,
-            commune_id,
-            payload.gps_latitude,
-            payload.gps_longitude,
-        )
-        .await?,
+        None => {
+            resolve_zone_from_point(
+                &mut tx,
+                commune_id,
+                payload.gps_latitude,
+                payload.gps_longitude,
+            )
+            .await?
+        }
     };
 
     let id = Uuid::new_v4();
@@ -359,14 +431,22 @@ async fn create_pv(
         r#"
         INSERT INTO pvs (
             id, commune_id, agent_id, pv_number, intervention_id, subject_type, zone_id,
-            verbalized_name, verbalized_identifier, vehicle_plate,
+            verbalized_name, verbalized_identifier,
+            verbalized_first_name, verbalized_last_name, verbalized_identity_type,
+            verbalized_identity_number, verbalized_phone, verbalized_address,
+            vehicle_plate, vehicle_registration_card_number,
+            vehicle_make, vehicle_model, vehicle_color, vehicle_owner_name,
             location_description, gps_latitude, gps_longitude,
             amount_initial, amount_initial_fcfa, status, qr_code_svg, notes_internes, created_by
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
-            $8, $9, $10,
-            $11, $12, $13,
-            $14, $15, $16, $17, $18, $19
+            $8, $9,
+            $10, $11, $12,
+            $13, $14, $15,
+            $16, $17,
+            $18, $19, $20, $21,
+            $22, $23, $24,
+            $25, $26, $27, $28, $29, $30
         )
         "#,
     )
@@ -379,7 +459,18 @@ async fn create_pv(
     .bind(resolved_zone_id)
     .bind(verbalized_name.clone())
     .bind(verbalized_identifier.clone())
+    .bind(verbalized_first_name.clone())
+    .bind(verbalized_last_name.clone())
+    .bind(verbalized_identity_type.clone())
+    .bind(verbalized_identity_number.clone())
+    .bind(verbalized_phone.clone())
+    .bind(verbalized_address.clone())
     .bind(vehicle_plate.clone())
+    .bind(vehicle_registration_card_number.clone())
+    .bind(vehicle_make.clone())
+    .bind(vehicle_model.clone())
+    .bind(vehicle_color.clone())
+    .bind(vehicle_owner_name.clone())
     .bind(location_description.clone())
     .bind(payload.gps_latitude)
     .bind(payload.gps_longitude)
@@ -458,22 +549,55 @@ async fn patch_pv(
         return Err(ApiError::bad_request("Au moins une infraction est requise"));
     }
 
-    let verbalized_name = clean_optional(payload.verbalized_name);
-    let verbalized_identifier = clean_optional(payload.verbalized_identifier);
-    let vehicle_plate = clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let verbalized_first_name = clean_optional(payload.verbalized_first_name);
+    let verbalized_last_name = clean_optional(payload.verbalized_last_name);
+    let verbalized_name = compose_verbalized_name(
+        clean_optional(payload.verbalized_name),
+        verbalized_first_name.as_deref(),
+        verbalized_last_name.as_deref(),
+    );
+    let explicit_identity_number = clean_optional(payload.verbalized_identity_number);
+    let legacy_identifier = clean_optional(payload.verbalized_identifier);
+    let identity_from_legacy = explicit_identity_number.is_none() && legacy_identifier.is_some();
+    let verbalized_identity_number = explicit_identity_number.or(legacy_identifier);
+    let verbalized_identifier = verbalized_identity_number.clone();
+    let verbalized_identity_type = normalize_identity_type(
+        clean_optional(payload.verbalized_identity_type),
+        verbalized_identity_number.as_deref(),
+        identity_from_legacy,
+    )?;
+    let verbalized_phone = clean_optional(payload.verbalized_phone);
+    let verbalized_address = clean_optional(payload.verbalized_address);
+    let vehicle_plate =
+        clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let vehicle_registration_card_number = clean_optional(payload.vehicle_registration_card_number)
+        .map(|number| number.to_ascii_uppercase());
+    let vehicle_make = clean_optional(payload.vehicle_make);
+    let vehicle_model = clean_optional(payload.vehicle_model);
+    let vehicle_color = clean_optional(payload.vehicle_color);
+    let vehicle_owner_name = clean_optional(payload.vehicle_owner_name);
     let location_description = clean_optional(payload.location_description);
     let notes_internes = clean_optional(payload.notes_internes);
     let subject_type = normalize_subject_type(
         payload.subject_type.as_deref(),
         verbalized_name.as_deref(),
-        verbalized_identifier.as_deref(),
+        verbalized_identity_number.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
     )?;
     validate_subject_fields(
         &subject_type,
         verbalized_name.as_deref(),
-        verbalized_identifier.as_deref(),
+        verbalized_identity_type.as_deref(),
+        verbalized_identity_number.as_deref(),
+        verbalized_phone.as_deref(),
+        verbalized_address.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
+        vehicle_make.as_deref(),
+        vehicle_model.as_deref(),
+        vehicle_color.as_deref(),
+        vehicle_owner_name.as_deref(),
     )?;
 
     let interventions =
@@ -482,8 +606,9 @@ async fn patch_pv(
         &mut tx,
         existing.commune_id,
         &intervention_ids,
-        verbalized_identifier.as_deref(),
+        verbalized_identity_number.as_deref(),
         vehicle_plate.as_deref(),
+        vehicle_registration_card_number.as_deref(),
         Some(id),
     )
     .await?;
@@ -500,13 +625,15 @@ async fn patch_pv(
 
     let resolved_zone_id = match payload.zone_id {
         Some(zone_id) => Some(zone_id),
-        None => resolve_zone_from_point(
-            &mut tx,
-            existing.commune_id,
-            payload.gps_latitude,
-            payload.gps_longitude,
-        )
-        .await?,
+        None => {
+            resolve_zone_from_point(
+                &mut tx,
+                existing.commune_id,
+                payload.gps_latitude,
+                payload.gps_longitude,
+            )
+            .await?
+        }
     };
 
     sqlx::query(
@@ -517,14 +644,25 @@ async fn patch_pv(
             zone_id = $4,
             verbalized_name = $5,
             verbalized_identifier = $6,
-            vehicle_plate = $7,
-            location_description = $8,
-            gps_latitude = $9,
-            gps_longitude = $10,
-            amount_initial = $11,
-            amount_initial_fcfa = $12,
-            status = $13,
-            notes_internes = $14,
+            verbalized_first_name = $7,
+            verbalized_last_name = $8,
+            verbalized_identity_type = $9,
+            verbalized_identity_number = $10,
+            verbalized_phone = $11,
+            verbalized_address = $12,
+            vehicle_plate = $13,
+            vehicle_registration_card_number = $14,
+            vehicle_make = $15,
+            vehicle_model = $16,
+            vehicle_color = $17,
+            vehicle_owner_name = $18,
+            location_description = $19,
+            gps_latitude = $20,
+            gps_longitude = $21,
+            amount_initial = $22,
+            amount_initial_fcfa = $23,
+            status = $24,
+            notes_internes = $25,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -535,7 +673,18 @@ async fn patch_pv(
     .bind(resolved_zone_id)
     .bind(verbalized_name.clone())
     .bind(verbalized_identifier.clone())
+    .bind(verbalized_first_name.clone())
+    .bind(verbalized_last_name.clone())
+    .bind(verbalized_identity_type.clone())
+    .bind(verbalized_identity_number.clone())
+    .bind(verbalized_phone.clone())
+    .bind(verbalized_address.clone())
     .bind(vehicle_plate.clone())
+    .bind(vehicle_registration_card_number.clone())
+    .bind(vehicle_make.clone())
+    .bind(vehicle_model.clone())
+    .bind(vehicle_color.clone())
+    .bind(vehicle_owner_name.clone())
     .bind(location_description.clone())
     .bind(payload.gps_latitude)
     .bind(payload.gps_longitude)
@@ -787,7 +936,11 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
             subject_type,
-            verbalized_name, verbalized_identifier, vehicle_plate,
+            verbalized_name, verbalized_identifier,
+            verbalized_first_name, verbalized_last_name, verbalized_identity_type,
+            verbalized_identity_number, verbalized_phone, verbalized_address,
+            vehicle_plate, vehicle_registration_card_number,
+            vehicle_make, vehicle_model, vehicle_color, vehicle_owner_name,
             location_description,
             gps_latitude::double precision AS gps_latitude,
             gps_longitude::double precision AS gps_longitude,
@@ -798,10 +951,10 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("PV introuvable"))?;
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::not_found("PV introuvable"))?;
     let mut pv = row_to_pv(row);
     pv.interventions = load_pv_interventions(pool, pv.id).await?;
     Ok(pv)
@@ -893,7 +1046,18 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
         zone_id: row.get("zone_id"),
         verbalized_name: row.get("verbalized_name"),
         verbalized_identifier: row.get("verbalized_identifier"),
+        verbalized_first_name: row.get("verbalized_first_name"),
+        verbalized_last_name: row.get("verbalized_last_name"),
+        verbalized_identity_type: row.get("verbalized_identity_type"),
+        verbalized_identity_number: row.get("verbalized_identity_number"),
+        verbalized_phone: row.get("verbalized_phone"),
+        verbalized_address: row.get("verbalized_address"),
         vehicle_plate: row.get("vehicle_plate"),
+        vehicle_registration_card_number: row.get("vehicle_registration_card_number"),
+        vehicle_make: row.get("vehicle_make"),
+        vehicle_model: row.get("vehicle_model"),
+        vehicle_color: row.get("vehicle_color"),
+        vehicle_owner_name: row.get("vehicle_owner_name"),
         location_description: row.get("location_description"),
         gps_latitude: row.get("gps_latitude"),
         gps_longitude: row.get("gps_longitude"),
@@ -929,7 +1093,11 @@ async fn load_pv_for_update_tx(
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
             subject_type,
-            verbalized_name, verbalized_identifier, vehicle_plate,
+            verbalized_name, verbalized_identifier,
+            verbalized_first_name, verbalized_last_name, verbalized_identity_type,
+            verbalized_identity_number, verbalized_phone, verbalized_address,
+            vehicle_plate, vehicle_registration_card_number,
+            vehicle_make, vehicle_model, vehicle_color, vehicle_owner_name,
             location_description,
             gps_latitude::double precision AS gps_latitude,
             gps_longitude::double precision AS gps_longitude,
@@ -1123,11 +1291,111 @@ fn normalize_intervention_ids(
     Ok(normalized)
 }
 
+const IDENTITY_TYPES: &[&str] = &[
+    "CNI",
+    "PASSEPORT",
+    "PERMIS_CONDUIRE",
+    "CARTE_SEJOUR",
+    "NIU",
+    "AUTRE",
+];
+
+fn compose_verbalized_name(
+    legacy_name: Option<String>,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+) -> Option<String> {
+    let composed = [first_name, last_name]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if composed.is_empty() {
+        legacy_name
+    } else {
+        Some(composed)
+    }
+}
+
+fn normalize_identity_type(
+    value: Option<String>,
+    identity_number: Option<&str>,
+    identity_from_legacy: bool,
+) -> Result<Option<String>, ApiError> {
+    let Some(value) = value else {
+        if identity_number.is_some() {
+            if identity_from_legacy {
+                return Ok(Some("AUTRE".to_string()));
+            }
+            return Err(ApiError::bad_request(
+                "Le type d'identite est requis avec le numero d'identite",
+            ));
+        }
+        return Ok(None);
+    };
+    let normalized = value
+        .trim()
+        .to_ascii_uppercase()
+        .replace(' ', "_")
+        .replace('-', "_");
+    if IDENTITY_TYPES.contains(&normalized.as_str()) {
+        Ok(Some(normalized))
+    } else {
+        Err(ApiError::bad_request(format!(
+            "type d'identite invalide: {value}"
+        )))
+    }
+}
+
+fn has_person_identity(verbalized_name: Option<&str>, identity_number: Option<&str>) -> bool {
+    verbalized_name.is_some() || identity_number.is_some()
+}
+
+fn has_person_any(
+    verbalized_name: Option<&str>,
+    identity_type: Option<&str>,
+    identity_number: Option<&str>,
+    phone: Option<&str>,
+    address: Option<&str>,
+) -> bool {
+    verbalized_name.is_some()
+        || identity_type.is_some()
+        || identity_number.is_some()
+        || phone.is_some()
+        || address.is_some()
+}
+
+fn has_vehicle_identity(
+    vehicle_plate: Option<&str>,
+    registration_card_number: Option<&str>,
+) -> bool {
+    vehicle_plate.is_some() || registration_card_number.is_some()
+}
+
+fn has_vehicle_any(
+    vehicle_plate: Option<&str>,
+    registration_card_number: Option<&str>,
+    make: Option<&str>,
+    model: Option<&str>,
+    color: Option<&str>,
+    owner_name: Option<&str>,
+) -> bool {
+    vehicle_plate.is_some()
+        || registration_card_number.is_some()
+        || make.is_some()
+        || model.is_some()
+        || color.is_some()
+        || owner_name.is_some()
+}
+
 fn normalize_subject_type(
     requested: Option<&str>,
     verbalized_name: Option<&str>,
-    verbalized_identifier: Option<&str>,
+    verbalized_identity_number: Option<&str>,
     vehicle_plate: Option<&str>,
+    vehicle_registration_card_number: Option<&str>,
 ) -> Result<String, ApiError> {
     if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty()) {
         return match value {
@@ -1138,8 +1406,8 @@ fn normalize_subject_type(
         };
     }
 
-    let has_person = verbalized_name.is_some() || verbalized_identifier.is_some();
-    let has_vehicle = vehicle_plate.is_some();
+    let has_person = has_person_identity(verbalized_name, verbalized_identity_number);
+    let has_vehicle = has_vehicle_identity(vehicle_plate, vehicle_registration_card_number);
     match (has_person, has_vehicle) {
         (true, true) => Ok("PERSON_WITH_VEHICLE".to_string()),
         (true, false) => Ok("PERSON_ONLY".to_string()),
@@ -1153,27 +1421,58 @@ fn normalize_subject_type(
 fn validate_subject_fields(
     subject_type: &str,
     verbalized_name: Option<&str>,
-    verbalized_identifier: Option<&str>,
+    verbalized_identity_type: Option<&str>,
+    verbalized_identity_number: Option<&str>,
+    verbalized_phone: Option<&str>,
+    verbalized_address: Option<&str>,
     vehicle_plate: Option<&str>,
+    vehicle_registration_card_number: Option<&str>,
+    vehicle_make: Option<&str>,
+    vehicle_model: Option<&str>,
+    vehicle_color: Option<&str>,
+    vehicle_owner_name: Option<&str>,
 ) -> Result<(), ApiError> {
-    let has_person = verbalized_name.is_some() || verbalized_identifier.is_some();
-    let has_vehicle = vehicle_plate.is_some();
+    if verbalized_identity_number.is_some() && verbalized_identity_type.is_none() {
+        return Err(ApiError::bad_request(
+            "Le type d'identite est requis avec le numero d'identite",
+        ));
+    }
+    let has_person_identity = has_person_identity(verbalized_name, verbalized_identity_number);
+    let has_person_any = has_person_any(
+        verbalized_name,
+        verbalized_identity_type,
+        verbalized_identity_number,
+        verbalized_phone,
+        verbalized_address,
+    );
+    let has_vehicle_identity =
+        has_vehicle_identity(vehicle_plate, vehicle_registration_card_number);
+    let has_vehicle_any = has_vehicle_any(
+        vehicle_plate,
+        vehicle_registration_card_number,
+        vehicle_make,
+        vehicle_model,
+        vehicle_color,
+        vehicle_owner_name,
+    );
     match subject_type {
-        "PERSON_ONLY" if !has_person => Err(ApiError::bad_request(
-            "Un PV usager sans vehicule requiert un nom ou un identifiant",
+        "PERSON_ONLY" if !has_person_identity => Err(ApiError::bad_request(
+            "Un PV usager sans vehicule requiert un nom ou un numero d'identite",
         )),
-        "PERSON_ONLY" if has_vehicle => Err(ApiError::bad_request(
-            "Un PV usager sans vehicule ne doit pas contenir de plaque",
+        "PERSON_ONLY" if has_vehicle_any => Err(ApiError::bad_request(
+            "Un PV usager sans vehicule ne doit pas contenir de donnees vehicule",
         )),
-        "VEHICLE_ONLY" if !has_vehicle => Err(ApiError::bad_request(
-            "Un PV vehicule sans conducteur requiert une plaque",
+        "VEHICLE_ONLY" if !has_vehicle_identity => Err(ApiError::bad_request(
+            "Un PV vehicule sans conducteur requiert une plaque ou un numero de carte grise",
         )),
-        "VEHICLE_ONLY" if has_person => Err(ApiError::bad_request(
-            "Un PV vehicule sans conducteur ne doit pas contenir de conducteur",
+        "VEHICLE_ONLY" if has_person_any => Err(ApiError::bad_request(
+            "Un PV vehicule sans conducteur ne doit pas contenir de donnees contrevenant",
         )),
-        "PERSON_WITH_VEHICLE" if !has_vehicle || !has_person => Err(ApiError::bad_request(
-            "Un PV usager avec vehicule requiert une plaque et un usager",
-        )),
+        "PERSON_WITH_VEHICLE" if !has_person_identity || !has_vehicle_identity => {
+            Err(ApiError::bad_request(
+                "Un PV usager avec vehicule requiert un contrevenant et une plaque ou carte grise",
+            ))
+        }
         "PERSON_ONLY" | "VEHICLE_ONLY" | "PERSON_WITH_VEHICLE" => Ok(()),
         _ => Err(ApiError::bad_request("subject_type invalide")),
     }
@@ -1237,8 +1536,9 @@ async fn check_double_verbalisation(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commune_id: Uuid,
     intervention_ids: &[Uuid],
-    verbalized_identifier: Option<&str>,
+    verbalized_identity_number: Option<&str>,
     vehicle_plate: Option<&str>,
+    vehicle_registration_card_number: Option<&str>,
     exclude_pv_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     let bloquant: bool =
@@ -1252,9 +1552,9 @@ async fn check_double_verbalisation(
     }
 
     for intervention_id in intervention_ids {
-        if let Some(vid) = verbalized_identifier {
+        if let Some(vid) = verbalized_identity_number {
             if !vid.trim().is_empty() {
-                lock_double_verbalisation(tx, commune_id, *intervention_id, "identifier", vid)
+                lock_double_verbalisation(tx, commune_id, *intervention_id, "identity", vid)
                     .await?;
                 let existing: Option<String> = sqlx::query_scalar(
                     r#"
@@ -1263,7 +1563,7 @@ async fn check_double_verbalisation(
                     JOIN pv_interventions pi ON pi.pv_id = p.id
                     WHERE p.commune_id = $1
                       AND pi.intervention_id = $2
-                      AND p.verbalized_identifier = $3
+                      AND COALESCE(p.verbalized_identity_number, p.verbalized_identifier) = $3
                       AND p.status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
                       AND p.deleted_at IS NULL
                       AND ($4::uuid IS NULL OR p.id <> $4)
@@ -1286,10 +1586,49 @@ async fn check_double_verbalisation(
             }
         }
 
+        if let Some(card_number) = vehicle_registration_card_number {
+            if !card_number.trim().is_empty() {
+                lock_double_verbalisation(
+                    tx,
+                    commune_id,
+                    *intervention_id,
+                    "registration-card",
+                    card_number,
+                )
+                .await?;
+                let existing: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT p.pv_number
+                    FROM pvs p
+                    JOIN pv_interventions pi ON pi.pv_id = p.id
+                    WHERE p.commune_id = $1
+                      AND pi.intervention_id = $2
+                      AND p.vehicle_registration_card_number = $3
+                      AND p.status NOT IN ('PAYE', 'ANNULE', 'NON_PAYANT')
+                      AND p.deleted_at IS NULL
+                      AND ($4::uuid IS NULL OR p.id <> $4)
+                    LIMIT 1
+                    "#,
+                )
+                .bind(commune_id)
+                .bind(*intervention_id)
+                .bind(card_number)
+                .bind(exclude_pv_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+
+                if let Some(pv_num) = existing {
+                    return Err(ApiError::conflict(format!(
+                        "Double verbalisation detectee: PV {} existe deja pour cette carte grise",
+                        pv_num
+                    )));
+                }
+            }
+        }
+
         if let Some(plate) = vehicle_plate {
             if !plate.trim().is_empty() {
-                lock_double_verbalisation(tx, commune_id, *intervention_id, "plate", plate)
-                    .await?;
+                lock_double_verbalisation(tx, commune_id, *intervention_id, "plate", plate).await?;
                 let existing: Option<String> = sqlx::query_scalar(
                     r#"
                     SELECT p.pv_number
@@ -1434,6 +1773,91 @@ pub fn pv_due_date(created_at: DateTime<Utc>, delai_jours: i32) -> DateTime<Utc>
     created_at + Duration::days(delai_jours as i64)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn person_with_vehicle_accepts_registration_card_without_plate() {
+        let result = validate_subject_fields(
+            "PERSON_WITH_VEHICLE",
+            Some("Jean Test"),
+            Some("CNI"),
+            Some("ID123"),
+            None,
+            None,
+            None,
+            Some("CG123"),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn vehicle_only_accepts_registration_card_without_plate() {
+        let result = validate_subject_fields(
+            "VEHICLE_ONLY",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("CG123"),
+            Some("Toyota"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn person_with_vehicle_requires_vehicle_identifier() {
+        let result = validate_subject_fields(
+            "PERSON_WITH_VEHICLE",
+            Some("Jean Test"),
+            Some("CNI"),
+            Some("ID123"),
+            None,
+            None,
+            None,
+            None,
+            Some("Toyota"),
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn identity_number_requires_identity_type() {
+        let result = validate_subject_fields(
+            "PERSON_ONLY",
+            Some("Jean Test"),
+            None,
+            Some("ID123"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Photos preuve (object storage MinIO/S3)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1544,7 +1968,12 @@ async fn upload_pv_photo(
     let size_bytes = data.len() as i64;
 
     let photo_id = Uuid::new_v4();
-    let object_key = format!("pv/{}/{}.{}", pv.id, photo_id, photo_extension(&content_type));
+    let object_key = format!(
+        "pv/{}/{}.{}",
+        pv.id,
+        photo_id,
+        photo_extension(&content_type)
+    );
     storage
         .put(&object_key, data.as_ref(), &content_type)
         .await
