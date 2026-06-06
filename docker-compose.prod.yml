@@ -1,0 +1,116 @@
+name: apmtrack
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: apmtrack-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apmtrack
+      POSTGRES_USER: apmtrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - apmtrack_postgres_data:/var/lib/postgresql/data
+    networks:
+      - apmtrack
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apmtrack -d apmtrack"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: apmtrack-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: apmtrack
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+    volumes:
+      - apmtrack_minio_data:/data
+    networks:
+      - apmtrack
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    container_name: apmtrack-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - apmtrack
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 apmtrack ${MINIO_PASSWORD} &&
+      mc mb --ignore-existing local/apmtrack-pv-photos &&
+      echo 'bucket apmtrack-pv-photos ready'
+      "
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: apmtrack-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      APP_ENV: development
+      APP_PORT: 8080
+      DATABASE_URL: postgres://apmtrack:${POSTGRES_PASSWORD}@postgres:5432/apmtrack
+      DATABASE_MAX_CONNECTIONS: 10
+      DATABASE_ACQUIRE_TIMEOUT_SECONDS: 5
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TOKEN_TTL_MINUTES: 15
+      JWT_REFRESH_TOKEN_TTL_DAYS: 7
+      RUN_MIGRATIONS_ON_STARTUP: "true"
+      CORS_ALLOWED_ORIGINS: https://apmtrack.soshome-cameroun.net
+      PUBLIC_API_URL: https://apmtrack-api.soshome-cameroun.net
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_WINDOW_SECONDS: 60
+      RATE_LIMIT_LOGIN_MAX: 10
+      RATE_LIMIT_PUBLIC_MAX: 60
+      S3_ENDPOINT: http://minio:9000
+      S3_REGION: us-east-1
+      S3_BUCKET: apmtrack-pv-photos
+      S3_ACCESS_KEY: apmtrack
+      S3_SECRET_KEY: ${MINIO_PASSWORD}
+    ports:
+      # Loopback only — fronted by the host's system Caddy (TLS) for apmtrack-api.soshome-cameroun.net
+      - "127.0.0.1:8091:8080"
+    networks:
+      - apmtrack
+
+  web-admin:
+    build:
+      context: .
+      dockerfile: apps/web-admin/Dockerfile
+      args:
+        NG_APP_API_URL: https://apmtrack-api.soshome-cameroun.net
+        NG_APP_ENV: production
+    container_name: apmtrack-web-admin
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      # Loopback only — fronted by the host's system Caddy (TLS) for apmtrack.soshome-cameroun.net
+      - "127.0.0.1:8090:80"
+    networks:
+      - apmtrack
+
+networks:
+  apmtrack:
+    driver: bridge
+
+volumes:
+  apmtrack_postgres_data:
+  apmtrack_minio_data:

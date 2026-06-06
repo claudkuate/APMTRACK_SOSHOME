@@ -1,0 +1,13 @@
+{
+	email claudkuate@gmail.com
+}
+
+apmtrack.soshome-cameroun.net {
+	encode gzip
+	reverse_proxy web-admin:80
+}
+
+apmtrack-api.soshome-cameroun.net {
+	encode gzip
+	reverse_proxy api:8080
+}
