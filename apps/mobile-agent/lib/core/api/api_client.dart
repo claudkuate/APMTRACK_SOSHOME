@@ -14,6 +14,7 @@ abstract class ApmtrackApi {
   Future<MobileProfile> mobileMe(String token);
   Future<List<Intervention>> mobileInterventions(String token);
   Future<PatrouilleActive> activePatrouille(String token);
+  Future<List<Patrouille>> mobilePatrouilles(String token);
   Future<Paginated<Pv>> pvs(String token, {int pageSize = 20});
   Future<Pv> createPv(String token, CreatePvPayload payload);
   Future<Pv> updatePv(String token, String pvId, CreatePvPayload payload);
@@ -28,6 +29,7 @@ abstract class ApmtrackApi {
   });
   Future<void> deletePvPhoto(String token, String pvId, String photoId);
   String photoContentUrl(String pvId, String photoId);
+  String agentPhotoContentUrl(String agentId);
   Future<PvPublic> verifyPublicPv(String pvNumber);
   Future<void> recordPatrouillePosition(
     String token,
@@ -190,6 +192,22 @@ class HttpApmtrackApi implements ApmtrackApi {
   }
 
   @override
+  Future<List<Patrouille>> mobilePatrouilles(String token) async {
+    final response = await _send(
+      _client.get(_uri('/api/v1/mobile/patrouilles'), headers: _headers(token)),
+    );
+    _ensureOk(response);
+    final decoded = jsonDecode(response.body);
+    if (decoded is! List) {
+      throw ApiException('Reponse patrouilles invalide');
+    }
+    return decoded
+        .whereType<Map<String, dynamic>>()
+        .map(Patrouille.fromJson)
+        .toList();
+  }
+
+  @override
   Future<Paginated<Pv>> pvs(String token, {int pageSize = 20}) async {
     final response = await _send(
       _client.get(
@@ -301,6 +319,10 @@ class HttpApmtrackApi implements ApmtrackApi {
   @override
   String photoContentUrl(String pvId, String photoId) =>
       '$_baseUrl/api/v1/pvs/$pvId/photos/$photoId';
+
+  @override
+  String agentPhotoContentUrl(String agentId) =>
+      '$_baseUrl/api/v1/agents/$agentId/photo';
 
   @override
   Future<PvPublic> verifyPublicPv(String pvNumber) async {

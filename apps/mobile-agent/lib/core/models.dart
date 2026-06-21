@@ -162,9 +162,7 @@ class AgentProfile {
     required this.matricule,
     required this.fullName,
     required this.communeId,
-    required this.grade,
     required this.status,
-    required this.formationNasla,
     this.datePriseFonction,
     this.photoUrl,
     this.telephone,
@@ -175,9 +173,7 @@ class AgentProfile {
   final String matricule;
   final String fullName;
   final String communeId;
-  final String grade;
   final String status;
-  final bool formationNasla;
   final DateTime? datePriseFonction;
   final String? photoUrl;
   final String? telephone;
@@ -191,9 +187,7 @@ class AgentProfile {
       matricule: readString(json, 'matricule'),
       fullName: readString(json, 'full_name'),
       communeId: readString(json, 'commune_id'),
-      grade: readString(json, 'grade'),
       status: readString(json, 'status'),
-      formationNasla: readBool(json, 'formation_nasla'),
       datePriseFonction: readDate(json, 'date_prise_fonction'),
       photoUrl: readOptionalString(json, 'photo_url'),
       telephone: readOptionalString(json, 'telephone'),
@@ -206,9 +200,7 @@ class AgentProfile {
     'matricule': matricule,
     'full_name': fullName,
     'commune_id': communeId,
-    'grade': grade,
     'status': status,
-    'formation_nasla': formationNasla,
     'date_prise_fonction': datePriseFonction?.toIso8601String(),
     'photo_url': photoUrl,
     'telephone': telephone,
@@ -248,14 +240,24 @@ class Intervention {
     required this.nom,
     required this.sujetPaiement,
     required this.active,
+    this.categoryId = '',
+    this.categoryNom = '',
+    this.typeId = '',
+    this.typeNom = '',
+    this.requiresVehicle = false,
     this.description,
     this.montantFcfa,
     this.delaiPaiementJours,
   });
 
   final String id;
+  final String categoryId;
+  final String categoryNom;
+  final String typeId;
+  final String typeNom;
   final String nom;
   final String? description;
+  final bool requiresVehicle;
   final bool sujetPaiement;
   final bool active;
   final int? montantFcfa;
@@ -264,8 +266,13 @@ class Intervention {
   factory Intervention.fromJson(JsonMap json) {
     return Intervention(
       id: readString(json, 'id'),
+      categoryId: readString(json, 'category_id'),
+      categoryNom: readString(json, 'category_nom'),
+      typeId: readString(json, 'type_id'),
+      typeNom: readString(json, 'type_nom'),
       nom: readString(json, 'nom'),
       description: readOptionalString(json, 'description'),
+      requiresVehicle: readBool(json, 'requires_vehicle'),
       sujetPaiement: readBool(json, 'sujet_paiement'),
       active: readBool(json, 'active', fallback: true),
       montantFcfa: readOptionalInt(json, 'montant_fcfa'),
@@ -275,8 +282,13 @@ class Intervention {
 
   JsonMap toJson() => {
     'id': id,
+    'category_id': categoryId,
+    'category_nom': categoryNom,
+    'type_id': typeId,
+    'type_nom': typeNom,
     'nom': nom,
     'description': description,
+    'requires_vehicle': requiresVehicle,
     'sujet_paiement': sujetPaiement,
     'active': active,
     'montant_fcfa': montantFcfa,
@@ -652,6 +664,8 @@ class Patrouille {
     this.zoneId,
     this.dateDebut,
     this.dateFin,
+    this.dateDebutPrevue,
+    this.dateFinPrevue,
   });
 
   final String id;
@@ -661,6 +675,8 @@ class Patrouille {
   final String? zoneId;
   final DateTime? dateDebut;
   final DateTime? dateFin;
+  final DateTime? dateDebutPrevue;
+  final DateTime? dateFinPrevue;
 
   factory Patrouille.fromJson(JsonMap json) {
     return Patrouille(
@@ -671,6 +687,8 @@ class Patrouille {
       zoneId: readOptionalString(json, 'zone_id'),
       dateDebut: readDate(json, 'date_debut'),
       dateFin: readDate(json, 'date_fin'),
+      dateDebutPrevue: readDate(json, 'date_debut_prevue'),
+      dateFinPrevue: readDate(json, 'date_fin_prevue'),
     );
   }
 
@@ -682,6 +700,8 @@ class Patrouille {
     'zone_id': zoneId,
     'date_debut': dateDebut?.toIso8601String(),
     'date_fin': dateFin?.toIso8601String(),
+    'date_debut_prevue': dateDebutPrevue?.toIso8601String(),
+    'date_fin_prevue': dateFinPrevue?.toIso8601String(),
   };
 }
 
@@ -690,14 +710,12 @@ class PatrouilleMember {
     required this.agentId,
     required this.matricule,
     required this.fullName,
-    required this.grade,
     required this.rolePatrouille,
   });
 
   final String agentId;
   final String matricule;
   final String fullName;
-  final String grade;
   final String rolePatrouille;
 
   factory PatrouilleMember.fromJson(JsonMap json) {
@@ -705,7 +723,6 @@ class PatrouilleMember {
       agentId: readString(json, 'agent_id'),
       matricule: readString(json, 'matricule'),
       fullName: readString(json, 'full_name'),
-      grade: readString(json, 'grade'),
       rolePatrouille: readString(json, 'role_patrouille'),
     );
   }
@@ -714,7 +731,6 @@ class PatrouilleMember {
     'agent_id': agentId,
     'matricule': matricule,
     'full_name': fullName,
-    'grade': grade,
     'role_patrouille': rolePatrouille,
   };
 }

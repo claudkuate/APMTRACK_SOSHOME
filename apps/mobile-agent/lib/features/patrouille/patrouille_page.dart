@@ -124,6 +124,15 @@ class _PatrouillePageState extends State<PatrouillePage> {
                   ),
                   const SizedBox(height: 12),
                   Text('Debut: ${formatShortDate(patrouille.dateDebut)}'),
+                  if (patrouille.dateDebutPrevue != null ||
+                      patrouille.dateFinPrevue != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Prevu: ${formatShortDate(patrouille.dateDebutPrevue)} '
+                      '→ ${formatShortDate(patrouille.dateFinPrevue)}',
+                      style: const TextStyle(color: apmMuted),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   FilledButton.icon(
                     onPressed: _sending ? null : _sendPosition,
@@ -160,13 +169,55 @@ class _PatrouillePageState extends State<PatrouillePage> {
                         agent.fullName,
                         style: const TextStyle(fontWeight: FontWeight.w800),
                       ),
-                      subtitle: Text('${agent.grade} - ${agent.matricule}'),
+                      subtitle: Text(agent.matricule),
                       trailing: Text(agent.rolePatrouille),
                     ),
                 ],
               ),
             ),
           ],
+          const SizedBox(height: 20),
+          Text(
+            'Mes patrouilles',
+            style: Theme.of(
+              context,
+            ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 8),
+          if (widget.controller.patrouilles.isEmpty)
+            const EmptyState(
+              title: 'Aucune patrouille affectee',
+              message:
+                  'Les patrouilles en cours ou planifiees pour votre agent '
+                  'apparaitront ici.',
+              icon: Icons.event_note_outlined,
+            )
+          else
+            SectionPanel(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  for (final item in widget.controller.patrouilles)
+                    ListTile(
+                      leading: const Icon(Icons.shield_outlined),
+                      title: Text(
+                        item.nom,
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      subtitle:
+                          (item.dateDebutPrevue != null ||
+                              item.dateFinPrevue != null)
+                          ? Text(
+                              'Prevu: ${formatShortDate(item.dateDebutPrevue)} '
+                              '→ ${formatShortDate(item.dateFinPrevue)}',
+                              style: const TextStyle(color: apmMuted),
+                            )
+                          : null,
+                      trailing: StatusPill(status: item.status),
+                    ),
+                ],
+              ),
+            ),
           if (_message != null) ...[
             const SizedBox(height: 12),
             Text(

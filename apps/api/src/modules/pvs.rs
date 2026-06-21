@@ -104,7 +104,8 @@ pub struct PvInterventionResponse {
 #[derive(Debug, Serialize)]
 pub struct PvPublicResponse {
     pub pv_number: String,
-    pub commune_id: Uuid,
+    pub commune_nom: String,
+    pub commune_code: String,
     pub status: String,
     pub amount_initial: Option<f64>,
     pub amount_initial_fcfa: Option<i64>,
@@ -904,11 +905,14 @@ async fn verify_pv_public(
     let row = sqlx::query(
         r#"
         SELECT
-            id, commune_id, status,
-            amount_initial::DOUBLE PRECISION AS amount_initial,
-            amount_initial_fcfa, created_at
-        FROM pvs
-        WHERE pv_number = $1 AND deleted_at IS NULL
+            p.status,
+            p.amount_initial::DOUBLE PRECISION AS amount_initial,
+            p.amount_initial_fcfa, p.created_at,
+            c.nom AS commune_nom, c.code AS commune_code
+        FROM pvs p
+        INNER JOIN communes c ON c.id = p.commune_id
+        WHERE p.pv_number = $1 AND p.deleted_at IS NULL
+          AND c.deleted_at IS NULL
         "#,
     )
     .bind(&pv_number)
@@ -918,7 +922,8 @@ async fn verify_pv_public(
 
     Ok(Json(PvPublicResponse {
         pv_number,
-        commune_id: row.get("commune_id"),
+        commune_nom: row.get("commune_nom"),
+        commune_code: row.get("commune_code"),
         status: row.get("status"),
         amount_initial: row.get("amount_initial"),
         amount_initial_fcfa: row.get("amount_initial_fcfa"),
@@ -1432,6 +1437,16 @@ fn validate_subject_fields(
     vehicle_color: Option<&str>,
     vehicle_owner_name: Option<&str>,
 ) -> Result<(), ApiError> {
+    if verbalized_name.is_none() {
+        return Err(ApiError::bad_request(
+            "Le nom du contrevenant est requis pour creer un PV",
+        ));
+    }
+    if verbalized_phone.is_none() {
+        return Err(ApiError::bad_request(
+            "Le telephone du contrevenant est requis pour creer un PV",
+        ));
+    }
     if verbalized_identity_number.is_some() && verbalized_identity_type.is_none() {
         return Err(ApiError::bad_request(
             "Le type d'identite est requis avec le numero d'identite",
@@ -1456,6 +1471,9 @@ fn validate_subject_fields(
         vehicle_owner_name,
     );
     match subject_type {
+        "VEHICLE_ONLY" => Err(ApiError::bad_request(
+            "Un PV requiert toujours un contrevenant; utilisez un PV usager avec vehicule",
+        )),
         "PERSON_ONLY" if !has_person_identity => Err(ApiError::bad_request(
             "Un PV usager sans vehicule requiert un nom ou un numero d'identite",
         )),
@@ -1473,7 +1491,7 @@ fn validate_subject_fields(
                 "Un PV usager avec vehicule requiert un contrevenant et une plaque ou carte grise",
             ))
         }
-        "PERSON_ONLY" | "VEHICLE_ONLY" | "PERSON_WITH_VEHICLE" => Ok(()),
+        "PERSON_ONLY" | "PERSON_WITH_VEHICLE" => Ok(()),
         _ => Err(ApiError::bad_request("subject_type invalide")),
     }
 }

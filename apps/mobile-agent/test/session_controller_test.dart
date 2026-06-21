@@ -98,9 +98,7 @@ const _profile = MobileProfile(
     matricule: 'APM-YDE1-001',
     fullName: 'Agent Test',
     communeId: 'commune-1',
-    grade: 'Agent',
     status: 'ACTIF',
-    formationNasla: true,
   ),
 );
 
@@ -172,6 +170,12 @@ class _ScriptedApi implements ApmtrackApi {
   }
 
   @override
+  Future<List<Patrouille>> mobilePatrouilles(String token) async {
+    _auth(token);
+    return const [];
+  }
+
+  @override
   Future<Paginated<Pv>> pvs(String token, {int pageSize = 20}) async {
     _auth(token);
     return const Paginated(items: [], total: 0);
@@ -215,6 +219,9 @@ class _ScriptedApi implements ApmtrackApi {
 
   @override
   String photoContentUrl(String pvId, String photoId) => '';
+
+  @override
+  String agentPhotoContentUrl(String agentId) => '';
 
   @override
   Future<PvPublic> verifyPublicPv(String pvNumber) =>

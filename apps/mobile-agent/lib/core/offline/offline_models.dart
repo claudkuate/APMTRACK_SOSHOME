@@ -9,18 +9,21 @@ class OfflineSnapshot {
     this.interventions = const [],
     this.pvs = const [],
     this.patrouille,
+    this.patrouilles = const [],
   });
 
   final MobileProfile? profile;
   final List<Intervention> interventions;
   final List<Pv> pvs;
   final PatrouilleActive? patrouille;
+  final List<Patrouille> patrouilles;
 
   JsonMap toJson() => {
     'profile': profile?.toJson(),
     'interventions': interventions.map((item) => item.toJson()).toList(),
     'pvs': pvs.map((item) => item.toJson()).toList(),
     'patrouille': patrouille?.toJson(),
+    'patrouilles': patrouilles.map((item) => item.toJson()).toList(),
   };
 
   factory OfflineSnapshot.fromJson(JsonMap json) {
@@ -41,6 +44,10 @@ class OfflineSnapshot {
       patrouille: rawPatrouille is Map<String, dynamic>
           ? PatrouilleActive.fromJson(rawPatrouille)
           : null,
+      patrouilles: (json['patrouilles'] as List? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(Patrouille.fromJson)
+          .toList(),
     );
   }
 

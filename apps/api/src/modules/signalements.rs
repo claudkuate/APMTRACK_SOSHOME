@@ -51,11 +51,16 @@ pub fn public_router() -> Router<AppState> {
 pub struct SignalementResponse {
     pub id: Uuid,
     pub commune_id: Uuid,
+    pub zone_id: Option<Uuid>,
     pub signalement_number: String,
     pub type_incident: String,
     pub location_description: String,
+    pub lieu_dit: Option<String>,
     pub description: String,
     pub contact_anonyme: bool,
+    pub contact_name: Option<String>,
+    pub contact_phone: Option<String>,
+    pub contact_info: Option<String>,
     pub status: String,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
@@ -64,8 +69,9 @@ pub struct SignalementResponse {
 }
 
 /// Colonnes exposées par les SELECT (lat/lon castées en double precision).
-const SIGNALEMENT_COLUMNS: &str = "id, commune_id, signalement_number, type_incident, \
-    location_description, description, contact_anonyme, status, \
+const SIGNALEMENT_COLUMNS: &str = "id, commune_id, zone_id, signalement_number, type_incident, \
+    location_description, lieu_dit, description, contact_anonyme, contact_name, contact_phone, \
+    contact_info, status, \
     gps_latitude::double precision AS gps_latitude, \
     gps_longitude::double precision AS gps_longitude, \
     created_at, updated_at";
@@ -89,10 +95,14 @@ pub struct SignalementFilterQuery {
 #[derive(Debug, Deserialize)]
 pub struct CreateSignalementRequest {
     pub commune_id: Uuid,
+    pub zone_id: Option<Uuid>,
     pub type_incident: String,
-    pub location_description: String,
+    pub location_description: Option<String>,
+    pub lieu_dit: Option<String>,
     pub description: String,
     pub contact_anonyme: Option<bool>,
+    pub contact_name: Option<String>,
+    pub contact_phone: Option<String>,
     pub contact_info: Option<String>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
@@ -101,7 +111,8 @@ pub struct CreateSignalementRequest {
 #[derive(Debug, Serialize)]
 pub struct SignalementPublicTrackResponse {
     pub signalement_number: String,
-    pub commune_id: Uuid,
+    pub commune_nom: String,
+    pub commune_code: String,
     pub type_incident: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -134,9 +145,13 @@ async fn track_signalement_public(
 
     let row = sqlx::query(
         r#"
-        SELECT signalement_number, commune_id, type_incident, status, created_at, updated_at
-        FROM signalements
-        WHERE signalement_number = $1
+        SELECT s.signalement_number, s.type_incident, s.status,
+               s.created_at, s.updated_at,
+               c.nom AS commune_nom, c.code AS commune_code
+        FROM signalements s
+        INNER JOIN communes c ON c.id = s.commune_id
+        WHERE s.signalement_number = $1
+          AND c.deleted_at IS NULL
         "#,
     )
     .bind(&numero_suivi)
@@ -146,7 +161,8 @@ async fn track_signalement_public(
 
     Ok(Json(SignalementPublicTrackResponse {
         signalement_number: row.get("signalement_number"),
-        commune_id: row.get("commune_id"),
+        commune_nom: row.get("commune_nom"),
+        commune_code: row.get("commune_code"),
         type_incident: row.get("type_incident"),
         status: row.get("status"),
         created_at: row.get("created_at"),
@@ -167,25 +183,45 @@ async fn create_signalement_public(
         state.config.rate_limit_window_seconds,
     )?;
 
-    let type_incident = required_text(payload.type_incident, "type_incident")?;
-    let location = required_text(payload.location_description, "location_description")?;
+    let incident_input = required_text(payload.type_incident, "type_incident")?;
     let description = required_text(payload.description, "description")?;
+    let lieu_dit = clean_optional(payload.lieu_dit);
     validate_gps(payload.gps_latitude, payload.gps_longitude)?;
 
     let mut tx = state.db.begin().await?;
 
     let commune_code: Option<String> =
-        sqlx::query_scalar("SELECT code FROM communes WHERE id = $1 AND deleted_at IS NULL")
+        sqlx::query_scalar(
+            r#"
+            SELECT code
+            FROM communes
+            WHERE id = $1
+              AND deleted_at IS NULL
+              AND active = true
+              AND subscription_status IN ('ACTIVE', 'TRIAL')
+              AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+            "#,
+        )
             .bind(payload.commune_id)
             .fetch_optional(&mut *tx)
             .await?;
     let commune_code = commune_code.ok_or_else(|| ApiError::not_found("Commune introuvable"))?;
 
+    let type_incident = resolve_public_incident_type(&mut tx, payload.commune_id, &incident_input)
+        .await?;
+    let (zone_id, location) =
+        resolve_public_signalement_location(&mut tx, payload.commune_id, payload.zone_id, payload.location_description, lieu_dit.as_deref())
+            .await?;
+
     let anonyme = payload.contact_anonyme.unwrap_or(false);
-    let contact_info = if anonyme {
-        None
+    let (contact_name, contact_phone, contact_info) = if anonyme {
+        (None, None, None)
     } else {
-        clean_optional(payload.contact_info)
+        let contact_name = required_optional_text(payload.contact_name, "contact_name")?;
+        let contact_phone = required_optional_text(payload.contact_phone, "contact_phone")?;
+        let contact_info = clean_optional(payload.contact_info)
+            .or_else(|| Some(format!("{contact_name} - {contact_phone}")));
+        (Some(contact_name), Some(contact_phone), contact_info)
     };
 
     let number = generate_signalement_number(&mut tx, &commune_code, payload.commune_id).await?;
@@ -194,19 +230,24 @@ async fn create_signalement_public(
     sqlx::query(
         r#"
         INSERT INTO signalements (
-            id, commune_id, signalement_number, type_incident,
-            location_description, description, contact_anonyme, contact_info,
+            id, commune_id, zone_id, signalement_number, type_incident,
+            location_description, lieu_dit, description, contact_anonyme,
+            contact_name, contact_phone, contact_info,
             gps_latitude, gps_longitude
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         "#,
     )
     .bind(id)
     .bind(payload.commune_id)
+    .bind(zone_id)
     .bind(&number)
     .bind(&type_incident)
     .bind(&location)
+    .bind(lieu_dit.as_deref())
     .bind(&description)
     .bind(anonyme)
+    .bind(contact_name.as_deref())
+    .bind(contact_phone.as_deref())
     .bind(contact_info)
     .bind(payload.gps_latitude)
     .bind(payload.gps_longitude)
@@ -339,17 +380,113 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
     SignalementResponse {
         id: row.get("id"),
         commune_id: row.get("commune_id"),
+        zone_id: row.get("zone_id"),
         signalement_number: row.get("signalement_number"),
         type_incident: row.get("type_incident"),
         location_description: row.get("location_description"),
+        lieu_dit: row.get("lieu_dit"),
         description: row.get("description"),
         contact_anonyme: row.get("contact_anonyme"),
+        contact_name: row.get("contact_name"),
+        contact_phone: row.get("contact_phone"),
+        contact_info: row.get("contact_info"),
         status: row.get("status"),
         gps_latitude: row.get("gps_latitude"),
         gps_longitude: row.get("gps_longitude"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
+}
+
+async fn resolve_public_incident_type(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    input: &str,
+) -> Result<String, ApiError> {
+    let incident_id = Uuid::parse_str(input).ok();
+    let type_name: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT it.nom
+        FROM intervention_types it
+        INNER JOIN intervention_categories c ON c.id = it.category_id
+        WHERE it.commune_id = $1
+          AND it.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+          AND it.active = true
+          AND c.active = true
+          AND (it.id = $2 OR lower(it.nom) = lower($3))
+        LIMIT 1
+        "#,
+    )
+    .bind(commune_id)
+    .bind(incident_id)
+    .bind(input)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    if let Some(name) = type_name {
+        return Ok(name);
+    }
+
+    let active_types: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM intervention_types it
+        INNER JOIN intervention_categories c ON c.id = it.category_id
+        WHERE it.commune_id = $1
+          AND it.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+          AND it.active = true
+          AND c.active = true
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    if active_types > 0 {
+        Err(ApiError::bad_request(
+            "Type d'incident invalide pour cette commune",
+        ))
+    } else {
+        Ok(input.to_string())
+    }
+}
+
+async fn resolve_public_signalement_location(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    zone_id: Option<Uuid>,
+    legacy_location: Option<String>,
+    lieu_dit: Option<&str>,
+) -> Result<(Option<Uuid>, String), ApiError> {
+    if let Some(zone_id) = zone_id {
+        let zone_name: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT nom
+            FROM zones
+            WHERE id = $1
+              AND commune_id = $2
+              AND active = true
+              AND deleted_at IS NULL
+            "#,
+        )
+        .bind(zone_id)
+        .bind(commune_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+        let zone_name = zone_name.ok_or_else(|| {
+            ApiError::bad_request("Zone ou quartier invalide pour cette commune")
+        })?;
+        let location = match lieu_dit {
+            Some(value) => format!("{zone_name} - {value}"),
+            None => zone_name,
+        };
+        return Ok((Some(zone_id), location));
+    }
+
+    let location = required_optional_text(legacy_location, "location_description")?;
+    Ok((None, location))
 }
 
 async fn generate_signalement_number(
@@ -384,6 +521,10 @@ fn required_text(value: String, field: &'static str) -> Result<String, ApiError>
         return Err(ApiError::bad_request(format!("{field} est requis")));
     }
     Ok(trimmed)
+}
+
+fn required_optional_text(value: Option<String>, field: &'static str) -> Result<String, ApiError> {
+    clean_optional(value).ok_or_else(|| ApiError::bad_request(format!("{field} est requis")))
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {

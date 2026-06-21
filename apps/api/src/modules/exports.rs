@@ -319,7 +319,7 @@ async fn export_agents(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
-        SELECT a.matricule, a.full_name, a.grade, a.status, a.formation_nasla,
+        SELECT a.matricule, a.full_name, a.status,
                a.date_prise_fonction, a.created_at, c.nom AS commune_nom
         FROM agents a
         JOIN communes c ON a.commune_id = c.id
@@ -340,25 +340,21 @@ async fn export_agents(
     let rows = qb.build().fetch_all(&state.db).await?;
 
     let mut csv = String::from(
-        "Matricule,Nom Complet,Grade,Statut,Formation NASLA,Date Prise Fonction,Commune,Créé le\n",
+        "Matricule,Nom Complet,Statut,Date Prise Fonction,Commune,Cree le\n",
     );
     for row in &rows {
         let matricule: String = row.get("matricule");
         let nom: String = row.get("full_name");
-        let grade: String = row.get("grade");
         let status: String = row.get("status");
-        let nasla: bool = row.get("formation_nasla");
         let date_pf: Option<chrono::NaiveDate> = row.get("date_prise_fonction");
         let commune_nom: String = row.get("commune_nom");
         let created_at: DateTime<Utc> = row.get("created_at");
 
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{}\n",
             csv_field(&matricule),
             csv_field(&nom),
-            csv_field(&grade),
             csv_field(&status),
-            if nasla { "Oui" } else { "Non" },
             date_pf
                 .map(|d| d.format("%Y-%m-%d").to_string())
                 .unwrap_or_default(),

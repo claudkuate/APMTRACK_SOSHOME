@@ -594,6 +594,7 @@ struct CreateInterventionRequest {
     type_id: Uuid,
     nom: String,
     description: Option<String>,
+    requires_vehicle: Option<bool>,
     sujet_paiement: bool,
     montant: Option<f64>,
     montant_fcfa: Option<i64>,
@@ -609,6 +610,7 @@ struct CreateInterventionRequest {
 struct PatchInterventionRequest {
     nom: Option<String>,
     description: Option<String>,
+    requires_vehicle: Option<bool>,
     sujet_paiement: Option<bool>,
     montant: Option<f64>,
     montant_fcfa: Option<i64>,
@@ -628,6 +630,7 @@ pub struct InterventionResponse {
     pub type_id: Uuid,
     pub nom: String,
     pub description: Option<String>,
+    pub requires_vehicle: bool,
     pub sujet_paiement: bool,
     pub montant: Option<f64>,
     pub montant_fcfa: Option<i64>,
@@ -675,7 +678,7 @@ async fn list_interventions(
     let base_select = r#"
         SELECT
             i.id, i.commune_id, it.category_id, i.type_id, i.nom, i.description,
-            i.sujet_paiement,
+            i.requires_vehicle, i.sujet_paiement,
             i.montant::DOUBLE PRECISION AS montant,
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
@@ -763,11 +766,11 @@ async fn create_intervention(
         r#"
         INSERT INTO interventions (
             id, commune_id, type_id, nom, description,
-            sujet_paiement, montant, montant_fcfa, delai_paiement_jours,
+            requires_vehicle, sujet_paiement, montant, montant_fcfa, delai_paiement_jours,
             taux_penalite, taux_penalite_basis_points,
             reference_deliberation, piece_justificative, active
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         "#,
     )
     .bind(id)
@@ -775,6 +778,7 @@ async fn create_intervention(
     .bind(payload.type_id)
     .bind(&nom)
     .bind(clean_optional(payload.description))
+    .bind(payload.requires_vehicle.unwrap_or(false))
     .bind(payload.sujet_paiement)
     .bind(payload.montant)
     .bind(montant_fcfa)
@@ -853,15 +857,16 @@ async fn patch_intervention(
         UPDATE interventions
         SET nom = $2,
             description = $3,
-            sujet_paiement = $4,
-            montant = $5,
-            montant_fcfa = $6,
-            delai_paiement_jours = $7,
-            taux_penalite = $8,
-            taux_penalite_basis_points = $9,
-            reference_deliberation = $10,
-            piece_justificative = $11,
-            active = $12,
+            requires_vehicle = $4,
+            sujet_paiement = $5,
+            montant = $6,
+            montant_fcfa = $7,
+            delai_paiement_jours = $8,
+            taux_penalite = $9,
+            taux_penalite_basis_points = $10,
+            reference_deliberation = $11,
+            piece_justificative = $12,
+            active = $13,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -869,6 +874,7 @@ async fn patch_intervention(
     .bind(id)
     .bind(&nom)
     .bind(payload.description.or(existing.description.clone()))
+    .bind(payload.requires_vehicle.unwrap_or(existing.requires_vehicle))
     .bind(sujet_paiement)
     .bind(montant)
     .bind(montant_fcfa)
@@ -943,7 +949,7 @@ pub async fn load_intervention(pool: &PgPool, id: Uuid) -> Result<InterventionRe
         r#"
         SELECT
             i.id, i.commune_id, it.category_id, i.type_id, i.nom, i.description,
-            i.sujet_paiement,
+            i.requires_vehicle, i.sujet_paiement,
             i.montant::DOUBLE PRECISION AS montant,
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
@@ -970,6 +976,7 @@ fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
         type_id: row.get("type_id"),
         nom: row.get("nom"),
         description: row.get("description"),
+        requires_vehicle: row.get("requires_vehicle"),
         sujet_paiement: row.get("sujet_paiement"),
         montant: row.get("montant"),
         montant_fcfa: row.get("montant_fcfa"),

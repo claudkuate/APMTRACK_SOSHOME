@@ -1,6 +1,7 @@
 use axum::body::Bytes;
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,10 +12,11 @@ use uuid::Uuid;
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
 use crate::modules::audit;
-use crate::modules::auth::AuthUser;
+use crate::modules::auth::{assign_roles_in_tx, hash_password, roles_for_user, AuthUser};
 use crate::modules::rbac::Role;
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::state::AppState;
+use crate::storage::{content_type_for_key, image_extension, MAX_AVATAR_BYTES};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -23,6 +25,10 @@ pub fn router() -> Router<AppState> {
             axum::routing::get(list_agents).post(create_agent),
         )
         .route("/agents/import-csv", axum::routing::post(import_agents_csv))
+        .route(
+            "/agents/{id}/account",
+            axum::routing::post(link_agent_mobile_account),
+        )
         .route(
             "/agents/{id}",
             axum::routing::get(get_agent).patch(patch_agent),
@@ -33,13 +39,24 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(reactivate_agent),
         )
         .route("/agents/{id}/retire", axum::routing::post(retire_agent))
+        .route(
+            "/agents/{id}/photo",
+            axum::routing::get(get_agent_photo_content)
+                .post(upload_agent_photo)
+                .layer(DefaultBodyLimit::max(MAX_AVATAR_BYTES)),
+        )
 }
 
 pub fn public_router() -> Router<AppState> {
-    Router::new().route(
-        "/agents/verify/{matricule}",
-        axum::routing::get(verify_agent_public),
-    )
+    Router::new()
+        .route(
+            "/agents/verify/{matricule}",
+            axum::routing::get(verify_agent_public),
+        )
+        .route(
+            "/agents/verify/{matricule}/photo",
+            axum::routing::get(verify_agent_photo_public),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,13 +77,10 @@ struct CreateAgentRequest {
     matricule: String,
     full_name: String,
     commune_id: Uuid,
-    grade: String,
     date_prise_fonction: Option<NaiveDate>,
-    formation_nasla: Option<bool>,
     photo_url: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
-    user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,9 +95,7 @@ struct ImportAgentsResponse {
 struct CsvAgentRow {
     matricule: String,
     full_name: String,
-    grade: String,
     date_prise_fonction: Option<NaiveDate>,
-    formation_nasla: Option<bool>,
     telephone: Option<String>,
     email: Option<String>,
 }
@@ -93,14 +105,28 @@ struct PatchAgentRequest {
     matricule: Option<String>,
     full_name: Option<String>,
     commune_id: Option<Uuid>,
-    grade: Option<String>,
     status: Option<String>,
     date_prise_fonction: Option<NaiveDate>,
-    formation_nasla: Option<bool>,
     photo_url: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
-    user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkAgentAccountRequest {
+    email: String,
+    password: String,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct LinkAgentAccountResponse {
+    agent_id: Uuid,
+    user_id: Uuid,
+    email: String,
+    full_name: String,
+    commune_id: Uuid,
+    linked: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -109,14 +135,12 @@ pub struct AgentResponse {
     matricule: String,
     full_name: String,
     commune_id: Uuid,
-    grade: String,
     status: String,
     date_prise_fonction: Option<NaiveDate>,
-    formation_nasla: bool,
     photo_url: Option<String>,
+    has_photo: bool,
     telephone: Option<String>,
     email: Option<String>,
-    user_id: Option<Uuid>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -127,9 +151,9 @@ struct PublicAgentVerification {
     full_name: String,
     commune_code: String,
     commune_nom: String,
-    grade: String,
     status: String,
     active: bool,
+    has_photo: bool,
 }
 
 async fn get_agent(
@@ -227,23 +251,20 @@ async fn create_agent(
     sqlx::query(
         r#"
         INSERT INTO agents (
-            id, matricule, full_name, commune_id, grade, status,
-            date_prise_fonction, formation_nasla, photo_url, telephone, email, user_id
+            id, matricule, full_name, commune_id, status,
+            date_prise_fonction, photo_url, telephone, email
         )
-        VALUES ($1, $2, $3, $4, $5, 'ACTIF', $6, $7, $8, $9, $10, $11)
+        VALUES ($1, $2, $3, $4, 'ACTIF', $5, $6, $7, $8)
         "#,
     )
     .bind(agent_id)
     .bind(required_text(payload.matricule, "matricule")?)
     .bind(required_text(payload.full_name, "full_name")?)
     .bind(payload.commune_id)
-    .bind(required_text(payload.grade, "grade")?)
     .bind(payload.date_prise_fonction)
-    .bind(payload.formation_nasla.unwrap_or(false))
     .bind(clean_optional(payload.photo_url))
     .bind(clean_optional(payload.telephone))
     .bind(clean_optional(payload.email))
-    .bind(payload.user_id)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -316,15 +337,6 @@ async fn import_agents_csv(
                 continue;
             }
         };
-        let grade = match required_text(row.grade, "grade") {
-            Ok(value) => value,
-            Err(error) => {
-                skipped += 1;
-                errors.push(format!("Ligne {line}: {error}"));
-                continue;
-            }
-        };
-
         let existing_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM agents WHERE lower(matricule) = lower($1) AND deleted_at IS NULL",
         )
@@ -338,11 +350,9 @@ async fn import_agents_csv(
                 UPDATE agents
                 SET full_name = $2,
                     commune_id = $3,
-                    grade = $4,
-                    date_prise_fonction = $5,
-                    formation_nasla = $6,
-                    telephone = $7,
-                    email = $8,
+                    date_prise_fonction = $4,
+                    telephone = $5,
+                    email = $6,
                     updated_at = now()
                 WHERE id = $1 AND deleted_at IS NULL
                 "#,
@@ -350,9 +360,7 @@ async fn import_agents_csv(
             .bind(agent_id)
             .bind(&full_name)
             .bind(query.commune_id)
-            .bind(&grade)
             .bind(row.date_prise_fonction)
-            .bind(row.formation_nasla.unwrap_or(false))
             .bind(clean_optional(row.telephone))
             .bind(clean_optional(row.email))
             .execute(&mut *tx)
@@ -363,19 +371,17 @@ async fn import_agents_csv(
             sqlx::query(
                 r#"
                 INSERT INTO agents (
-                    id, matricule, full_name, commune_id, grade, status,
-                    date_prise_fonction, formation_nasla, telephone, email
+                    id, matricule, full_name, commune_id, status,
+                    date_prise_fonction, telephone, email
                 )
-                VALUES ($1, $2, $3, $4, $5, 'ACTIF', $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, 'ACTIF', $5, $6, $7)
                 "#,
             )
             .bind(Uuid::new_v4())
             .bind(&matricule)
             .bind(&full_name)
             .bind(query.commune_id)
-            .bind(&grade)
             .bind(row.date_prise_fonction)
-            .bind(row.formation_nasla.unwrap_or(false))
             .bind(clean_optional(row.telephone))
             .bind(clean_optional(row.email))
             .execute(&mut *tx)
@@ -435,14 +441,11 @@ async fn patch_agent(
         SET matricule = $2,
             full_name = $3,
             commune_id = $4,
-            grade = $5,
-            status = $6,
-            date_prise_fonction = $7,
-            formation_nasla = $8,
-            photo_url = $9,
-            telephone = $10,
-            email = $11,
-            user_id = $12,
+            status = $5,
+            date_prise_fonction = $6,
+            photo_url = $7,
+            telephone = $8,
+            email = $9,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -457,17 +460,11 @@ async fn patch_agent(
         None => existing.full_name.clone(),
     })
     .bind(commune_id)
-    .bind(match payload.grade {
-        Some(value) => required_text(value, "grade")?,
-        None => existing.grade.clone(),
-    })
     .bind(&status)
     .bind(payload.date_prise_fonction.or(existing.date_prise_fonction))
-    .bind(payload.formation_nasla.unwrap_or(existing.formation_nasla))
     .bind(payload.photo_url.or(existing.photo_url.clone()))
     .bind(payload.telephone.or(existing.telephone.clone()))
     .bind(payload.email.or(existing.email.clone()))
-    .bind(payload.user_id.or(existing.user_id))
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -487,6 +484,136 @@ async fn patch_agent(
     .await;
 
     Ok(Json(load_agent(&state.db, agent_id).await?))
+}
+
+async fn link_agent_mobile_account(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(agent_id): Path<Uuid>,
+    ApiJson(payload): ApiJson<LinkAgentAccountRequest>,
+) -> Result<Json<LinkAgentAccountResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let agent = load_agent(&state.db, agent_id).await?;
+    auth_user.require_commune_access(agent.commune_id)?;
+
+    let email = normalize_email(&payload.email)?;
+    let password_hash = hash_password(payload.password.trim())?;
+    let active = payload.active.unwrap_or(true);
+
+    let existing_user_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM users WHERE lower(email) = lower($1) AND deleted_at IS NULL",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await?;
+    let user_id = existing_user_id.unwrap_or_else(Uuid::new_v4);
+
+    let conflicting_agent: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM agents
+        WHERE user_id = $1
+          AND id <> $2
+          AND deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(user_id)
+    .bind(agent_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if conflicting_agent.is_some() {
+        return Err(ApiError::bad_request(
+            "Ce compte utilisateur est deja lie a un autre agent",
+        ));
+    }
+
+    let mut roles = match existing_user_id {
+        Some(id) => roles_for_user(&state.db, id).await?,
+        None => Vec::new(),
+    };
+    if !roles.contains(&Role::ApmAgent) {
+        roles.push(Role::ApmAgent);
+    }
+
+    let mut tx = state.db.begin().await?;
+    if existing_user_id.is_some() {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET email = $2,
+                password_hash = $3,
+                full_name = $4,
+                commune_id = $5,
+                active = $6,
+                updated_at = now()
+            WHERE id = $1 AND deleted_at IS NULL
+            "#,
+        )
+        .bind(user_id)
+        .bind(&email)
+        .bind(&password_hash)
+        .bind(&agent.full_name)
+        .bind(agent.commune_id)
+        .bind(active)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_database_error)?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, email, password_hash, full_name, commune_id, active)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(user_id)
+        .bind(&email)
+        .bind(&password_hash)
+        .bind(&agent.full_name)
+        .bind(agent.commune_id)
+        .bind(active)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_database_error)?;
+    }
+
+    assign_roles_in_tx(&mut tx, user_id, &roles).await?;
+    sqlx::query(
+        r#"
+        UPDATE agents
+        SET user_id = $2, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(agent_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record_for_commune_tx(
+        &mut tx,
+        Some(agent.commune_id),
+        Some(auth_user.id),
+        "AGENT_ACCOUNT_LINKED",
+        "agents",
+        Some(agent_id),
+        None,
+        Some(json!({ "email": email.clone(), "user_id": user_id })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+    tx.commit().await?;
+
+    Ok(Json(LinkAgentAccountResponse {
+        agent_id,
+        user_id,
+        email,
+        full_name: agent.full_name,
+        commune_id: agent.commune_id,
+        linked: true,
+    }))
 }
 
 async fn suspend_agent(
@@ -571,8 +698,8 @@ async fn verify_agent_public(
         SELECT
             a.matricule,
             a.full_name,
-            a.grade,
             a.status,
+            a.photo_url,
             c.code AS commune_code,
             c.nom AS commune_nom
         FROM agents a
@@ -593,10 +720,164 @@ async fn verify_agent_public(
         full_name: row.get("full_name"),
         commune_code: row.get("commune_code"),
         commune_nom: row.get("commune_nom"),
-        grade: row.get("grade"),
         active: status == "ACTIF",
         status,
+        has_photo: row.get::<Option<String>, _>("photo_url").is_some(),
     }))
+}
+
+/// Streame l'avatar public d'un agent (sans authentification).
+async fn verify_agent_photo_public(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(matricule): Path<String>,
+) -> Result<Response, ApiError> {
+    state.rate_limiter.check(
+        "public:agents:photo",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
+    let matricule = required_text(matricule, "matricule")?;
+    let object_key: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT a.photo_url
+        FROM agents a
+        INNER JOIN communes c ON c.id = a.commune_id
+        WHERE lower(a.matricule) = lower($1)
+          AND a.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+        "#,
+    )
+    .bind(&matricule)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten();
+
+    serve_avatar(&state, object_key).await
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Photo de profil (avatar, object storage MinIO/S3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lit un champ image unique d'un corps multipart et valide type/taille.
+pub(crate) async fn read_image_field(
+    multipart: &mut Multipart,
+) -> Result<(Bytes, String), ApiError> {
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?
+        .ok_or_else(|| ApiError::bad_request("Fichier manquant"))?;
+
+    let content_type = field
+        .content_type()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    if !content_type.starts_with("image/") {
+        return Err(ApiError::bad_request("Le fichier doit etre une image"));
+    }
+
+    let data = field
+        .bytes()
+        .await
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    if data.is_empty() {
+        return Err(ApiError::bad_request("Fichier vide"));
+    }
+    if data.len() > MAX_AVATAR_BYTES {
+        return Err(ApiError::bad_request("Image trop volumineuse (max 5 Mo)"));
+    }
+    Ok((data, content_type))
+}
+
+/// Charge un objet avatar depuis le stockage et le renvoie en reponse HTTP.
+pub(crate) async fn serve_avatar(
+    state: &AppState,
+    object_key: Option<String>,
+) -> Result<Response, ApiError> {
+    let object_key = object_key.ok_or_else(|| ApiError::not_found("Photo introuvable"))?;
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Stockage des photos non configure"))?;
+    let bytes = storage.get(&object_key).await.map_err(|error| {
+        tracing::error!(%error, "agent photo download failed");
+        ApiError::internal("Echec du telechargement de la photo")
+    })?;
+    let content_type = content_type_for_key(&object_key);
+    Ok(([(header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
+async fn upload_agent_photo(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(agent_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<AgentResponse>), ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let agent = load_agent(&state.db, agent_id).await?;
+    auth_user.require_commune_access(agent.commune_id)?;
+
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Stockage des photos non configure"))?;
+
+    let (data, content_type) = read_image_field(&mut multipart).await?;
+    let object_key = format!("avatars/agents/{}.{}", agent_id, image_extension(&content_type));
+    storage
+        .put(&object_key, data.as_ref(), &content_type)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "agent photo upload failed");
+            ApiError::internal("Echec de l'enregistrement de la photo")
+        })?;
+
+    sqlx::query("UPDATE agents SET photo_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(agent_id)
+        .bind(&object_key)
+        .execute(&state.db)
+        .await
+        .map_err(map_database_error)?;
+
+    audit::record_for_commune(
+        &state.db,
+        Some(agent.commune_id),
+        Some(auth_user.id),
+        "AGENT_PHOTO_UPLOADED",
+        "agents",
+        Some(agent_id),
+        None,
+        Some(json!({ "content_type": content_type })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(load_agent(&state.db, agent_id).await?),
+    ))
+}
+
+async fn get_agent_photo_content(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::ApmAgent,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+    let agent = load_agent(&state.db, agent_id).await?;
+    auth_user.require_commune_access(agent.commune_id)?;
+    serve_avatar(&state, agent.photo_url).await
 }
 
 pub async fn load_agent(pool: &PgPool, agent_id: Uuid) -> Result<AgentResponse, ApiError> {
@@ -621,14 +902,12 @@ fn row_to_agent(row: sqlx::postgres::PgRow) -> AgentResponse {
         matricule: row.get("matricule"),
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
-        grade: row.get("grade"),
         status: row.get("status"),
         date_prise_fonction: row.get("date_prise_fonction"),
-        formation_nasla: row.get("formation_nasla"),
+        has_photo: row.get::<Option<String>, _>("photo_url").is_some(),
         photo_url: row.get("photo_url"),
         telephone: row.get("telephone"),
         email: row.get("email"),
-        user_id: row.get("user_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }
@@ -660,4 +939,12 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|candidate| candidate.trim().to_string())
         .filter(|candidate| !candidate.is_empty())
+}
+
+fn normalize_email(value: &str) -> Result<String, ApiError> {
+    let email = value.trim().to_ascii_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::bad_request("Email invalide"));
+    }
+    Ok(email)
 }

@@ -128,14 +128,13 @@ async fn search_agents(
 ) -> Result<Vec<SearchResult>, ApiError> {
     let rows = sqlx::query(
         r#"
-        SELECT id, matricule, full_name, grade, status
+        SELECT id, matricule, full_name, status
         FROM agents
         WHERE deleted_at IS NULL
           AND ($1::uuid IS NULL OR commune_id = $1)
           AND (
             matricule ILIKE $2
             OR full_name ILIKE $2
-            OR grade ILIKE $2
             OR status ILIKE $2
           )
         ORDER BY updated_at DESC
@@ -154,14 +153,13 @@ async fn search_agents(
             let id: Uuid = row.get("id");
             let matricule: String = row.get("matricule");
             let full_name: String = row.get("full_name");
-            let grade: String = row.get("grade");
             let status: String = row.get("status");
 
             SearchResult {
                 module: "Agent",
                 id,
                 title: format!("{matricule} - {full_name}"),
-                detail: grade,
+                detail: status.clone(),
                 status: Some(status),
                 route: "/agents".to_string(),
             }

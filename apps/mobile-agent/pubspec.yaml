@@ -40,6 +40,8 @@ dependencies:
   flutter_svg: ^2.3.0
   image_picker: ^1.1.2
   path_provider: ^2.1.5
+  thermal_printer_plus: ^1.0.13
+  esc_pos_utils_plus: ^2.0.4
 
 dev_dependencies:
   flutter_test:
@@ -92,6 +94,7 @@ flutter:
   assets:
     - assets/branding/cameroon_coat_of_arms.png
     - assets/branding/cameroon_coat_of_arms.svg
+    - assets/branding/yaounde-reunification-login-hero.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:

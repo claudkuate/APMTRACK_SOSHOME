@@ -27,7 +27,8 @@ pub fn router() -> Router<AppState> {
             "/public",
             modules::agents::public_router()
                 .merge(modules::pvs::public_router())
-                .merge(modules::signalements::public_router()),
+                .merge(modules::signalements::public_router())
+                .merge(modules::communes::public_router()),
         )
 }
 

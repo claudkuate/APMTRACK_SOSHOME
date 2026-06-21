@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../../core/auth/session_controller.dart';
+import '../../core/offline/offline_models.dart';
 import '../../core/theme.dart';
+import '../../core/ui/agent_avatar.dart';
 import '../../core/ui/common.dart';
+import '../pvs/pv_list_item.dart';
 
 class HomePage extends StatelessWidget {
   const HomePage({
@@ -23,6 +26,7 @@ class HomePage extends StatelessWidget {
     final profile = controller.profile;
     final patrouille = controller.activePatrouille.patrouille;
     final recentPvs = controller.pvs.take(3).toList();
+    final drafts = controller.drafts;
 
     return RefreshIndicator(
       onRefresh: controller.refreshData,
@@ -33,22 +37,12 @@ class HomePage extends StatelessWidget {
             SectionPanel(
               child: Row(
                 children: [
-                  CircleAvatar(
-                    radius: 26,
-                    backgroundColor: apmGreen.withValues(alpha: 0.12),
-                    child: Text(
-                      profile.agent.fullName
-                          .split(' ')
-                          .where((part) => part.isNotEmpty)
-                          .take(2)
-                          .map((part) => part[0])
-                          .join()
-                          .toUpperCase(),
-                      style: const TextStyle(
-                        color: apmGreen,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
+                  AgentAvatar(
+                    agent: profile.agent,
+                    imageUrl: profile.agent.photoUrl == null
+                        ? null
+                        : controller.agentPhotoContentUrl(profile.agent.id),
+                    headers: controller.authHeaders,
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -61,7 +55,7 @@ class HomePage extends StatelessWidget {
                               ?.copyWith(fontWeight: FontWeight.w900),
                         ),
                         Text(
-                          '${profile.agent.grade} - ${profile.agent.matricule}',
+                          profile.agent.matricule,
                           style: const TextStyle(color: apmMuted),
                         ),
                       ],
@@ -111,7 +105,7 @@ class HomePage extends StatelessWidget {
                 child: FilledButton.icon(
                   onPressed: onCreatePv,
                   icon: const Icon(Icons.note_add_outlined),
-                  label: const Text('Nouveau PV'),
+                  label: const Text('Nouvelle saisie PV'),
                 ),
               ),
             ],
@@ -130,15 +124,47 @@ class HomePage extends StatelessWidget {
               Expanded(
                 child: _QuickAction(
                   icon: Icons.description_outlined,
-                  label: 'Mes PV',
+                  label: 'PV officiels',
                   onTap: onOpenPvs,
                 ),
               ),
             ],
           ),
+          if (drafts.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Text(
+              'Brouillons locaux a synchroniser',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(height: 8),
+            SectionPanel(
+              padding: EdgeInsets.zero,
+              child: Column(
+                children: [
+                  for (final draft in drafts.take(3))
+                    ListTile(
+                      leading: Icon(
+                        _draftIcon(draft),
+                        color: _draftColor(draft),
+                      ),
+                      title: Text(
+                        draft.interventionName ?? 'Brouillon local',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      subtitle: Text(
+                        _draftStatusText(draft),
+                        style: TextStyle(color: _draftColor(draft)),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
           const SizedBox(height: 16),
           Text(
-            'Derniers PV',
+            'Derniers PV officiels',
             style: Theme.of(
               context,
             ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
@@ -146,39 +172,46 @@ class HomePage extends StatelessWidget {
           const SizedBox(height: 8),
           if (recentPvs.isEmpty)
             const EmptyState(
-              title: 'Aucun PV emis',
-              message: 'Les PV valides par le serveur apparaitront ici.',
+              title: 'Aucun PV officiel',
+              message:
+                  'Les saisies synchronisees et acceptees par le serveur apparaitront ici.',
               icon: Icons.description_outlined,
             )
           else
             SectionPanel(
               padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (final pv in recentPvs)
-                    ListTile(
-                      title: Text(
-                        pv.pvNumber,
-                        style: const TextStyle(fontWeight: FontWeight.w800),
-                      ),
-                      subtitle: Text(
-                        [
-                          pv.subjectLabel,
-                          pv.infractionsLabel,
-                          pv.vehicleIdentityLabel,
-                          pv.verbalizedDisplayName,
-                        ].whereType<String>().join(' - '),
-                      ),
-                      trailing: StatusPill(status: pv.status),
-                    ),
-                ],
-              ),
+              child: PvListItems(controller: controller, pvs: recentPvs),
             ),
         ],
       ),
     );
   }
 }
+
+String _draftStatusText(PvDraft draft) {
+  if (draft.status == PvDraftStatus.failed) {
+    return draft.error == null
+        ? 'Echec serveur - Revoir avant nouvel essai'
+        : 'Echec serveur : ${draft.error}';
+  }
+  if (draft.serverPvId == null) {
+    return 'Non officiel - En attente de synchronisation serveur';
+  }
+  return "PV serveur cree - preuves en attente d'envoi";
+}
+
+IconData _draftIcon(PvDraft draft) {
+  if (draft.status == PvDraftStatus.failed) {
+    return Icons.error_outline;
+  }
+  if (draft.serverPvId == null) {
+    return Icons.cloud_upload_outlined;
+  }
+  return Icons.photo_library_outlined;
+}
+
+Color _draftColor(PvDraft draft) =>
+    draft.status == PvDraftStatus.failed ? apmRed : apmGold;
 
 class _QuickAction extends StatelessWidget {
   const _QuickAction({

@@ -108,8 +108,7 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
         json!({
             "matricule": "APM-DLA-001",
             "full_name": "Agent Douala",
-            "commune_id": commune_b_id,
-            "grade": "Agent"
+            "commune_id": commune_b_id
         }),
         Some(commune_admin_token),
     )
@@ -123,8 +122,7 @@ async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
         json!({
             "matricule": "APM-YDE-001",
             "full_name": "Agent Yaounde",
-            "commune_id": commune_a_id,
-            "grade": "Agent"
+            "commune_id": commune_a_id
         }),
         Some(commune_admin_token),
     )
@@ -232,7 +230,6 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
     )
     .await;
     assert_eq!(agent_user.status, StatusCode::OK);
-    let agent_user_id = agent_user.body["id"].as_str().expect("agent user id");
 
     let agent = request_json(
         app.clone(),
@@ -241,15 +238,27 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         json!({
             "matricule": "APM-YDE1-MOB",
             "full_name": "Agent Mobile",
-            "commune_id": commune_id,
-            "grade": "Agent",
-            "user_id": agent_user_id
+            "commune_id": commune_id
         }),
         Some(admin_token),
     )
     .await;
     assert_eq!(agent.status, StatusCode::OK);
     let agent_id = agent.body["id"].as_str().expect("agent id");
+
+    let link_account = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/agents/{agent_id}/account"),
+        json!({
+            "email": "agent.mobile@example.com",
+            "password": "agentpass123",
+            "active": true
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(link_account.status, StatusCode::OK);
 
     let category = request_json(
         app.clone(),

@@ -5,6 +5,31 @@ use s3::Bucket;
 
 use crate::config::S3Config;
 
+/// Taille maximale d'un avatar (agent / utilisateur) accepte a l'upload.
+pub const MAX_AVATAR_BYTES: usize = 5 * 1024 * 1024;
+
+/// Extension de fichier deduite d'un content-type image (repli `jpg`).
+pub fn image_extension(content_type: &str) -> &'static str {
+    match content_type {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/heic" | "image/heif" => "heic",
+        "image/gif" => "gif",
+        _ => "jpg",
+    }
+}
+
+/// Content-type deduit d'une cle objet (par extension), pour servir un avatar.
+pub fn content_type_for_key(key: &str) -> &'static str {
+    match key.rsplit('.').next() {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("heic") | Some("heif") => "image/heic",
+        Some("gif") => "image/gif",
+        _ => "image/jpeg",
+    }
+}
+
 /// Thin wrapper around an S3/MinIO bucket used to store PV photos.
 ///
 /// Uploads and downloads are proxied through the API (the bucket stays on the

@@ -31,6 +31,7 @@ class SessionController extends ChangeNotifier {
   List<Intervention> interventions = const [];
   List<Pv> pvs = const [];
   PatrouilleActive activePatrouille = const PatrouilleActive(agents: []);
+  List<Patrouille> patrouilles = const [];
   List<PvDraft> drafts = const [];
   String? message;
   bool loadingData = false;
@@ -103,6 +104,7 @@ class SessionController extends ChangeNotifier {
       load(
         () async => activePatrouille = await _withAuth(api.activePatrouille),
       ),
+      load(() async => patrouilles = await _withAuth(api.mobilePatrouilles)),
       load(() async => pvs = (await _withAuth((t) => api.pvs(t))).items),
     ]);
 
@@ -233,6 +235,9 @@ class SessionController extends ChangeNotifier {
   /// (used by `Image.network`).
   String photoContentUrl(String pvId, String photoId) =>
       api.photoContentUrl(pvId, photoId);
+
+  String agentPhotoContentUrl(String agentId) =>
+      api.agentPhotoContentUrl(agentId);
 
   Map<String, String> get authHeaders {
     final currentToken = token;
@@ -368,6 +373,7 @@ class SessionController extends ChangeNotifier {
       if (snapshot.patrouille != null) {
         activePatrouille = snapshot.patrouille!;
       }
+      patrouilles = snapshot.patrouilles;
     }
     drafts = decodeDrafts(await _cache.read(_draftsKey));
     notifyListeners();
@@ -379,6 +385,7 @@ class SessionController extends ChangeNotifier {
       interventions: interventions,
       pvs: pvs.take(_maxCachedPvs).toList(),
       patrouille: activePatrouille,
+      patrouilles: patrouilles,
     );
     await _cache.write(_cacheKey, snapshot.encode());
   }
@@ -497,6 +504,7 @@ class SessionController extends ChangeNotifier {
     interventions = const [];
     pvs = const [];
     activePatrouille = const PatrouilleActive(agents: []);
+    patrouilles = const [];
     drafts = const [];
     offline = false;
     status = SessionStatus.unauthenticated;

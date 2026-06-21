@@ -495,7 +495,7 @@
             "text/csv": {
               "schema": {
                 "type": "string",
-                "description": "Colonnes: matricule, full_name, grade, date_prise_fonction, formation_nasla, telephone, email"
+                "description": "Colonnes: matricule, full_name, date_prise_fonction, telephone, email"
               }
             }
           }
@@ -2808,6 +2808,20 @@
         "allOf": [
           {
             "$ref": "#/components/schemas/Intervention"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "category_nom": {
+                "type": "string"
+              },
+              "type_nom": {
+                "type": "string"
+              },
+              "requires_vehicle": {
+                "type": "boolean"
+              }
+            }
           }
         ]
       },
@@ -2842,7 +2856,6 @@
           "agent_id",
           "matricule",
           "full_name",
-          "grade",
           "role_patrouille"
         ],
         "properties": {
@@ -2854,9 +2867,6 @@
             "type": "string"
           },
           "full_name": {
-            "type": "string"
-          },
-          "grade": {
             "type": "string"
           },
           "role_patrouille": {
@@ -3089,6 +3099,35 @@
           "active": {
             "type": "boolean"
           },
+          "subscription_status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "TRIAL",
+              "EXPIRED",
+              "SUSPENDED"
+            ]
+          },
+          "subscription_started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "subscription_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "subscription_active": {
+            "type": "boolean"
+          },
+          "public_visible": {
+            "type": "boolean"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
@@ -3147,6 +3186,23 @@
           },
           "active": {
             "type": "boolean"
+          },
+          "subscription_status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "TRIAL",
+              "EXPIRED",
+              "SUSPENDED"
+            ]
+          },
+          "subscription_started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "subscription_expires_at": {
+            "type": "string",
+            "format": "date-time"
           }
         }
       },
@@ -3170,9 +3226,6 @@
             "type": "string",
             "format": "uuid"
           },
-          "grade": {
-            "type": "string"
-          },
           "status": {
             "type": "string",
             "enum": [
@@ -3189,9 +3242,6 @@
             ],
             "format": "date"
           },
-          "formation_nasla": {
-            "type": "boolean"
-          },
           "photo_url": {
             "type": [
               "string",
@@ -3209,13 +3259,6 @@
               "string",
               "null"
             ]
-          },
-          "user_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid"
           },
           "created_at": {
             "type": "string",
@@ -3232,8 +3275,7 @@
         "required": [
           "matricule",
           "full_name",
-          "commune_id",
-          "grade"
+          "commune_id"
         ],
         "properties": {
           "matricule": {
@@ -3246,15 +3288,9 @@
             "type": "string",
             "format": "uuid"
           },
-          "grade": {
-            "type": "string"
-          },
           "date_prise_fonction": {
             "type": "string",
             "format": "date"
-          },
-          "formation_nasla": {
-            "type": "boolean"
           },
           "photo_url": {
             "type": "string"
@@ -3264,10 +3300,6 @@
           },
           "email": {
             "type": "string"
-          },
-          "user_id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -3322,9 +3354,6 @@
             "type": "string"
           },
           "commune_nom": {
-            "type": "string"
-          },
-          "grade": {
             "type": "string"
           },
           "status": {
@@ -3617,7 +3646,21 @@
       },
       "CreatePvRequest": {
         "type": "object",
-        "required": [],
+        "required": [
+          "verbalized_phone"
+        ],
+        "anyOf": [
+          {
+            "required": [
+              "verbalized_name"
+            ]
+          },
+          {
+            "required": [
+              "verbalized_last_name"
+            ]
+          }
+        ],
         "properties": {
           "intervention_id": {
             "type": [
@@ -3923,7 +3966,6 @@
         "required": [
           "commune_id",
           "type_incident",
-          "location_description",
           "description"
         ],
         "properties": {
@@ -3931,17 +3973,45 @@
             "type": "string",
             "format": "uuid"
           },
+          "zone_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "type_incident": {
             "type": "string"
           },
           "location_description": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lieu_dit": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "description": {
             "type": "string"
           },
           "contact_anonyme": {
             "type": "boolean"
+          },
+          "contact_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "contact_phone": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "contact_info": {
             "type": [
@@ -4034,12 +4104,19 @@
             "type": "string",
             "format": "uuid"
           },
+          "category_id": {
+            "type": "string",
+            "format": "uuid"
+          },
           "type_id": {
             "type": "string",
             "format": "uuid"
           },
           "nom": {
             "type": "string"
+          },
+          "requires_vehicle": {
+            "type": "boolean"
           },
           "sujet_paiement": {
             "type": "boolean"

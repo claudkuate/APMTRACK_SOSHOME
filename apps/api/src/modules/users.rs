@@ -1,4 +1,6 @@
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::Response;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,7 @@ use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::modules::agents::{read_image_field, serve_avatar};
 use crate::modules::audit;
 use crate::modules::auth::{
     assign_roles_in_tx, hash_password, normalize_email, revoke_all_refresh_tokens_in_tx,
@@ -16,6 +19,7 @@ use crate::modules::auth::{
 use crate::modules::rbac::{parse_roles, Role};
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::state::AppState;
+use crate::storage::{image_extension, MAX_AVATAR_BYTES};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -23,6 +27,12 @@ pub fn router() -> Router<AppState> {
         .route(
             "/users/{id}",
             axum::routing::get(get_user).patch(patch_user),
+        )
+        .route(
+            "/users/{id}/photo",
+            axum::routing::get(get_user_photo_content)
+                .post(upload_user_photo)
+                .layer(DefaultBodyLimit::max(MAX_AVATAR_BYTES)),
         )
 }
 
@@ -54,6 +64,7 @@ pub struct UserResponse {
     commune_id: Option<Uuid>,
     roles: Vec<String>,
     active: bool,
+    has_photo: bool,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -64,6 +75,7 @@ struct UserRow {
     full_name: String,
     commune_id: Option<Uuid>,
     active: bool,
+    photo_url: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -102,7 +114,7 @@ async fn list_users(
             .get("total");
         let rows = sqlx::query(
             r#"
-            SELECT id, email, full_name, commune_id, active, created_at, updated_at
+            SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at
             FROM users
             WHERE deleted_at IS NULL
             ORDER BY created_at DESC
@@ -127,7 +139,7 @@ async fn list_users(
         .get("total");
         let rows = sqlx::query(
             r#"
-            SELECT id, email, full_name, commune_id, active, created_at, updated_at
+            SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at
             FROM users
             WHERE commune_id = $1 AND deleted_at IS NULL
             ORDER BY created_at DESC
@@ -178,6 +190,7 @@ async fn list_users(
                 commune_id: u.commune_id,
                 roles,
                 active: u.active,
+                has_photo: u.photo_url.is_some(),
                 created_at: u.created_at,
                 updated_at: u.updated_at,
             }
@@ -361,6 +374,82 @@ async fn patch_user(
     Ok(Json(user))
 }
 
+/// Verifie que l'acteur peut gerer le compte cible (memes regles que patch_user).
+fn require_user_management_access(actor: &AuthUser, target: &UserRow) -> Result<(), ApiError> {
+    match target.commune_id {
+        Some(commune) => actor.require_commune_access(commune),
+        None if !actor.has_role(Role::SuperAdmin) => Err(ApiError::forbidden("Acces interdit")),
+        _ => Ok(()),
+    }
+}
+
+async fn upload_user_photo(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(user_id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<UserResponse>), ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_user_row(&state.db, user_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Utilisateur introuvable"))?;
+    require_user_management_access(&auth_user, &existing)?;
+
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("Stockage des photos non configure"))?;
+
+    let (data, content_type) = read_image_field(&mut multipart).await?;
+    let object_key = format!("avatars/users/{}.{}", user_id, image_extension(&content_type));
+    storage
+        .put(&object_key, data.as_ref(), &content_type)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "user photo upload failed");
+            ApiError::internal("Echec de l'enregistrement de la photo")
+        })?;
+
+    sqlx::query("UPDATE users SET photo_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL")
+        .bind(user_id)
+        .bind(&object_key)
+        .execute(&state.db)
+        .await
+        .map_err(map_database_error)?;
+
+    audit::record_for_commune(
+        &state.db,
+        existing.commune_id,
+        Some(auth_user.id),
+        "USER_PHOTO_UPLOADED",
+        "users",
+        Some(user_id),
+        None,
+        Some(json!({ "content_type": content_type })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(load_user_response(&state.db, user_id).await?),
+    ))
+}
+
+async fn get_user_photo_content(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(user_id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
+    let existing = load_user_row(&state.db, user_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Utilisateur introuvable"))?;
+    require_user_management_access(&auth_user, &existing)?;
+    serve_avatar(&state, existing.photo_url).await
+}
+
 pub async fn load_user_response(pool: &PgPool, user_id: Uuid) -> Result<UserResponse, ApiError> {
     let row = load_user_row(pool, user_id)
         .await?
@@ -382,6 +471,7 @@ async fn response_from_row(pool: &PgPool, row: UserRow) -> Result<UserResponse, 
             .map(|role| role.code().to_string())
             .collect(),
         active: row.active,
+        has_photo: row.photo_url.is_some(),
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -390,7 +480,7 @@ async fn response_from_row(pool: &PgPool, row: UserRow) -> Result<UserResponse, 
 async fn load_user_row(pool: &PgPool, user_id: Uuid) -> Result<Option<UserRow>, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT id, email, full_name, commune_id, active, created_at, updated_at
+        SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at
         FROM users
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -409,6 +499,7 @@ fn row_to_user(row: sqlx::postgres::PgRow) -> UserRow {
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
         active: row.get("active"),
+        photo_url: row.get("photo_url"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

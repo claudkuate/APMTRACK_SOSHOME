@@ -172,6 +172,10 @@ class _RecorderApi implements ApmtrackApi {
       throw UnimplementedError();
 
   @override
+  Future<List<Patrouille>> mobilePatrouilles(String token) =>
+      throw UnimplementedError();
+
+  @override
   Future<Paginated<Pv>> pvs(String token, {int pageSize = 20}) =>
       throw UnimplementedError();
 
@@ -206,6 +210,9 @@ class _RecorderApi implements ApmtrackApi {
 
   @override
   String photoContentUrl(String pvId, String photoId) => '';
+
+  @override
+  String agentPhotoContentUrl(String agentId) => '';
 
   @override
   Future<PvPublic> verifyPublicPv(String pvNumber) =>

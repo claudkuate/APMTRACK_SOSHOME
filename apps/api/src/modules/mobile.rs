@@ -18,6 +18,7 @@ pub fn router() -> Router<AppState> {
             "/mobile/patrouille-active",
             axum::routing::get(active_patrouille),
         )
+        .route("/mobile/patrouilles", axum::routing::get(mobile_patrouilles))
 }
 
 #[derive(Debug, Serialize)]
@@ -45,10 +46,8 @@ pub struct MobileAgentResponse {
     pub matricule: String,
     pub full_name: String,
     pub commune_id: Uuid,
-    pub grade: String,
     pub status: String,
     pub date_prise_fonction: Option<NaiveDate>,
-    pub formation_nasla: bool,
     pub photo_url: Option<String>,
     pub telephone: Option<String>,
     pub email: Option<String>,
@@ -66,9 +65,12 @@ pub struct MobileInterventionResponse {
     pub id: Uuid,
     pub commune_id: Uuid,
     pub category_id: Uuid,
+    pub category_nom: String,
     pub type_id: Uuid,
+    pub type_nom: String,
     pub nom: String,
     pub description: Option<String>,
+    pub requires_vehicle: bool,
     pub sujet_paiement: bool,
     pub montant: Option<f64>,
     pub montant_fcfa: Option<i64>,
@@ -92,6 +94,8 @@ pub struct MobilePatrouilleResponse {
     pub status: String,
     pub date_debut: Option<DateTime<Utc>>,
     pub date_fin: Option<DateTime<Utc>>,
+    pub date_debut_prevue: Option<DateTime<Utc>>,
+    pub date_fin_prevue: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -101,7 +105,6 @@ pub struct MobilePatrouilleAgentResponse {
     pub agent_id: Uuid,
     pub matricule: String,
     pub full_name: String,
-    pub grade: String,
     pub role_patrouille: String,
 }
 
@@ -133,8 +136,9 @@ async fn interventions(
     let rows = sqlx::query(
         r#"
         SELECT
-            i.id, i.commune_id, it.category_id, i.type_id, i.nom, i.description,
-            i.sujet_paiement,
+            i.id, i.commune_id, it.category_id, ic.nom AS category_nom,
+            i.type_id, it.nom AS type_nom, i.nom, i.description,
+            i.requires_vehicle, i.sujet_paiement,
             i.montant::DOUBLE PRECISION AS montant,
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
@@ -143,11 +147,20 @@ async fn interventions(
             i.created_at, i.updated_at
         FROM interventions i
         JOIN intervention_types it ON i.type_id = it.id
+        JOIN intervention_categories ic ON ic.id = it.category_id
+        JOIN communes c ON c.id = i.commune_id
         WHERE i.commune_id = $1
           AND i.active = TRUE
           AND i.deleted_at IS NULL
           AND it.deleted_at IS NULL
-        ORDER BY i.nom ASC
+          AND it.active = TRUE
+          AND ic.deleted_at IS NULL
+          AND ic.active = TRUE
+          AND c.deleted_at IS NULL
+          AND c.active = TRUE
+          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
+          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+        ORDER BY ic.nom ASC, it.nom ASC, i.nom ASC
         "#,
     )
     .bind(ctx.commune_id)
@@ -160,9 +173,12 @@ async fn interventions(
             id: row.get("id"),
             commune_id: row.get("commune_id"),
             category_id: row.get("category_id"),
+            category_nom: row.get("category_nom"),
             type_id: row.get("type_id"),
+            type_nom: row.get("type_nom"),
             nom: row.get("nom"),
             description: row.get("description"),
+            requires_vehicle: row.get("requires_vehicle"),
             sujet_paiement: row.get("sujet_paiement"),
             montant: row.get("montant"),
             montant_fcfa: row.get("montant_fcfa"),
@@ -188,7 +204,8 @@ async fn active_patrouille(
     let row = sqlx::query(
         r#"
         SELECT p.id, p.commune_id, p.zone_id, p.nom, p.description, p.status,
-               p.date_debut, p.date_fin, p.created_at, p.updated_at
+               p.date_debut, p.date_fin, p.date_debut_prevue, p.date_fin_prevue,
+               p.created_at, p.updated_at
         FROM patrouilles p
         JOIN patrouille_agents pa ON pa.patrouille_id = p.id
         WHERE pa.agent_id = $1
@@ -211,24 +228,62 @@ async fn active_patrouille(
         }));
     };
 
-    let patrouille_id: Uuid = row.get("id");
-    let agents = load_patrouille_agents(&state.db, patrouille_id).await?;
+    let patrouille = row_to_mobile_patrouille(&row);
+    let agents = load_patrouille_agents(&state.db, patrouille.id).await?;
 
     Ok(Json(MobilePatrouilleActiveResponse {
-        patrouille: Some(MobilePatrouilleResponse {
-            id: patrouille_id,
-            commune_id: row.get("commune_id"),
-            zone_id: row.get("zone_id"),
-            nom: row.get("nom"),
-            description: row.get("description"),
-            status: row.get("status"),
-            date_debut: row.get("date_debut"),
-            date_fin: row.get("date_fin"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-        }),
+        patrouille: Some(patrouille),
         agents,
     }))
+}
+
+/// Patrouilles affectées à l'agent, hors clôturées (EN_COURS d'abord, puis
+/// PLANIFIEE), pour l'aperçu « Mes patrouilles » du mobile.
+async fn mobile_patrouilles(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> Result<Json<Vec<MobilePatrouilleResponse>>, ApiError> {
+    let ctx = active_agent_context(&state.db, &auth_user).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT p.id, p.commune_id, p.zone_id, p.nom, p.description, p.status,
+               p.date_debut, p.date_fin, p.date_debut_prevue, p.date_fin_prevue,
+               p.created_at, p.updated_at
+        FROM patrouilles p
+        JOIN patrouille_agents pa ON pa.patrouille_id = p.id
+        WHERE pa.agent_id = $1
+          AND p.commune_id = $2
+          AND p.status IN ('EN_COURS', 'PLANIFIEE')
+          AND p.deleted_at IS NULL
+        ORDER BY CASE p.status WHEN 'EN_COURS' THEN 0 ELSE 1 END,
+                 p.date_debut_prevue ASC NULLS LAST, p.created_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(ctx.id)
+    .bind(ctx.commune_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let items = rows.iter().map(row_to_mobile_patrouille).collect();
+    Ok(Json(items))
+}
+
+fn row_to_mobile_patrouille(row: &sqlx::postgres::PgRow) -> MobilePatrouilleResponse {
+    MobilePatrouilleResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        zone_id: row.get("zone_id"),
+        nom: row.get("nom"),
+        description: row.get("description"),
+        status: row.get("status"),
+        date_debut: row.get("date_debut"),
+        date_fin: row.get("date_fin"),
+        date_debut_prevue: row.get("date_debut_prevue"),
+        date_fin_prevue: row.get("date_fin_prevue"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
 }
 
 async fn load_mobile_me(pool: &PgPool, auth_user: &AuthUser) -> Result<MobileMeResponse, ApiError> {
@@ -239,8 +294,8 @@ async fn load_mobile_me(pool: &PgPool, auth_user: &AuthUser) -> Result<MobileMeR
         r#"
         SELECT
             a.id AS agent_id, a.matricule, a.full_name AS agent_full_name,
-            a.commune_id AS agent_commune_id, a.grade, a.status, a.date_prise_fonction,
-            a.formation_nasla, a.photo_url, a.telephone, a.email AS agent_email,
+            a.commune_id AS agent_commune_id, a.status, a.date_prise_fonction,
+            a.photo_url, a.telephone, a.email AS agent_email,
             c.id AS commune_id, c.code AS commune_code, c.nom AS commune_nom,
             c.region AS commune_region, c.departement AS commune_departement
         FROM agents a
@@ -249,6 +304,9 @@ async fn load_mobile_me(pool: &PgPool, auth_user: &AuthUser) -> Result<MobileMeR
           AND a.commune_id = $2
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
+          AND c.active = TRUE
+          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
+          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
         ORDER BY (a.status = 'ACTIF') DESC, a.created_at DESC
         LIMIT 1
         "#,
@@ -284,10 +342,8 @@ async fn load_mobile_me(pool: &PgPool, auth_user: &AuthUser) -> Result<MobileMeR
             matricule: row.get("matricule"),
             full_name: row.get("agent_full_name"),
             commune_id: row.get("agent_commune_id"),
-            grade: row.get("grade"),
             status: row.get("status"),
             date_prise_fonction: row.get("date_prise_fonction"),
-            formation_nasla: row.get("formation_nasla"),
             photo_url: row.get("photo_url"),
             telephone: row.get("telephone"),
             email: row.get("agent_email"),
@@ -313,12 +369,17 @@ async fn agent_context(pool: &PgPool, auth_user: &AuthUser) -> Result<AgentConte
         .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
     let row = sqlx::query(
         r#"
-        SELECT id, commune_id, status
-        FROM agents
-        WHERE user_id = $1
-          AND commune_id = $2
-          AND deleted_at IS NULL
-        ORDER BY (status = 'ACTIF') DESC, created_at DESC
+        SELECT a.id, a.commune_id, a.status
+        FROM agents a
+        JOIN communes c ON c.id = a.commune_id
+        WHERE a.user_id = $1
+          AND a.commune_id = $2
+          AND a.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+          AND c.active = TRUE
+          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
+          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+        ORDER BY (a.status = 'ACTIF') DESC, a.created_at DESC
         LIMIT 1
         "#,
     )
@@ -341,7 +402,7 @@ async fn load_patrouille_agents(
 ) -> Result<Vec<MobilePatrouilleAgentResponse>, ApiError> {
     let rows = sqlx::query(
         r#"
-        SELECT a.id, a.matricule, a.full_name, a.grade, pa.role_patrouille
+        SELECT a.id, a.matricule, a.full_name, pa.role_patrouille
         FROM patrouille_agents pa
         JOIN agents a ON a.id = pa.agent_id
         WHERE pa.patrouille_id = $1
@@ -359,7 +420,6 @@ async fn load_patrouille_agents(
             agent_id: row.get("id"),
             matricule: row.get("matricule"),
             full_name: row.get("full_name"),
-            grade: row.get("grade"),
             role_patrouille: row.get("role_patrouille"),
         })
         .collect())

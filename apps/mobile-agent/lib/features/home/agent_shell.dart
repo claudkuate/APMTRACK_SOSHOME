@@ -96,7 +96,7 @@ class _AgentShellState extends State<AgentShell> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _openCreatePv,
         icon: const Icon(Icons.note_add_outlined),
-        label: const Text('Nouveau PV'),
+        label: const Text('Nouvelle saisie PV'),
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _index,

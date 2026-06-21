@@ -66,6 +66,8 @@ pub struct PatrouilleResponse {
     pub status: String,
     pub date_debut: Option<DateTime<Utc>>,
     pub date_fin: Option<DateTime<Utc>>,
+    pub date_debut_prevue: Option<DateTime<Utc>>,
+    pub date_fin_prevue: Option<DateTime<Utc>>,
     pub created_by: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -93,8 +95,13 @@ pub struct PatrouilleFilterQuery {
 pub struct CreatePatrouilleRequest {
     pub commune_id: Uuid,
     pub zone_id: Option<Uuid>,
-    pub nom: String,
+    pub nom: Option<String>,
     pub description: Option<String>,
+    pub date_debut_prevue: Option<DateTime<Utc>>,
+    pub date_fin_prevue: Option<DateTime<Utc>>,
+    /// Agents affectés dès la création (rôle MEMBRE par défaut ; un chef se
+    /// désigne ensuite via la gestion de l'effectif).
+    pub agent_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +109,8 @@ pub struct PatchPatrouilleRequest {
     pub zone_id: Option<Uuid>,
     pub nom: Option<String>,
     pub description: Option<String>,
+    pub date_debut_prevue: Option<DateTime<Utc>>,
+    pub date_fin_prevue: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,24 +219,64 @@ async fn create_patrouille(
     auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
     auth_user.require_commune_access(payload.commune_id)?;
 
-    let nom = required_text(payload.nom, "nom")?;
+    let zone_id = payload
+        .zone_id
+        .ok_or_else(|| ApiError::bad_request("zone_id est requis"))?;
+    validate_planning(payload.date_debut_prevue, payload.date_fin_prevue)?;
     let id = Uuid::new_v4();
+
+    // Dédoublonnage des agents fournis avant insertion.
+    let mut agent_ids = payload.agent_ids.unwrap_or_default();
+    agent_ids.sort();
+    agent_ids.dedup();
+    if agent_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "Au moins un agent est requis pour creer une patrouille",
+        ));
+    }
+
+    let mut tx = state.db.begin().await?;
+    let zone_name = load_zone_name_for_commune(&mut *tx, payload.commune_id, zone_id).await?;
+    let nom = clean_optional(payload.nom)
+        .unwrap_or_else(|| default_patrouille_name(&zone_name, payload.date_debut_prevue));
 
     sqlx::query(
         r#"
-        INSERT INTO patrouilles (id, commune_id, zone_id, nom, description, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO patrouilles
+            (id, commune_id, zone_id, nom, description, date_debut_prevue, date_fin_prevue, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(id)
     .bind(payload.commune_id)
-    .bind(payload.zone_id)
+    .bind(zone_id)
     .bind(&nom)
     .bind(clean_optional(payload.description))
+    .bind(payload.date_debut_prevue)
+    .bind(payload.date_fin_prevue)
     .bind(auth_user.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
+
+    // Affectation initiale de l'effectif. Tout agent invalide annule la création.
+    for agent_id in &agent_ids {
+        assert_agent_assignable(&mut *tx, payload.commune_id, *agent_id).await?;
+        sqlx::query(
+            r#"
+            INSERT INTO patrouille_agents (patrouille_id, agent_id, role_patrouille)
+            VALUES ($1, $2, 'MEMBRE')
+            ON CONFLICT (patrouille_id, agent_id) DO NOTHING
+            "#,
+        )
+        .bind(id)
+        .bind(*agent_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_database_error)?;
+    }
+
+    tx.commit().await?;
 
     audit::record_for_commune(
         &state.db,
@@ -237,7 +286,7 @@ async fn create_patrouille(
         "patrouilles",
         Some(id),
         None,
-        Some(json!({ "nom": nom, "commune_id": payload.commune_id })),
+        Some(json!({ "nom": nom, "commune_id": payload.commune_id, "agents": agent_ids.len() })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
@@ -270,10 +319,24 @@ async fn patch_patrouille(
         None => existing.nom.clone(),
     };
 
+    // Valide l'ordre des dates en tenant compte des valeurs déjà en base.
+    validate_planning(
+        payload.date_debut_prevue.or(existing.date_debut_prevue),
+        payload.date_fin_prevue.or(existing.date_fin_prevue),
+    )?;
+    if let Some(zone_id) = payload.zone_id {
+        load_zone_name_for_commune(&state.db, existing.commune_id, zone_id).await?;
+    }
+
     sqlx::query(
         r#"
         UPDATE patrouilles
-        SET nom = $2, description = COALESCE($3, description), zone_id = COALESCE($4, zone_id), updated_at = now()
+        SET nom = $2,
+            description = COALESCE($3, description),
+            zone_id = COALESCE($4, zone_id),
+            date_debut_prevue = COALESCE($5, date_debut_prevue),
+            date_fin_prevue = COALESCE($6, date_fin_prevue),
+            updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -281,6 +344,8 @@ async fn patch_patrouille(
     .bind(&nom)
     .bind(payload.description.as_deref())
     .bind(payload.zone_id)
+    .bind(payload.date_debut_prevue)
+    .bind(payload.date_fin_prevue)
     .execute(&state.db)
     .await?;
 
@@ -428,23 +493,7 @@ async fn assign_agent(
     }
 
     // Vérifier que l'agent est actif et appartient à la même commune
-    let agent_check: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM agents WHERE id = $1 AND commune_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(payload.agent_id)
-    .bind(pat.commune_id)
-    .fetch_optional(&state.db)
-    .await?;
-
-    match agent_check {
-        None => return Err(ApiError::not_found("Agent introuvable dans cette commune")),
-        Some(s) if s != "ACTIF" => {
-            return Err(ApiError::bad_request(
-                "Seul un agent actif peut être assigné",
-            ));
-        }
-        _ => {}
-    }
+    assert_agent_assignable(&state.db, pat.commune_id, payload.agent_id).await?;
 
     let role = payload
         .role_patrouille
@@ -684,6 +733,8 @@ fn row_to_patrouille(row: sqlx::postgres::PgRow) -> PatrouilleResponse {
         status: row.get("status"),
         date_debut: row.get("date_debut"),
         date_fin: row.get("date_fin"),
+        date_debut_prevue: row.get("date_debut_prevue"),
+        date_fin_prevue: row.get("date_fin_prevue"),
         created_by: row.get("created_by"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -738,12 +789,17 @@ async fn active_agent_id_for_user(
         .ok_or_else(|| ApiError::forbidden("Agent non rattache a une commune"))?;
     let agent_id = sqlx::query_scalar(
         r#"
-        SELECT id
-        FROM agents
-        WHERE user_id = $1
-          AND commune_id = $2
-          AND status = 'ACTIF'
-          AND deleted_at IS NULL
+        SELECT a.id
+        FROM agents a
+        JOIN communes c ON c.id = a.commune_id
+        WHERE a.user_id = $1
+          AND a.commune_id = $2
+          AND a.status = 'ACTIF'
+          AND a.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+          AND c.active = true
+          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
+          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
         LIMIT 1
         "#,
     )
@@ -788,4 +844,78 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Vérifie qu'un agent existe, appartient à la commune et est actif.
+/// Partagé par `assign_agent` et l'affectation initiale dans `create_patrouille`.
+async fn assert_agent_assignable<'e, E>(
+    executor: E,
+    commune_id: Uuid,
+    agent_id: Uuid,
+) -> Result<(), ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM agents WHERE id = $1 AND commune_id = $2 AND deleted_at IS NULL",
+    )
+    .bind(agent_id)
+    .bind(commune_id)
+    .fetch_optional(executor)
+    .await?;
+
+    match status {
+        None => Err(ApiError::not_found("Agent introuvable dans cette commune")),
+        Some(s) if s != "ACTIF" => Err(ApiError::bad_request(
+            "Seul un agent actif peut être assigné",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Valide que la fin prévue n'est pas antérieure au début prévu.
+async fn load_zone_name_for_commune<'e, E>(
+    executor: E,
+    commune_id: Uuid,
+    zone_id: Uuid,
+) -> Result<String, ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar(
+        r#"
+        SELECT nom
+        FROM zones
+        WHERE id = $1
+          AND commune_id = $2
+          AND active = true
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(zone_id)
+    .bind(commune_id)
+    .fetch_optional(executor)
+    .await?
+    .ok_or_else(|| ApiError::bad_request("Zone invalide pour cette commune"))
+}
+
+fn default_patrouille_name(zone_name: &str, date_debut_prevue: Option<DateTime<Utc>>) -> String {
+    match date_debut_prevue {
+        Some(date) => format!("Patrouille {zone_name} {}", date.format("%Y-%m-%d %H:%M")),
+        None => format!("Patrouille {zone_name}"),
+    }
+}
+
+fn validate_planning(
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+) -> Result<(), ApiError> {
+    if let (Some(start), Some(end)) = (start, end) {
+        if end < start {
+            return Err(ApiError::bad_request(
+                "date_fin_prevue doit être postérieure à date_debut_prevue",
+            ));
+        }
+    }
+    Ok(())
 }

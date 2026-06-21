@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/auth/session_controller.dart';
 import '../../core/config.dart';
 import '../../core/theme.dart';
+import '../../core/ui/agent_avatar.dart';
 import '../../core/ui/common.dart';
 
 class ProfilePage extends StatelessWidget {
@@ -33,10 +34,13 @@ class ProfilePage extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  CircleAvatar(
+                  AgentAvatar(
+                    agent: profile.agent,
+                    imageUrl: profile.agent.photoUrl == null
+                        ? null
+                        : controller.agentPhotoContentUrl(profile.agent.id),
+                    headers: controller.authHeaders,
                     radius: 28,
-                    backgroundColor: apmGreen.withValues(alpha: 0.12),
-                    child: const Icon(Icons.person, color: apmGreen),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -59,14 +63,10 @@ class ProfilePage extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 16),
-              _Row(label: 'Grade', value: profile.agent.grade),
+              _Row(label: 'Matricule', value: profile.agent.matricule),
               _Row(label: 'Commune', value: profile.commune.nom),
               _Row(label: 'Region', value: profile.commune.region),
               _Row(label: 'Email', value: profile.user.email),
-              _Row(
-                label: 'NASLA',
-                value: profile.agent.formationNasla ? 'Oui' : 'Non',
-              ),
             ],
           ),
         ),
@@ -81,7 +81,7 @@ class ProfilePage extends StatelessWidget {
               ),
               SizedBox(height: 8),
               Text(
-                'APMTRACK mobile est online-first. Les PV officiels, QR, montants et numeros proviennent du serveur.',
+                'APMTRACK mobile est online-first. Les brouillons locaux peuvent etre saisis sans reseau ; seuls les PV synchronises par le serveur sont officiels, avec numero, montant et QR.',
                 style: TextStyle(color: apmMuted),
               ),
             ],

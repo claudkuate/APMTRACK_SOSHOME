@@ -4,7 +4,7 @@ import '../../core/auth/session_controller.dart';
 import '../../core/offline/offline_models.dart';
 import '../../core/theme.dart';
 import '../../core/ui/common.dart';
-import 'pv_detail_page.dart';
+import 'pv_list_item.dart';
 
 class PvListPage extends StatelessWidget {
   const PvListPage({super.key, required this.controller});
@@ -30,7 +30,7 @@ class PvListPage extends StatelessWidget {
                     const SizedBox(width: 8),
                     const Expanded(
                       child: Text(
-                        'Mode hors-ligne — donnees en cache.',
+                        'Mode hors-ligne : donnees serveur affichees depuis le cache.',
                         style: TextStyle(
                           color: apmGold,
                           fontWeight: FontWeight.w700,
@@ -49,7 +49,7 @@ class PvListPage extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  'Mes PV',
+                  'PV officiels',
                   style: Theme.of(context).textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.w900,
                   ),
@@ -61,40 +61,19 @@ class PvListPage extends StatelessWidget {
           const SizedBox(height: 12),
           if (pvs.isEmpty)
             const EmptyState(
-              title: 'Aucun PV serveur',
-              message: 'Cree un PV en ligne pour le retrouver ici.',
+              title: 'Aucun PV officiel',
+              message:
+                  'Les saisies synchronisees et acceptees par le serveur apparaitront ici.',
               icon: Icons.description_outlined,
             )
           else
             SectionPanel(
               padding: EdgeInsets.zero,
-              child: Column(
-                children: [
-                  for (final pv in pvs)
-                    ListTile(
-                      onTap: () => Navigator.of(context).push(
-                        MaterialPageRoute(
-                          builder: (_) =>
-                              PvDetailPage(controller: controller, pv: pv),
-                        ),
-                      ),
-                      title: Text(
-                        pv.pvNumber,
-                        style: const TextStyle(fontWeight: FontWeight.w900),
-                      ),
-                      subtitle: Text(
-                        [
-                          pv.subjectLabel,
-                          pv.infractionsLabel,
-                          pv.vehicleIdentityLabel,
-                          pv.verbalizedDisplayName,
-                          formatFcfa(pv.amountInitialFcfa),
-                          formatShortDate(pv.createdAt),
-                        ].whereType<String>().join(' - '),
-                      ),
-                      trailing: StatusPill(status: pv.status),
-                    ),
-                ],
+              child: PvListItems(
+                controller: controller,
+                pvs: pvs,
+                includeAmountAndDate: true,
+                titleWeight: FontWeight.w900,
               ),
             ),
         ],
@@ -113,8 +92,8 @@ class _DraftsSection extends StatelessWidget {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Supprimer le brouillon ?'),
-        content: const Text('Ce PV non synchronise sera definitivement perdu.'),
+        title: Text(_deleteTitle(draft)),
+        content: Text(_deleteMessage(draft)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
@@ -141,7 +120,7 @@ class _DraftsSection extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                'Brouillons hors-ligne (${drafts.length})',
+                'Brouillons locaux a synchroniser (${drafts.length})',
                 style: Theme.of(
                   context,
                 ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w900),
@@ -170,16 +149,9 @@ class _DraftsSection extends StatelessWidget {
             children: [
               for (final draft in drafts)
                 ListTile(
-                  leading: Icon(
-                    draft.status == PvDraftStatus.failed
-                        ? Icons.error_outline
-                        : Icons.cloud_upload_outlined,
-                    color: draft.status == PvDraftStatus.failed
-                        ? apmRed
-                        : apmGold,
-                  ),
+                  leading: Icon(_draftIcon(draft), color: _draftColor(draft)),
                   title: Text(
-                    draft.interventionName ?? 'PV brouillon',
+                    _draftTitle(draft),
                     style: const TextStyle(fontWeight: FontWeight.w800),
                   ),
                   subtitle: Text(
@@ -191,20 +163,12 @@ class _DraftsSection extends StatelessWidget {
                       draft.payload.verbalizedName,
                       draft.payload.verbalizedIdentityNumber,
                       if (draft.photos.isNotEmpty)
-                        '${draft.photos.length} preuve(s)',
+                        '${draft.photos.length} preuve(s) en attente',
                       if (draft.amountFcfa != null)
-                        formatFcfa(draft.amountFcfa),
-                      if (draft.status == PvDraftStatus.failed &&
-                          draft.error != null)
-                        'Echec: ${draft.error}'
-                      else
-                        'En attente de synchronisation',
+                        'Montant indicatif: ${formatFcfa(draft.amountFcfa)}',
+                      _draftStatusText(draft),
                     ].whereType<String>().join(' - '),
-                    style: TextStyle(
-                      color: draft.status == PvDraftStatus.failed
-                          ? apmRed
-                          : apmMuted,
-                    ),
+                    style: TextStyle(color: _draftColor(draft)),
                   ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -216,7 +180,7 @@ class _DraftsSection extends StatelessWidget {
                           onPressed: () => controller.retryDraft(draft.localId),
                         ),
                       IconButton(
-                        tooltip: 'Supprimer',
+                        tooltip: _deleteTooltip(draft),
                         icon: const Icon(Icons.delete_outline, color: apmRed),
                         onPressed: () => _confirmDelete(context, draft),
                       ),
@@ -229,4 +193,57 @@ class _DraftsSection extends StatelessWidget {
       ],
     );
   }
+}
+
+String _draftTitle(PvDraft draft) {
+  final fallback = draft.serverPvId == null
+      ? 'Brouillon local'
+      : 'PV serveur avec preuves en attente';
+  return draft.interventionName ?? fallback;
+}
+
+String _draftStatusText(PvDraft draft) {
+  if (draft.status == PvDraftStatus.failed) {
+    return draft.error == null
+        ? 'Echec serveur - Revoir avant nouvel essai'
+        : 'Echec serveur : ${draft.error}';
+  }
+  if (draft.serverPvId == null) {
+    return 'Non officiel - En attente de synchronisation serveur';
+  }
+  return "PV serveur cree - preuves en attente d'envoi";
+}
+
+IconData _draftIcon(PvDraft draft) {
+  if (draft.status == PvDraftStatus.failed) {
+    return Icons.error_outline;
+  }
+  if (draft.serverPvId == null) {
+    return Icons.cloud_upload_outlined;
+  }
+  return Icons.photo_library_outlined;
+}
+
+Color _draftColor(PvDraft draft) =>
+    draft.status == PvDraftStatus.failed ? apmRed : apmGold;
+
+String _deleteTitle(PvDraft draft) {
+  if (draft.serverPvId == null) {
+    return 'Supprimer le brouillon local ?';
+  }
+  return 'Supprimer les preuves en attente ?';
+}
+
+String _deleteMessage(PvDraft draft) {
+  if (draft.serverPvId == null) {
+    return 'Cette saisie non officielle sera definitivement perdue. Aucun PV serveur ne sera supprime.';
+  }
+  return 'Le PV serveur existe deja. Seuls le brouillon local et les preuves en attente seront supprimes.';
+}
+
+String _deleteTooltip(PvDraft draft) {
+  if (draft.serverPvId == null) {
+    return 'Supprimer le brouillon local';
+  }
+  return 'Supprimer les preuves en attente';
 }

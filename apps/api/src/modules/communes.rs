@@ -1,4 +1,5 @@
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,176 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+/// Routes publiques (sans authentification) — recherche de communes pour les
+/// formulaires citoyens (ex. dépôt de signalement). N'expose qu'un sous-ensemble
+/// minimal de colonnes, limité aux communes actives.
+pub fn public_router() -> Router<AppState> {
+    Router::new()
+        .route("/communes", axum::routing::get(search_communes_public))
+        .route(
+            "/communes/{id}/signalement-options",
+            axum::routing::get(public_signalement_options),
+        )
+}
+
+#[derive(Debug, Deserialize)]
+struct PublicCommuneSearchQuery {
+    search: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicCommuneOption {
+    id: Uuid,
+    code: String,
+    nom: String,
+    region: String,
+    departement: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicIncidentTypeOption {
+    id: Uuid,
+    nom: String,
+    category_id: Uuid,
+    category_nom: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicZoneOption {
+    id: Uuid,
+    nom: String,
+    type_zone: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicSignalementOptions {
+    incident_types: Vec<PublicIncidentTypeOption>,
+    zones: Vec<PublicZoneOption>,
+}
+
+/// Recherche publique de communes actives par nom ou code (autocomplete citoyen).
+async fn search_communes_public(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<PublicCommuneSearchQuery>,
+) -> Result<Json<Vec<PublicCommuneOption>>, ApiError> {
+    state.rate_limiter.check(
+        "public:communes:search",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
+    let search = clean_optional(query.search);
+    let limit = query.limit.unwrap_or(400).clamp(1, 400);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id, code, nom, region, departement
+        FROM communes
+        WHERE deleted_at IS NULL
+          AND active = true
+          AND subscription_status IN ('ACTIVE', 'TRIAL')
+          AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+          AND (
+            $1::text IS NULL
+            OR nom ILIKE '%' || $1 || '%'
+            OR code ILIKE '%' || $1 || '%'
+          )
+        ORDER BY nom
+        LIMIT $2
+        "#,
+    )
+    .bind(search.as_deref())
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+
+    let options = rows
+        .into_iter()
+        .map(|row| PublicCommuneOption {
+            id: row.get("id"),
+            code: row.get("code"),
+            nom: row.get("nom"),
+            region: row.get("region"),
+            departement: row.get("departement"),
+        })
+        .collect();
+
+    Ok(Json(options))
+}
+
+async fn public_signalement_options(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(commune_id): Path<Uuid>,
+) -> Result<Json<PublicSignalementOptions>, ApiError> {
+    state.rate_limiter.check(
+        "public:communes:signalement-options",
+        &headers,
+        state.config.rate_limit_public_max,
+        state.config.rate_limit_window_seconds,
+    )?;
+
+    ensure_public_commune_visible(&state.db, commune_id).await?;
+
+    let type_rows = sqlx::query(
+        r#"
+        SELECT
+            it.id,
+            it.nom,
+            it.category_id,
+            c.nom AS category_nom
+        FROM intervention_types it
+        INNER JOIN intervention_categories c ON c.id = it.category_id
+        WHERE it.commune_id = $1
+          AND it.deleted_at IS NULL
+          AND c.deleted_at IS NULL
+          AND it.active = true
+          AND c.active = true
+        ORDER BY c.nom, it.nom
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let zone_rows = sqlx::query(
+        r#"
+        SELECT id, nom, type_zone
+        FROM zones
+        WHERE commune_id = $1
+          AND deleted_at IS NULL
+          AND active = true
+        ORDER BY nom
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(PublicSignalementOptions {
+        incident_types: type_rows
+            .into_iter()
+            .map(|row| PublicIncidentTypeOption {
+                id: row.get("id"),
+                nom: row.get("nom"),
+                category_id: row.get("category_id"),
+                category_nom: row.get("category_nom"),
+            })
+            .collect(),
+        zones: zone_rows
+            .into_iter()
+            .map(|row| PublicZoneOption {
+                id: row.get("id"),
+                nom: row.get("nom"),
+                type_zone: row.get("type_zone"),
+            })
+            .collect(),
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateCommuneRequest {
     code: String,
@@ -40,6 +211,9 @@ struct CreateCommuneRequest {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: Option<bool>,
+    subscription_status: Option<String>,
+    subscription_started_at: Option<DateTime<Utc>>,
+    subscription_expires_at: Option<DateTime<Utc>>,
     /// Contour GeoJSON (Polygon ou MultiPolygon) optionnel.
     boundary: Option<serde_json::Value>,
 }
@@ -57,6 +231,9 @@ struct PatchCommuneRequest {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: Option<bool>,
+    subscription_status: Option<String>,
+    subscription_started_at: Option<DateTime<Utc>>,
+    subscription_expires_at: Option<DateTime<Utc>>,
     /// Contour GeoJSON (Polygon ou MultiPolygon) optionnel — remplace l'existant si fourni.
     boundary: Option<serde_json::Value>,
 }
@@ -75,6 +252,11 @@ pub struct CommuneResponse {
     logo_url: Option<String>,
     theme_color: Option<String>,
     active: bool,
+    subscription_status: String,
+    subscription_started_at: Option<DateTime<Utc>>,
+    subscription_expires_at: Option<DateTime<Utc>>,
+    subscription_active: bool,
+    public_visible: bool,
     /// Contour GeoJSON (MultiPolygon) ou null.
     boundary: Option<serde_json::Value>,
     /// Centre GeoJSON (Point) calculé depuis le contour, ou null.
@@ -85,7 +267,12 @@ pub struct CommuneResponse {
 
 /// Colonnes exposées par les SELECT (le contour est converti en GeoJSON texte).
 const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, adresse, telephone, email, \
-    site_web, logo_url, theme_color, active, \
+    site_web, logo_url, theme_color, active, subscription_status, subscription_started_at, \
+    subscription_expires_at, \
+    (subscription_status IN ('ACTIVE', 'TRIAL') AND \
+        (subscription_expires_at IS NULL OR subscription_expires_at >= now())) AS subscription_active, \
+    (active = true AND subscription_status IN ('ACTIVE', 'TRIAL') AND \
+        (subscription_expires_at IS NULL OR subscription_expires_at >= now())) AS public_visible, \
     ST_AsGeoJSON(boundary) AS boundary_geojson, ST_AsGeoJSON(centre) AS centre_geojson, \
     created_at, updated_at";
 
@@ -180,18 +367,24 @@ async fn create_commune(
     auth_user.require_any_role(&[Role::SuperAdmin])?;
 
     let boundary_json = prepare_boundary(payload.boundary)?;
+    let subscription_status = validate_subscription_status(
+        payload.subscription_status.as_deref().unwrap_or("ACTIVE"),
+    )?;
     let commune_id = Uuid::new_v4();
     // $13 (contour GeoJSON) alimente `boundary` (forcé MultiPolygon) et le `centre` (centroïde).
     sqlx::query(
         r#"
         INSERT INTO communes (
             id, code, nom, region, departement, adresse, telephone,
-            email, site_web, logo_url, theme_color, active, boundary, centre
+            email, site_web, logo_url, theme_color, active,
+            subscription_status, subscription_started_at, subscription_expires_at,
+            boundary, centre
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)),
-            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326))
+            $13, $14, $15,
+            ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)),
+            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326))
         )
         "#,
     )
@@ -207,6 +400,9 @@ async fn create_commune(
     .bind(clean_optional(payload.logo_url))
     .bind(clean_optional(payload.theme_color))
     .bind(payload.active.unwrap_or(true))
+    .bind(&subscription_status)
+    .bind(payload.subscription_started_at)
+    .bind(payload.subscription_expires_at)
     .bind(&boundary_json)
     .execute(&state.db)
     .await
@@ -257,6 +453,10 @@ async fn patch_commune(
         .map_or(Ok(existing.departement.clone()), |value| {
             required_text(value, "departement")
         })?;
+    let subscription_status = match payload.subscription_status.as_deref() {
+        Some(value) => validate_subscription_status(value)?,
+        None => existing.subscription_status.clone(),
+    };
     let boundary_json = prepare_boundary(payload.boundary)?;
 
     // Le contour ($13) n'est mis à jour que s'il est fourni (COALESCE conserve l'existant sinon).
@@ -274,8 +474,11 @@ async fn patch_commune(
             logo_url = $10,
             theme_color = $11,
             active = $12,
-            boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)), boundary),
-            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($13), 4326)), centre),
+            subscription_status = $13,
+            subscription_started_at = $14,
+            subscription_expires_at = $15,
+            boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)), boundary),
+            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)), centre),
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -292,6 +495,9 @@ async fn patch_commune(
     .bind(payload.logo_url.or(existing.logo_url.clone()))
     .bind(payload.theme_color.or(existing.theme_color.clone()))
     .bind(payload.active.unwrap_or(existing.active))
+    .bind(&subscription_status)
+    .bind(payload.subscription_started_at.or(existing.subscription_started_at))
+    .bind(payload.subscription_expires_at.or(existing.subscription_expires_at))
     .bind(&boundary_json)
     .execute(&state.db)
     .await
@@ -344,6 +550,11 @@ fn row_to_commune(row: sqlx::postgres::PgRow) -> CommuneResponse {
         logo_url: row.get("logo_url"),
         theme_color: row.get("theme_color"),
         active: row.get("active"),
+        subscription_status: row.get("subscription_status"),
+        subscription_started_at: row.get("subscription_started_at"),
+        subscription_expires_at: row.get("subscription_expires_at"),
+        subscription_active: row.get("subscription_active"),
+        public_visible: row.get("public_visible"),
         boundary: row
             .get::<Option<String>, _>("boundary_geojson")
             .and_then(|s| serde_json::from_str(&s).ok()),
@@ -372,6 +583,38 @@ fn required_text(value: String, field: &'static str) -> Result<String, ApiError>
         return Err(ApiError::bad_request(format!("{field} est requis")));
     }
     Ok(trimmed)
+}
+
+async fn ensure_public_commune_visible(pool: &PgPool, commune_id: Uuid) -> Result<(), ApiError> {
+    let visible: Option<bool> = sqlx::query_scalar(
+        r#"
+        SELECT active = true
+           AND subscription_status IN ('ACTIVE', 'TRIAL')
+           AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+        FROM communes
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match visible {
+        Some(true) => Ok(()),
+        Some(false) => Err(ApiError::forbidden("Commune non disponible")),
+        None => Err(ApiError::not_found("Commune introuvable")),
+    }
+}
+
+fn validate_subscription_status(value: &str) -> Result<String, ApiError> {
+    let status = value.trim().to_ascii_uppercase();
+    if matches!(status.as_str(), "ACTIVE" | "TRIAL" | "EXPIRED" | "SUSPENDED") {
+        Ok(status)
+    } else {
+        Err(ApiError::bad_request(
+            "Statut d'abonnement invalide. Valeurs acceptees: ACTIVE, TRIAL, EXPIRED, SUSPENDED",
+        ))
+    }
 }
 
 fn clean_optional(value: Option<String>) -> Option<String> {

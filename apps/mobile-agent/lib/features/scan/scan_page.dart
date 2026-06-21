@@ -72,14 +72,14 @@ class _ScanPageState extends State<ScanPage> {
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
       children: [
         Text(
-          'Scanner un PV',
+          'Scanner un PV officiel',
           style: Theme.of(
             context,
           ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
         ),
         const SizedBox(height: 8),
         const Text(
-          'La verification publique ne revele que le statut et le montant du PV.',
+          'La verification publique ne concerne que les PV officiels synchronises. Elle ne revele que le statut et le montant.',
           style: TextStyle(color: apmMuted),
         ),
         const SizedBox(height: 12),
@@ -112,7 +112,7 @@ class _ScanPageState extends State<ScanPage> {
                 controller: _manualController,
                 textCapitalization: TextCapitalization.characters,
                 decoration: const InputDecoration(
-                  labelText: 'Numero PV ou URL QR',
+                  labelText: 'Numero PV officiel ou URL QR',
                   prefixIcon: Icon(Icons.qr_code_2),
                 ),
                 onSubmitted: _verify,

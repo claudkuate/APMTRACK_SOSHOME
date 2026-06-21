@@ -192,9 +192,7 @@ const _profile = MobileProfile(
     matricule: 'APM-YDE1-001',
     fullName: 'Agent Test',
     communeId: 'commune-1',
-    grade: 'Agent',
     status: 'ACTIF',
-    formationNasla: true,
   ),
 );
 
@@ -261,6 +259,12 @@ class _OfflineFakeApi implements ApmtrackApi {
   Future<PatrouilleActive> activePatrouille(String token) async {
     if (networkDown) _offline();
     return const PatrouilleActive(agents: []);
+  }
+
+  @override
+  Future<List<Patrouille>> mobilePatrouilles(String token) async {
+    if (networkDown) _offline();
+    return const [];
   }
 
   @override
@@ -340,6 +344,9 @@ class _OfflineFakeApi implements ApmtrackApi {
 
   @override
   String photoContentUrl(String pvId, String photoId) => '';
+
+  @override
+  String agentPhotoContentUrl(String agentId) => '';
 
   @override
   Future<PvPublic> verifyPublicPv(String pvNumber) =>

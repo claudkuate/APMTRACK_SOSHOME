@@ -47,9 +47,12 @@ class _CreatePvPageState extends State<CreatePvPage> {
   final _vehicleOwnerController = TextEditingController();
   final _locationController = TextEditingController();
   final _notesController = TextEditingController();
+  final _interventionSearchController = TextEditingController();
 
   int _step = 0;
   String _subjectType = PvSubjectTypes.personWithVehicle;
+  String? _selectedCategoryId;
+  String? _selectedTypeId;
   String? _identityType;
   final Set<String> _selectedInterventionIds = {};
   final List<PvDraftPhoto> _photos = [];
@@ -69,6 +72,38 @@ class _CreatePvPageState extends State<CreatePvPage> {
     'AUTRE',
   ];
 
+  static const _searchAccentMap = {
+    '\u00e0': 'a',
+    '\u00e1': 'a',
+    '\u00e2': 'a',
+    '\u00e3': 'a',
+    '\u00e4': 'a',
+    '\u00e5': 'a',
+    '\u00e6': 'ae',
+    '\u00e7': 'c',
+    '\u00e8': 'e',
+    '\u00e9': 'e',
+    '\u00ea': 'e',
+    '\u00eb': 'e',
+    '\u00ec': 'i',
+    '\u00ed': 'i',
+    '\u00ee': 'i',
+    '\u00ef': 'i',
+    '\u00f1': 'n',
+    '\u00f2': 'o',
+    '\u00f3': 'o',
+    '\u00f4': 'o',
+    '\u00f5': 'o',
+    '\u00f6': 'o',
+    '\u0153': 'oe',
+    '\u00f9': 'u',
+    '\u00fa': 'u',
+    '\u00fb': 'u',
+    '\u00fc': 'u',
+    '\u00fd': 'y',
+    '\u00ff': 'y',
+  };
+
   @override
   void initState() {
     super.initState();
@@ -79,7 +114,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
       }
       return;
     }
-    _subjectType = pv.subjectType;
+    _subjectType = pv.subjectType == PvSubjectTypes.vehicleOnly
+        ? PvSubjectTypes.personWithVehicle
+        : pv.subjectType;
     _firstNameController.text = pv.verbalizedFirstName ?? '';
     _lastNameController.text = pv.verbalizedLastName ?? pv.verbalizedName ?? '';
     _identityType = pv.verbalizedIdentityType;
@@ -131,12 +168,39 @@ class _CreatePvPageState extends State<CreatePvPage> {
     _vehicleOwnerController.dispose();
     _locationController.dispose();
     _notesController.dispose();
+    _interventionSearchController.dispose();
     super.dispose();
   }
 
   List<Intervention> get _selectedInterventions {
     return widget.controller.interventions
         .where((item) => _selectedInterventionIds.contains(item.id))
+        .toList();
+  }
+
+  bool get _selectedRequiresVehicle {
+    return _selectedInterventions.any((item) => item.requiresVehicle);
+  }
+
+  bool get _vehicleInvolved {
+    return _selectedRequiresVehicle || _subjectType == PvSubjectTypes.personWithVehicle;
+  }
+
+  List<Intervention> get _categoryOptions {
+    final seen = <String>{};
+    return widget.controller.interventions
+        .where((item) => seen.add(item.categoryId))
+        .toList();
+  }
+
+  List<Intervention> get _typeOptions {
+    final seen = <String>{};
+    return widget.controller.interventions
+        .where(
+          (item) =>
+              _selectedCategoryId == null || item.categoryId == _selectedCategoryId,
+        )
+        .where((item) => seen.add(item.typeId))
         .toList();
   }
 
@@ -148,6 +212,18 @@ class _CreatePvPageState extends State<CreatePvPage> {
       }
     }
     return total == 0 ? null : total;
+  }
+
+  List<Intervention> get _filteredInterventions {
+    final query = _normalizeForSearch(_interventionSearchController.text);
+    return widget.controller.interventions
+        .where(
+          (item) =>
+              _selectedCategoryId == null || item.categoryId == _selectedCategoryId,
+        )
+        .where((item) => _selectedTypeId == null || item.typeId == _selectedTypeId)
+        .where((item) => _interventionSearchText(item).contains(query))
+        .toList();
   }
 
   Future<void> _captureGps() async {
@@ -250,7 +326,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
         await _uploadLocalPhotos(pv.id);
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PV mis a jour: ${pv.pvNumber}')),
+          SnackBar(content: Text('PV officiel mis a jour : ${pv.pvNumber}')),
         );
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
@@ -268,7 +344,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
       if (outcome.queued) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Hors-ligne : PV et preuves enregistres localement.'),
+            content: Text(
+              'Hors-ligne : brouillon local enregistre. Numero, montant officiel et QR seront attribues apres synchronisation serveur.',
+            ),
           ),
         );
         Navigator.of(context).pop(true);
@@ -276,7 +354,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
       }
       final pv = outcome.pv!;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('PV valide serveur: ${pv.pvNumber}')),
+        SnackBar(
+          content: Text('PV officiel cree par le serveur : ${pv.pvNumber}'),
+        ),
       );
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(
@@ -289,7 +369,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
       setState(
         () => _error = _editing
             ? 'Mise a jour impossible'
-            : 'Creation PV impossible',
+            : 'Enregistrement impossible',
       );
     } finally {
       if (mounted) {
@@ -314,8 +394,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   CreatePvPayload _payload() {
     final ids = _selectedInterventions.map((item) => item.id).toList();
-    final hasPerson = _subjectType != PvSubjectTypes.vehicleOnly;
-    final hasVehicle = _subjectType != PvSubjectTypes.personOnly;
+    const hasPerson = true;
+    final hasVehicle = _vehicleInvolved;
     final identityNumber = hasPerson
         ? _clean(_identityNumberController.text)
         : null;
@@ -325,7 +405,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
     return CreatePvPayload(
       interventionId: ids.first,
       interventionIds: ids,
-      subjectType: _subjectType,
+      subjectType: hasVehicle
+          ? PvSubjectTypes.personWithVehicle
+          : PvSubjectTypes.personOnly,
       verbalizedName: name.isEmpty ? null : name,
       verbalizedIdentifier: identityNumber,
       verbalizedFirstName: firstName,
@@ -358,32 +440,27 @@ class _CreatePvPageState extends State<CreatePvPage> {
       _setError('Selectionnez au moins une infraction');
       return 1;
     }
-    final hasPerson =
-        _clean(_firstNameController.text) != null ||
-        _clean(_lastNameController.text) != null ||
-        _clean(_identityNumberController.text) != null;
+    final hasLastName = _clean(_lastNameController.text) != null;
+    final hasPhone = _clean(_phoneController.text) != null;
     final hasIdentityNumber = _clean(_identityNumberController.text) != null;
     final hasIdentityType = _identityType != null && _identityType!.isNotEmpty;
     final hasVehicle =
         _clean(_plateController.text) != null ||
         _clean(_registrationCardController.text) != null;
-    if (_subjectType != PvSubjectTypes.vehicleOnly &&
-        hasIdentityNumber &&
-        !hasIdentityType) {
+    if (!hasLastName) {
+      _setError('Nom du contrevenant requis');
+      return 2;
+    }
+    if (!hasPhone) {
+      _setError('Telephone du contrevenant requis');
+      return 2;
+    }
+    if (hasIdentityNumber && !hasIdentityType) {
       _setError('Type d identite requis avec le numero');
       return 2;
     }
-    if (_subjectType == PvSubjectTypes.personOnly && !hasPerson) {
-      _setError('Nom, prenom ou numero d identite requis');
-      return 2;
-    }
-    if (_subjectType == PvSubjectTypes.vehicleOnly && !hasVehicle) {
+    if (_vehicleInvolved && !hasVehicle) {
       _setError('Plaque ou carte grise requise');
-      return 2;
-    }
-    if (_subjectType == PvSubjectTypes.personWithVehicle &&
-        (!hasPerson || !hasVehicle)) {
-      _setError('Contrevenant et plaque ou carte grise requis');
       return 2;
     }
     if (_clean(_locationController.text) == null) {
@@ -416,6 +493,31 @@ class _CreatePvPageState extends State<CreatePvPage> {
     return value.isEmpty ? '-' : value;
   }
 
+  String _interventionSearchText(Intervention item) {
+    return _normalizeForSearch(
+      [
+        item.categoryNom,
+        item.typeNom,
+        item.nom,
+        item.description,
+        item.montantFcfa?.toString(),
+        formatFcfa(item.montantFcfa),
+      ].whereType<String>().join(' '),
+    );
+  }
+
+  String _normalizeForSearch(String value) {
+    final buffer = StringBuffer();
+    for (final codePoint in value.toLowerCase().trim().runes) {
+      final char = String.fromCharCode(codePoint);
+      buffer.write(_searchAccentMap[char] ?? char);
+    }
+    return buffer
+        .toString()
+        .replaceAll(RegExp('[\\s\u00a0\u202f]+'), ' ')
+        .trim();
+  }
+
   void _next() {
     final invalidStep = _firstInvalidStep();
     if (invalidStep != null && invalidStep <= _step) {
@@ -430,7 +532,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   @override
   Widget build(BuildContext context) {
-    final title = _editing ? 'Modifier PV' : 'Nouveau PV';
+    final title = _editing ? 'Modifier PV officiel' : 'Nouvelle saisie PV';
     return Scaffold(
       appBar: AppBar(title: Text(title)),
       body: ListView(
@@ -501,9 +603,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
                         ),
                   label: Text(
                     _submitting
-                        ? 'Validation...'
+                        ? 'Enregistrement...'
                         : _step == _stepLabels.length - 1
-                        ? (_editing ? 'Mettre a jour' : 'Valider')
+                        ? (_editing ? 'Mettre a jour' : 'Enregistrer')
                         : 'Continuer',
                   ),
                 ),
@@ -543,11 +645,6 @@ class _CreatePvPageState extends State<CreatePvPage> {
                 icon: Icon(Icons.person_outline),
                 label: Text('Sans vehicule'),
               ),
-              ButtonSegment(
-                value: PvSubjectTypes.vehicleOnly,
-                icon: Icon(Icons.directions_car_outlined),
-                label: Text('Vehicule seul'),
-              ),
             ],
             selected: {_subjectType},
             onSelectionChanged: (values) {
@@ -561,6 +658,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   Widget _buildInfractionsStep() {
     final interventions = widget.controller.interventions;
+    final filteredInterventions = _filteredInterventions;
+    final hasSearch = _interventionSearchController.text.trim().isNotEmpty;
     return SectionPanel(
       padding: EdgeInsets.zero,
       child: Column(
@@ -574,28 +673,127 @@ class _CreatePvPageState extends State<CreatePvPage> {
                 icon: Icons.rule_folder_outlined,
               ),
             )
-          else
-            for (final item in interventions)
-              CheckboxListTile(
-                value: _selectedInterventionIds.contains(item.id),
-                onChanged: (selected) {
-                  setState(() {
-                    if (selected == true) {
-                      _selectedInterventionIds.add(item.id);
-                    } else {
-                      _selectedInterventionIds.remove(item.id);
-                    }
-                  });
-                },
-                title: Text(
-                  item.nom,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
-                ),
-                subtitle: Text(formatFcfa(item.montantFcfa)),
+          else ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Column(
+                children: [
+                  DropdownButtonFormField<String?>(
+                    initialValue: _selectedCategoryId,
+                    decoration: const InputDecoration(
+                      labelText: 'Categorie',
+                      prefixIcon: Icon(Icons.account_tree_outlined),
+                    ),
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text('Toutes')),
+                      ..._categoryOptions.map(
+                        (item) => DropdownMenuItem(
+                          value: item.categoryId,
+                          child: Text(item.categoryNom),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedCategoryId = value;
+                        _selectedTypeId = null;
+                      });
+                    },
+                  ),
+                  const SizedBox(height: 10),
+                  DropdownButtonFormField<String?>(
+                    initialValue: _selectedTypeId,
+                    decoration: const InputDecoration(
+                      labelText: 'Type',
+                      prefixIcon: Icon(Icons.rule_folder_outlined),
+                    ),
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text('Tous')),
+                      ..._typeOptions.map(
+                        (item) => DropdownMenuItem(
+                          value: item.typeId,
+                          child: Text(item.typeNom),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) => setState(() => _selectedTypeId = value),
+                  ),
+                  const SizedBox(height: 10),
+                  TextField(
+                    key: const Key('intervention-search-field'),
+                    controller: _interventionSearchController,
+                    textInputAction: TextInputAction.search,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      labelText: 'Rechercher une infraction',
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: hasSearch
+                          ? IconButton(
+                              tooltip: 'Effacer la recherche',
+                              icon: const Icon(Icons.clear),
+                              onPressed: () {
+                                setState(_interventionSearchController.clear);
+                              },
+                            )
+                          : null,
+                    ),
+                  ),
+                ],
               ),
+            ),
+            if (_selectedRequiresVehicle)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: StatusPill(status: 'VEHICULE REQUIS'),
+                ),
+              ),
+            if (filteredInterventions.isEmpty)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 20, 16, 24),
+                child: Column(
+                  children: [
+                    Icon(Icons.search_off_outlined, color: apmMuted, size: 32),
+                    SizedBox(height: 10),
+                    Text(
+                      'Aucun resultat',
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                    SizedBox(height: 6),
+                    Text(
+                      'Aucune infraction ne correspond a cette recherche.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: apmMuted),
+                    ),
+                  ],
+                ),
+              )
+            else
+              for (final item in filteredInterventions)
+                CheckboxListTile(
+                  value: _selectedInterventionIds.contains(item.id),
+                  onChanged: (selected) {
+                    setState(() {
+                      if (selected == true) {
+                        _selectedInterventionIds.add(item.id);
+                      } else {
+                        _selectedInterventionIds.remove(item.id);
+                      }
+                    });
+                  },
+                  title: Text(
+                    item.nom,
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  subtitle: Text(
+                    '${item.categoryNom} - ${item.typeNom} - ${formatFcfa(item.montantFcfa)}',
+                  ),
+                ),
+          ],
           const Divider(height: 1),
           ListTile(
-            title: const Text('Total'),
+            title: const Text('Montant indicatif'),
             trailing: Text(
               formatFcfa(_totalFcfa),
               style: const TextStyle(fontWeight: FontWeight.w900),
@@ -611,10 +809,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_subjectType != PvSubjectTypes.vehicleOnly) _buildPersonFields(),
-          if (_subjectType == PvSubjectTypes.personWithVehicle)
-            const SizedBox(height: 16),
-          if (_subjectType != PvSubjectTypes.personOnly) _buildVehicleFields(),
+          _buildPersonFields(),
+          if (_vehicleInvolved) const SizedBox(height: 16),
+          if (_vehicleInvolved) _buildVehicleFields(),
         ],
       ),
     );
@@ -886,14 +1083,16 @@ class _CreatePvPageState extends State<CreatePvPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _ReviewRow(label: 'Type', value: _subjectLabel(_subjectType)),
           _ReviewRow(
-            label: 'Infractions',
-            value: selected.isEmpty
-                ? '-'
-                : selected.map((item) => item.nom).join(' / '),
+            label: 'Type',
+            value: _subjectLabel(
+              _vehicleInvolved
+                  ? PvSubjectTypes.personWithVehicle
+                  : PvSubjectTypes.personOnly,
+            ),
           ),
-          _ReviewRow(label: 'Montant', value: formatFcfa(_totalFcfa)),
+          _ReviewInfractionsRow(selected: selected),
+          _ReviewRow(label: 'Montant indicatif', value: formatFcfa(_totalFcfa)),
           _ReviewRow(
             label: 'Contrevenant',
             value: _summaryText([
@@ -919,6 +1118,13 @@ class _CreatePvPageState extends State<CreatePvPage> {
             value: _clean(_locationController.text) ?? '-',
           ),
           _ReviewRow(label: 'Photos', value: '${_photos.length}'),
+          if (!_editing) ...[
+            const Divider(height: 24),
+            const Text(
+              'Sans reseau, cette saisie sera conservee comme brouillon local. Elle deviendra un PV officiel apres synchronisation serveur.',
+              style: TextStyle(color: apmMuted),
+            ),
+          ],
         ],
       ),
     );
@@ -929,6 +1135,47 @@ class _CreatePvPageState extends State<CreatePvPage> {
     PvSubjectTypes.vehicleOnly => 'Vehicule sans conducteur',
     _ => 'Usager avec vehicule',
   };
+}
+
+class _ReviewInfractionsRow extends StatelessWidget {
+  const _ReviewInfractionsRow({required this.selected});
+
+  final List<Intervention> selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Flexible(
+            flex: 4,
+            child: Text(
+              'Infractions',
+              style: TextStyle(color: apmMuted, fontWeight: FontWeight.w700),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            flex: 6,
+            child: selected.isEmpty
+                ? const Text('-')
+                : Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (final item in selected)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 4),
+                          child: Text(item.nom),
+                        ),
+                    ],
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _LocalPhotoTile extends StatelessWidget {
@@ -986,17 +1233,19 @@ class _ReviewRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 96,
+          Flexible(
+            flex: 4,
             child: Text(
               label,
+              softWrap: true,
               style: const TextStyle(
                 color: apmMuted,
                 fontWeight: FontWeight.w700,
               ),
             ),
           ),
-          Expanded(child: Text(value.isEmpty ? '-' : value)),
+          const SizedBox(width: 12),
+          Expanded(flex: 6, child: Text(value.isEmpty ? '-' : value)),
         ],
       ),
     );
