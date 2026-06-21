@@ -2,6 +2,7 @@ import { Component, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../../core/services/api.service';
+import { formatPublicEntries } from './public-display';
 
 @Component({
   selector: 'app-public-signalement-tracking-page',
@@ -29,7 +30,7 @@ import { ApiService } from '../../core/services/api.service';
           <dl class="mt-5 grid gap-3 sm:grid-cols-2">
             @for (item of entries(); track item.key) {
               <div class="rounded-md bg-[var(--surface-muted)] p-3">
-                <dt class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ item.key }}</dt>
+                <dt class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ item.label }}</dt>
                 <dd class="mt-1 font-black">{{ item.value }}</dd>
               </div>
             }
@@ -70,6 +71,6 @@ export class PublicSignalementTrackingPage {
   }
 
   protected entries() {
-    return Object.entries(this.result() ?? {}).map(([key, value]) => ({ key, value: String(value ?? '-') }));
+    return formatPublicEntries(this.result());
   }
 }

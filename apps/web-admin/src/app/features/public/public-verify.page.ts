@@ -2,7 +2,9 @@ import { Component, OnInit, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 
+import { apiBaseUrl } from '../../core/config/runtime-config';
 import { ApiService } from '../../core/services/api.service';
+import { formatPublicEntries } from './public-display';
 
 @Component({
   selector: 'app-public-verify-page',
@@ -34,15 +36,33 @@ import { ApiService } from '../../core/services/api.service';
           </p>
         }
 
-        @if (result()) {
-          <dl class="mt-5 grid gap-3 sm:grid-cols-2">
-            @for (item of entries(); track item.key) {
-              <div class="rounded-md bg-[var(--surface-muted)] p-3">
-                <dt class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ item.key }}</dt>
-                <dd class="mt-1 font-black">{{ item.value }}</dd>
+        @if (result(); as data) {
+          <div class="mt-5 flex flex-col gap-5 sm:flex-row sm:items-start">
+            @if (mode() === 'agent') {
+              <div
+                class="grid h-32 w-32 flex-none place-items-center overflow-hidden rounded-lg border border-[var(--line-subtle)] bg-[var(--surface-muted)] text-2xl font-black text-[var(--text-muted)] shadow-[var(--shadow-soft)]"
+              >
+                @if (photoUrl(); as photo) {
+                  <img
+                    [src]="photo"
+                    alt="Photo de l'agent"
+                    class="h-full w-full object-cover"
+                    (error)="onPhotoError()"
+                  />
+                } @else {
+                  {{ initials(data['full_name']) }}
+                }
               </div>
             }
-          </dl>
+            <dl class="grid flex-1 gap-3 sm:grid-cols-2">
+              @for (item of entries(); track item.key) {
+                <div class="rounded-md bg-[var(--surface-muted)] p-3">
+                  <dt class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ item.label }}</dt>
+                  <dd class="mt-1 font-black">{{ item.value }}</dd>
+                </div>
+              }
+            </dl>
+          </div>
         }
       </div>
     </section>
@@ -55,6 +75,7 @@ export class PublicVerifyPage implements OnInit {
   protected readonly mode = signal<'agent' | 'pv'>('agent');
   protected readonly result = signal<Record<string, unknown> | null>(null);
   protected readonly error = signal<string | null>(null);
+  protected readonly photoUrl = signal<string | null>(null);
   protected value = '';
 
   ngOnInit(): void {
@@ -62,6 +83,7 @@ export class PublicVerifyPage implements OnInit {
       this.mode.set(data['mode'] === 'pv' ? 'pv' : 'agent');
       this.result.set(null);
       this.error.set(null);
+      this.photoUrl.set(null);
       this.value = '';
     });
   }
@@ -80,28 +102,35 @@ export class PublicVerifyPage implements OnInit {
       next: (result) => {
         this.result.set(result);
         this.error.set(null);
+        this.photoUrl.set(
+          this.mode() === 'agent' && result['has_photo']
+            ? `${apiBaseUrl()}/api/v1/public/agents/verify/${encodeURIComponent(value)}/photo`
+            : null,
+        );
       },
       error: () => {
         this.result.set(null);
+        this.photoUrl.set(null);
         this.error.set('Aucun resultat verifiable pour cette reference.');
       },
     });
   }
 
   protected entries() {
-    return Object.entries(this.result() ?? {}).map(([key, value]) => ({
-      key,
-      value: this.display(value),
-    }));
+    return formatPublicEntries(this.result());
   }
 
-  private display(value: unknown): string {
-    if (value === null || value === undefined) {
-      return '-';
-    }
-    if (typeof value === 'boolean') {
-      return value ? 'Oui' : 'Non';
-    }
-    return String(value);
+  protected initials(name: unknown): string {
+    const initials = String(name ?? '')
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part.charAt(0).toUpperCase())
+      .join('');
+    return initials || 'APM';
+  }
+
+  protected onPhotoError(): void {
+    this.photoUrl.set(null);
   }
 }

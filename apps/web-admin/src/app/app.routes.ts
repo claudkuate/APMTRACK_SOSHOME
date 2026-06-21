@@ -51,6 +51,13 @@ export const routes: Routes = [
             (module) => module.PublicSignalementTrackingPage,
           ),
       },
+      {
+        path: 'missions',
+        loadComponent: () =>
+          import('./features/public/public-missions.page').then(
+            (module) => module.PublicMissionsPage,
+          ),
+      },
     ],
   },
   {

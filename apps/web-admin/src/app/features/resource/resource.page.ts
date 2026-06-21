@@ -6,14 +6,14 @@ import {
   ReactiveFormsModule,
   Validators,
 } from '@angular/forms';
-import { ActivatedRoute, Router, RouterLink } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../core/services/api.service';
 import { AuthService } from '../../core/services/auth.service';
+import { LookupService } from '../../core/services/lookup.service';
 import { LookupOption, Paginated, RoleCode } from '../../shared/api-types';
 import {
-  RelationConfig,
   ResourceAction,
   ResourceConfig,
   ResourceField,
@@ -27,7 +27,6 @@ import { ZoneEditorComponent } from '../../shared/map/zone-editor.component';
 import { GeoGeometry } from '../../core/services/geo.service';
 
 type Row = Record<string, unknown>;
-type LookupState = Record<string, LookupOption[]>;
 
 interface FormSection {
   title: string;
@@ -175,14 +174,14 @@ interface AgentsDialogContext {
                             </label>
                           } @else if (field.type === 'relation_multi') {
                             <select [id]="field.key" [formControlName]="field.key" multiple>
-                              @for (option of optionsFor(field.key); track option.id) {
+                              @for (option of optionsForField(field); track option.id) {
                                 <option [value]="option.id">{{ optionLabel(option) }}</option>
                               }
                             </select>
                           } @else if (field.type === 'relation') {
                             <select [id]="field.key" [formControlName]="field.key">
                               <option value="">Choisir...</option>
-                              @for (option of optionsFor(field.key); track option.id) {
+                              @for (option of optionsForField(field); track option.id) {
                                 <option [value]="option.id">{{ optionLabel(option) }}</option>
                               }
                             </select>
@@ -361,11 +360,33 @@ interface AgentsDialogContext {
                     [class.is-selected]="selectedRow()?.['id'] === row['id']"
                     (click)="selectRow(row)"
                   >
-                    @for (column of cfg.columns; track column) {
+                    @for (column of cfg.columns; track column; let i = $index) {
                       <td>
-                        <span [class]="badgeClass(column, row[column])">{{
-                          display(column, row[column])
-                        }}</span>
+                        @if (i === 0 && row['id']) {
+                          <div class="flex items-center gap-2.5">
+                            @if (cfg.photoEndpoint) {
+                              <span
+                                class="grid h-8 w-8 flex-none place-items-center overflow-hidden rounded-full border border-[var(--line-subtle)] bg-[var(--surface-muted)] text-[0.65rem] font-bold text-[var(--text-muted)]"
+                              >
+                                @if (avatarFor(row); as url) {
+                                  <img [src]="url" alt="" class="h-full w-full object-cover" />
+                                } @else {
+                                  {{ initials(rowTitle(cfg, row)) }}
+                                }
+                              </span>
+                            }
+                            <a
+                              class="font-semibold text-[var(--cameroon-red)] hover:underline"
+                              [routerLink]="['/', cfg.key, row['id']]"
+                              (click)="$event.stopPropagation()"
+                              >{{ display(column, row[column]) }}</a
+                            >
+                          </div>
+                        } @else {
+                          <span [class]="badgeClass(column, row[column])">{{
+                            display(column, row[column])
+                          }}</span>
+                        }
                       </td>
                     }
                     <td>
@@ -497,6 +518,15 @@ interface AgentsDialogContext {
                   <h3 class="text-lg font-black">{{ rowTitle(cfg, row) }}</h3>
                 </div>
                 <div class="flex items-center gap-2">
+                  @if (row['id']) {
+                    <a
+                      class="btn-secondary"
+                      [routerLink]="['/', cfg.key, row['id']]"
+                      (click)="selectedRow.set(null)"
+                    >
+                      Voir la fiche
+                    </a>
+                  }
                   @if (canMutate(cfg) && hasEditableFields(cfg)) {
                     <button type="button" class="btn-secondary" (click)="openEdit(cfg, row)">
                       Editer
@@ -663,15 +693,14 @@ interface AgentsDialogContext {
 })
 export class ResourcePage implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
-  private readonly router = inject(Router);
   private readonly api = inject(ApiService);
   private readonly auth = inject(AuthService);
+  private readonly lookup = inject(LookupService);
   private subscription?: Subscription;
 
   protected readonly config = signal<ResourceConfig | null>(null);
   protected readonly rows = signal<Row[]>([]);
   protected readonly visibleRows = signal<Row[]>([]);
-  protected readonly lookups = signal<LookupState>({});
   protected readonly error = signal<string | null>(null);
   protected readonly message = signal<string | null>(null);
   protected readonly saving = signal(false);
@@ -689,14 +718,15 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected readonly editingId = signal<string | null>(null);
   protected readonly statusContext = signal<StatusContext | null>(null);
   protected readonly agentsDialog = signal<AgentsDialogContext | null>(null);
+  /** id de ligne → object URL de l'avatar (résolu via blob authentifié). */
+  protected readonly avatarUrls = signal<Record<string, string>>({});
 
   protected search = '';
   protected sortKey = '';
   protected sortDirection: 'asc' | 'desc' = 'asc';
   protected filterValues: Record<string, string> = {};
   protected importCommuneId = '';
-  protected importCsv =
-    'matricule,full_name,grade,date_prise_fonction,formation_nasla,telephone,email\n';
+  protected importCsv = 'matricule,full_name,date_prise_fonction,telephone,email\n';
   protected form = new FormGroup<Record<string, FormControl<unknown>>>({});
   protected statusForm = new FormGroup<Record<string, FormControl<unknown>>>({});
 
@@ -708,7 +738,8 @@ export class ResourcePage implements OnInit, OnDestroy {
       this.resetPageState();
       this.buildForm(cfg?.createFields ?? []);
       if (cfg) {
-        this.loadLookups(cfg);
+        this.lookup.reset();
+        this.lookup.loadForConfig(cfg);
         this.load();
       }
     });
@@ -716,6 +747,7 @@ export class ResourcePage implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.subscription?.unsubscribe();
+    this.clearAvatars();
   }
 
   protected openForm(): void {
@@ -807,6 +839,7 @@ export class ResourcePage implements OnInit, OnDestroy {
           this.rows.set(response.items);
           this.total.set(response.total);
           this.applyTableState();
+          this.loadAvatars(cfg);
         },
         error: () =>
           this.error.set('Chargement impossible. Verifie les droits ou la disponibilite API.'),
@@ -959,13 +992,8 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.executeAction(pending.action, pending.row);
   }
 
+  /** Clic sur une ligne : aperçu rapide en drawer. Le titre (colonne 1) ouvre la fiche complète. */
   protected selectRow(row: Row): void {
-    const cfg = this.config();
-    if (cfg && this.usesDedicatedDetailPage(cfg) && row['id']) {
-      this.rowMenuKey.set(null);
-      this.router.navigate(['/', cfg.key, row['id']]);
-      return;
-    }
     this.selectedRow.set(row);
     this.rowMenuKey.set(null);
   }
@@ -1126,7 +1154,19 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   protected optionsFor(key: string): LookupOption[] {
-    return this.lookups()[key] ?? [];
+    return this.lookup.optionsFor(key);
+  }
+
+  protected optionsForField(field: ResourceField): LookupOption[] {
+    const options = this.optionsFor(field.key);
+    if (!field.dependsOn) {
+      return options;
+    }
+    const parentValue = this.form.get(field.dependsOn)?.value;
+    if (parentValue === null || parentValue === undefined || parentValue === '') {
+      return [];
+    }
+    return options.filter((option) => !option.parentId || option.parentId === String(parentValue));
   }
 
   protected optionLabel(option: LookupOption): string {
@@ -1173,6 +1213,50 @@ export class ResourcePage implements OnInit, OnDestroy {
     return cfg.labels[column] ?? column;
   }
 
+  protected avatarFor(row: Row): string | null {
+    const id = row['id'];
+    return id ? (this.avatarUrls()[String(id)] ?? null) : null;
+  }
+
+  protected initials(title: string): string {
+    return title
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((part) => part.charAt(0).toUpperCase())
+      .join('');
+  }
+
+  /** Récupère les avatars (blob authentifié → object URL) des lignes qui en possèdent. */
+  private loadAvatars(cfg: ResourceConfig): void {
+    if (!cfg.photoEndpoint) {
+      return;
+    }
+    const endpoint = cfg.photoEndpoint;
+    for (const row of this.rows()) {
+      const id = row['id'];
+      if (!id || !row['has_photo']) {
+        continue;
+      }
+      const key = String(id);
+      if (this.avatarUrls()[key]) {
+        continue;
+      }
+      this.api.download(endpoint(key)).subscribe({
+        next: (blob) =>
+          this.avatarUrls.update((current) => ({ ...current, [key]: URL.createObjectURL(blob) })),
+        error: () => {},
+      });
+    }
+  }
+
+  private clearAvatars(): void {
+    for (const url of Object.values(this.avatarUrls())) {
+      URL.revokeObjectURL(url);
+    }
+    this.avatarUrls.set({});
+  }
+
   protected display(column: string, value: unknown): string {
     if (value === null || value === undefined || value === '') {
       return '-';
@@ -1183,7 +1267,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     if (column === 'interventions') {
       return this.displayInterventions(value);
     }
-    const relation = this.lookupLabel(column, value);
+    const relation = this.lookup.label(column, value);
     if (relation) {
       return relation;
     }
@@ -1225,6 +1309,9 @@ export class ResourcePage implements OnInit, OnDestroy {
     }
     if (field.type === 'money') {
       return 'number';
+    }
+    if (field.type === 'datetime') {
+      return 'datetime-local';
     }
     return field.type;
   }
@@ -1282,70 +1369,6 @@ export class ResourcePage implements OnInit, OnDestroy {
     });
   }
 
-  private usesDedicatedDetailPage(cfg: ResourceConfig): boolean {
-    return ['pvs', 'signalements', 'communes', 'referentiel-interventions'].includes(cfg.key);
-  }
-
-  private loadLookups(cfg: ResourceConfig): void {
-    const relations = this.relationsFor(cfg);
-    for (const [key, relation] of relations) {
-      this.api
-        .page<Row>(relation.endpoint, { page_size: 100, ...(relation.query ?? {}) })
-        .subscribe({
-          next: (response) => {
-            const options = response.items.map((row) => this.lookupOption(row, relation));
-            this.lookups.update((current) => ({ ...current, [key]: options }));
-          },
-          error: () => {
-            this.lookups.update((current) => ({ ...current, [key]: [] }));
-          },
-        });
-    }
-  }
-
-  private relationsFor(cfg: ResourceConfig): Map<string, RelationConfig> {
-    const relations = new Map<string, RelationConfig>();
-    for (const field of cfg.createFields ?? []) {
-      if (field.relation) {
-        relations.set(field.key, field.relation);
-      }
-    }
-    for (const filter of cfg.filters ?? []) {
-      if (filter.relation) {
-        relations.set(filter.key, filter.relation);
-      }
-    }
-    for (const action of cfg.actions ?? []) {
-      for (const extra of action.statusExtra ?? []) {
-        if (extra.relation) {
-          relations.set(extra.key, extra.relation);
-        }
-      }
-    }
-    return relations;
-  }
-
-  private lookupOption(row: Row, relation: RelationConfig): LookupOption {
-    const valueKey = relation.valueKey ?? 'id';
-    const id = String(row[valueKey] ?? '');
-    return {
-      id,
-      label: String(row[relation.labelKey] ?? id),
-      meta:
-        row[relation.metaKey ?? ''] === undefined ? undefined : String(row[relation.metaKey ?? '']),
-      status:
-        row[relation.statusKey ?? ''] === undefined
-          ? undefined
-          : String(row[relation.statusKey ?? '']),
-    };
-  }
-
-  private lookupLabel(column: string, value: unknown): string | null {
-    const stringValue = String(value);
-    const option = this.optionsFor(column).find((item) => item.id === stringValue);
-    return option?.label ?? null;
-  }
-
   private buildForm(fields: ResourceField[]): void {
     const controls: Record<string, FormControl<unknown>> = {};
     for (const field of fields) {
@@ -1398,6 +1421,8 @@ export class ResourcePage implements OnInit, OnDestroy {
         control.setValue('');
       } else if (field.type === 'relation') {
         control.setValue(String(raw));
+      } else if (field.type === 'datetime') {
+        control.setValue(this.toDatetimeLocal(raw));
       } else {
         control.setValue(raw);
       }
@@ -1416,6 +1441,20 @@ export class ResourcePage implements OnInit, OnDestroy {
 
   private numOrNull(value: unknown): number | null {
     return value === '' || value === null || value === undefined ? null : Number(value);
+  }
+
+  /** Convertit une date ISO de l'API vers la valeur locale « YYYY-MM-DDTHH:mm »
+   *  attendue par <input type="datetime-local">. */
+  private toDatetimeLocal(value: unknown): string {
+    const parsed = new Date(String(value));
+    if (Number.isNaN(parsed.getTime())) {
+      return '';
+    }
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return (
+      `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}` +
+      `T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+    );
   }
 
   /** Champs occupant toute la largeur du formulaire (zone d'édition large). */
@@ -1469,6 +1508,14 @@ export class ResourcePage implements OnInit, OnDestroy {
       const value = raw[field.key];
       if (field.type === 'checkbox') {
         payload[field.key] = Boolean(value);
+      } else if (field.type === 'datetime') {
+        // <input datetime-local> renvoie « YYYY-MM-DDTHH:mm » (heure locale, sans
+        // fuseau). L'API attend du RFC 3339 → on convertit en ISO 8601 UTC.
+        const text = String(value ?? '').trim();
+        if (text) {
+          const parsed = new Date(text);
+          payload[field.key] = Number.isNaN(parsed.getTime()) ? text : parsed.toISOString();
+        }
       } else if (field.type === 'number' || field.type === 'money') {
         payload[field.key] = value === '' || value === null ? null : Number(value);
       } else if (field.type === 'relation_multi') {
@@ -1543,7 +1590,8 @@ export class ResourcePage implements OnInit, OnDestroy {
   private resetPageState(): void {
     this.rows.set([]);
     this.visibleRows.set([]);
-    this.lookups.set({});
+    this.clearAvatars();
+    this.lookup.reset();
     this.selectedRow.set(null);
     this.pendingAction.set(null);
     this.statusContext.set(null);

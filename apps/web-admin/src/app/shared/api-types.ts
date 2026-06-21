@@ -58,6 +58,33 @@ export interface LookupOption {
   label: string;
   meta?: string;
   status?: string;
+  parentId?: string;
+}
+
+export interface PublicCommuneOption {
+  id: string;
+  code: string;
+  nom: string;
+  region: string;
+  departement: string;
+}
+
+export interface PublicIncidentTypeOption {
+  id: string;
+  nom: string;
+  category_id: string;
+  category_nom: string;
+}
+
+export interface PublicZoneOption {
+  id: string;
+  nom: string;
+  type_zone: string;
+}
+
+export interface PublicSignalementOptions {
+  incident_types: PublicIncidentTypeOption[];
+  zones: PublicZoneOption[];
 }
 
 export interface SearchResult {

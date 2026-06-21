@@ -90,7 +90,7 @@ export class ExportsPage implements OnInit {
     { label: 'PV', description: 'Proces-verbaux, statuts et montants initiaux.', path: '/api/v1/exports/pvs', file: 'pvs.csv' },
     { label: 'Paiements', description: 'Journal de caisse, recus et montants encaisses.', path: '/api/v1/exports/payments', file: 'paiements.csv' },
     { label: 'Signalements', description: 'Signalements citoyens et statuts de traitement.', path: '/api/v1/exports/signalements', file: 'signalements.csv' },
-    { label: 'Agents', description: 'Agents, grades et statuts operationnels.', path: '/api/v1/exports/agents', file: 'agents.csv' },
+    { label: 'Agents', description: 'Agents, communes d’attache et statuts operationnels.', path: '/api/v1/exports/agents', file: 'agents.csv' },
   ];
 
   ngOnInit(): void {

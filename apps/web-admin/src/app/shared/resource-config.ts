@@ -10,6 +10,7 @@ export type FieldType =
   | 'checkbox'
   | 'textarea'
   | 'array'
+  | 'datetime'
   | 'select'
   | 'relation'
   | 'relation_multi'
@@ -30,6 +31,7 @@ export interface RelationConfig {
   labelKey: string;
   metaKey?: string;
   statusKey?: string;
+  parentKey?: string;
   query?: Record<string, string | number | boolean>;
 }
 
@@ -44,6 +46,7 @@ export interface ResourceField {
   options?: SelectOption[];
   relation?: RelationConfig;
   readonly?: boolean;
+  dependsOn?: string;
   /** geopoint: clés de formulaire alimentées par le sélecteur de position. */
   latKey?: string;
   lonKey?: string;
@@ -89,6 +92,25 @@ export interface ResourceAction {
   statusExtra?: StatusExtraField[];
 }
 
+/** Section « entités liées » affichée sous le détail d'une fiche. */
+export interface RelatedSection {
+  /** Clé de la ressource enfant dans `resourceConfigs`. */
+  key: string;
+  title: string;
+  /** Champ de l'enfant pointant vers l'id de la fiche courante (ex. `commune_id`). */
+  foreignKey: string;
+  /** Colonnes de l'enfant à afficher (défaut: colonnes principales hors `*_id`). */
+  columns?: string[];
+}
+
+/** Configuration de la page détail dédiée d'une ressource. */
+export interface ResourceDetailConfig {
+  /** Champs mis en avant dans le bandeau d'en-tête (défaut: premiers `detailFields`). */
+  summaryFields?: string[];
+  /** Sous-ressources listées en sections sous le détail. */
+  related?: RelatedSection[];
+}
+
 export interface ResourceConfig {
   key: string;
   title: string;
@@ -97,6 +119,10 @@ export interface ResourceConfig {
   columns: string[];
   secondaryColumns?: string[];
   detailFields?: string[];
+  /** Relations utilisées pour résoudre un id en libellé à l'affichage (hors formulaire). */
+  displayRelations?: Record<string, RelationConfig>;
+  /** Structure de la page détail dédiée (en-tête, sections liées). */
+  detail?: ResourceDetailConfig;
   labels: Record<string, string>;
   createFields?: ResourceField[];
   patchFields?: ResourceField[];
@@ -110,6 +136,9 @@ export interface ResourceConfig {
   actions?: ResourceAction[];
   /** Enables the dedicated "Gérer les agents" dialog (patrouilles sub-resource). */
   manageAgents?: boolean;
+  /** Active le bloc photo de profil sur la fiche détail (upload + aperçu).
+   *  Renvoie l'endpoint API (GET pour servir, POST multipart pour téléverser). */
+  photoEndpoint?: (id: string) => string;
 }
 
 const statusOptions: Record<string, SelectOption[]> = {
@@ -120,31 +149,30 @@ const statusOptions: Record<string, SelectOption[]> = {
   ],
   pvs: [
     option('EN_ATTENTE_PAIEMENT', 'En attente paiement'),
-    option('PAYE', 'Paye'),
+    option('PAYE', 'Payé'),
     option('EN_RETARD', 'En retard'),
     option('NON_PAYANT', 'Non payant'),
-    option('ANNULE', 'Annule'),
-    option('CONTESTE', 'Conteste'),
+    option('ANNULE', 'Annulé'),
+    option('CONTESTE', 'Contesté'),
   ],
   signalements: [
-    option('RECU', 'Recu'),
+    option('RECU', 'Reçu'),
     option('EN_COURS', 'En cours'),
-    option('TRAITE', 'Traite'),
-    option('CLASSE', 'Classe'),
-    option('REJETE', 'Rejete'),
+    option('TRAITE', 'Traité'),
+    option('CLASSE', 'Classé'),
+    option('REJETE', 'Rejeté'),
   ],
   patrouilles: [
-    option('PLANIFIEE', 'Planifiee'),
+    option('PLANIFIEE', 'Planifiée'),
     option('EN_COURS', 'En cours'),
-    option('CLOTUREE', 'Cloturee'),
-    option('ANNULEE', 'Annulee'),
+    option('CLOTUREE', 'Clôturée'),
+    option('ANNULEE', 'Annulée'),
   ],
 };
 
 const pvSubjectTypeOptions: SelectOption[] = [
-  option('PERSON_WITH_VEHICLE', 'Usager avec vehicule'),
-  option('PERSON_ONLY', 'Usager sans vehicule'),
-  option('VEHICLE_ONLY', 'Vehicule sans conducteur'),
+  option('PERSON_WITH_VEHICLE', 'Usager avec véhicule'),
+  option('PERSON_ONLY', 'Usager sans véhicule'),
 ];
 
 const communeRelation: RelationConfig = {
@@ -158,6 +186,7 @@ const zoneRelation: RelationConfig = {
   endpoint: '/api/v1/zones',
   labelKey: 'nom',
   metaKey: 'type_zone',
+  parentKey: 'commune_id',
   statusKey: 'active',
 };
 
@@ -165,6 +194,7 @@ const categoryRelation: RelationConfig = {
   endpoint: '/api/v1/referentiel/categories',
   labelKey: 'nom',
   metaKey: 'description',
+  parentKey: 'commune_id',
   statusKey: 'active',
 };
 
@@ -172,6 +202,7 @@ const typeRelation: RelationConfig = {
   endpoint: '/api/v1/referentiel/types',
   labelKey: 'nom',
   metaKey: 'description',
+  parentKey: 'category_id',
   statusKey: 'active',
 };
 
@@ -179,6 +210,7 @@ const interventionRelation: RelationConfig = {
   endpoint: '/api/v1/referentiel/interventions',
   labelKey: 'nom',
   metaKey: 'montant_fcfa',
+  parentKey: 'type_id',
   statusKey: 'active',
 };
 
@@ -189,14 +221,60 @@ const userRelation: RelationConfig = {
   statusKey: 'active',
 };
 
+const agentRelation: RelationConfig = {
+  endpoint: '/api/v1/agents',
+  labelKey: 'full_name',
+  metaKey: 'matricule',
+  parentKey: 'commune_id',
+  statusKey: 'status',
+};
+
+/** Agents actifs uniquement — pour les sélecteurs d'affectation (effectif patrouille). */
+const activeAgentRelation: RelationConfig = {
+  ...agentRelation,
+  query: { status: 'ACTIF' },
+};
+
+/** Détecte une valeur ressemblant à un UUID afin de ne jamais l'afficher en clair. */
+export function isUuidLike(value: unknown): boolean {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+/** Mappe un `entity_type`/table d'audit vers la feature (route détail) correspondante. */
+export function featureForEntityType(type: unknown): string | null {
+  const map: Record<string, string> = {
+    communes: 'communes',
+    commune: 'communes',
+    users: 'users',
+    user: 'users',
+    agents: 'agents',
+    agent: 'agents',
+    zones: 'zones',
+    zone: 'zones',
+    pvs: 'pvs',
+    pv: 'pvs',
+    signalements: 'signalements',
+    signalement: 'signalements',
+    patrouilles: 'patrouilles',
+    patrouille: 'patrouilles',
+    intervention_types: 'referentiel-types',
+    intervention_categories: 'referentiel-categories',
+    interventions: 'referentiel-interventions',
+  };
+  return map[String(type ?? '').toLowerCase()] ?? null;
+}
+
 export const resourceConfigs: Record<string, ResourceConfig> = {
   communes: {
     key: 'communes',
     title: 'Communes',
-    description: 'Parametrage institutionnel et perimetres de travail.',
+    description: 'Paramétrage institutionnel et périmètres de travail.',
     endpoint: '/api/v1/communes',
     editable: true,
-    columns: ['code', 'nom', 'region', 'departement', 'active'],
+    columns: ['code', 'nom', 'region', 'departement', 'active', 'subscription_status'],
     secondaryColumns: ['telephone', 'email'],
     detailFields: [
       'code',
@@ -208,7 +286,20 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'email',
       'theme_color',
       'active',
+      'subscription_status',
+      'subscription_started_at',
+      'subscription_expires_at',
+      'subscription_active',
+      'public_visible',
     ],
+    detail: {
+      summaryFields: ['code', 'region', 'departement'],
+      related: [
+        { key: 'zones', title: 'Zones', foreignKey: 'commune_id' },
+        { key: 'agents', title: 'Agents', foreignKey: 'commune_id' },
+        { key: 'pvs', title: 'PV récents', foreignKey: 'commune_id' },
+      ],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -216,13 +307,26 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     createFields: [
       field('code', 'Code commune', 'text', true, 'YDE1'),
       field('nom', 'Nom officiel', 'text', true),
-      field('region', 'Region', 'text', true),
-      field('departement', 'Departement', 'text', true),
+      field('region', 'Région', 'text', true),
+      field('departement', 'Département', 'text', true),
       field('adresse', 'Adresse', 'text'),
-      field('telephone', 'Telephone', 'text'),
+      field('telephone', 'Téléphone', 'text'),
       field('email', 'Email', 'email'),
-      field('theme_color', 'Couleur theme', 'text', false, '#1F7A4D'),
+      field('theme_color', 'Couleur thème', 'text', false, '#1F7A4D'),
       field('active', 'Commune active', 'checkbox'),
+      selectField(
+        'subscription_status',
+        'Statut abonnement',
+        false,
+        [
+          option('ACTIVE', 'Actif'),
+          option('TRIAL', 'Essai'),
+          option('EXPIRED', 'Expiré'),
+          option('SUSPENDED', 'Suspendu'),
+        ],
+      ),
+      field('subscription_started_at', 'Début abonnement', 'datetime'),
+      field('subscription_expires_at', 'Expiration abonnement', 'datetime'),
       geoPolygonField(
         'boundary',
         'Contour de la commune',
@@ -234,12 +338,18 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   users: {
     key: 'users',
     title: 'Utilisateurs',
-    description: 'Comptes applicatifs, roles et rattachement communal.',
+    description: 'Comptes applicatifs, rôles et rattachement communal.',
     endpoint: '/api/v1/users',
     editable: true,
+    photoEndpoint: (id) => `/api/v1/users/${id}/photo`,
     columns: ['email', 'full_name', 'roles', 'commune_id', 'active'],
     secondaryColumns: ['created_at'],
     detailFields: ['email', 'full_name', 'roles', 'commune_id', 'active', 'created_at'],
+    displayRelations: { commune_id: communeRelation },
+    detail: {
+      summaryFields: ['email', 'roles', 'commune_id'],
+      related: [{ key: 'agents', title: 'Agent lié', foreignKey: 'user_id' }],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -251,7 +361,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       relationField('commune_id', 'Commune', communeRelation),
       selectField(
         'roles',
-        'Roles',
+        'Rôles',
         true,
         [
           option('SUPER_ADMIN', 'Super admin'),
@@ -260,7 +370,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('SUPERVISEUR', 'Superviseur'),
           option('RECEVEUR', 'Receveur'),
         ],
-        'Un seul role principal dans ce formulaire; les roles multiples restent possibles via API.',
+        'Un seul rôle principal dans ce formulaire; les rôles multiples restent possibles via API.',
       ),
       field('active', 'Compte actif', 'checkbox'),
     ],
@@ -278,7 +388,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       relationField('commune_id', 'Commune', communeRelation, false),
       selectField(
         'roles',
-        'Roles',
+        'Rôles',
         true,
         [
           option('SUPER_ADMIN', 'Super admin'),
@@ -287,7 +397,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('SUPERVISEUR', 'Superviseur'),
           option('RECEVEUR', 'Receveur'),
         ],
-        'Un seul role principal dans ce formulaire; les roles multiples restent possibles via API.',
+        'Un seul rôle principal dans ce formulaire; les rôles multiples restent possibles via API.',
       ),
       field('active', 'Compte actif', 'checkbox'),
     ],
@@ -295,56 +405,28 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   agents: {
     key: 'agents',
     title: 'Agents',
-    description: 'Agents APM, statut operationnel et rattachement communal.',
+    description: 'Agents APM, statut opérationnel et rattachement communal.',
     endpoint: '/api/v1/agents',
     editable: true,
-    columns: ['matricule', 'full_name', 'grade', 'status', 'formation_nasla'],
-    secondaryColumns: ['commune_id', 'telephone', 'email'],
-    detailFields: [
-      'matricule',
-      'full_name',
-      'commune_id',
-      'grade',
-      'status',
-      'date_prise_fonction',
-      'formation_nasla',
-      'telephone',
-      'email',
-      'user_id',
-    ],
+    photoEndpoint: (id) => `/api/v1/agents/${id}/photo`,
+    columns: ['matricule', 'full_name', 'commune_id', 'status'],
+    detailFields: ['matricule', 'full_name', 'commune_id', 'status'],
+    displayRelations: { commune_id: communeRelation },
+    detail: {
+      summaryFields: ['matricule', 'commune_id', 'status'],
+      related: [{ key: 'pvs', title: 'PV émis', foreignKey: 'agent_id' }],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [
       statusFilter(statusOptions['agents']),
-      relationFilter('commune_id', 'Commune', communeRelation),
+      relationFilter('commune_id', "Commune d'attache", communeRelation),
     ],
     createFields: [
-      field('matricule', 'Matricule', 'text', true, 'APM-YDE1-001', undefined, 'Identite'),
-      field('full_name', 'Nom complet', 'text', true, undefined, undefined, 'Identite'),
-      relationField('commune_id', 'Commune', communeRelation, true, 'Affectation'),
-      field('grade', 'Grade', 'text', true, undefined, undefined, 'Affectation'),
-      field(
-        'date_prise_fonction',
-        'Date prise fonction',
-        'date',
-        false,
-        undefined,
-        undefined,
-        'Affectation',
-      ),
-      field(
-        'formation_nasla',
-        'Formation NASLA validee',
-        'checkbox',
-        false,
-        undefined,
-        undefined,
-        'Affectation',
-      ),
-      field('telephone', 'Telephone', 'text', false, undefined, undefined, 'Contact'),
-      field('email', 'Email', 'email', false, undefined, undefined, 'Contact'),
-      relationField('user_id', 'Compte utilisateur associe', userRelation, false, 'Contact'),
+      field('matricule', 'Matricule', 'text', true, 'APM-YDE1-001', undefined, 'Identité'),
+      field('full_name', 'Nom complet', 'text', true, undefined, undefined, 'Identité'),
+      relationField('commune_id', "Commune d'attache", communeRelation, true, 'Affectation'),
     ],
     actions: [
       sensitiveAction(
@@ -353,25 +435,33 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'Suspendre cet agent ?',
       ),
       sensitiveAction(
-        'Reactiver',
+        'Réactiver',
         (row) => `/api/v1/agents/${row['id']}/reactivate`,
-        'Reactiver cet agent ?',
+        'Réactiver cet agent ?',
       ),
       sensitiveAction(
         'Retraite',
         (row) => `/api/v1/agents/${row['id']}/retire`,
-        'Mettre cet agent a la retraite ?',
+        'Mettre cet agent à la retraite ?',
       ),
     ],
   },
   zones: {
     key: 'zones',
     title: 'Zones',
-    description: 'Quartiers, secteurs, marches et zones sensibles par commune.',
+    description: 'Quartiers, secteurs, marchés et zones sensibles par commune.',
     endpoint: '/api/v1/zones',
     editable: true,
     columns: ['nom', 'type_zone', 'commune_id', 'parent_id', 'active'],
     detailFields: ['nom', 'type_zone', 'commune_id', 'parent_id', 'active'],
+    displayRelations: { commune_id: communeRelation, parent_id: zoneRelation },
+    detail: {
+      summaryFields: ['type_zone', 'commune_id', 'active'],
+      related: [
+        { key: 'pvs', title: 'PV dans la zone', foreignKey: 'zone_id' },
+        { key: 'patrouilles', title: 'Patrouilles', foreignKey: 'zone_id' },
+      ],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -383,10 +473,10 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         option('QUARTIER', 'Quartier'),
         option('BLOC', 'Bloc'),
         option('SECTEUR', 'Secteur'),
-        option('MARCHE', 'Marche'),
+        option('MARCHE', 'Marché'),
         option('ZONE_SENSIBLE', 'Zone sensible'),
       ]),
-      relationField('parent_id', 'Zone parente', zoneRelation, false),
+      relationField('parent_id', 'Zone parente', zoneRelation, false, undefined, 'commune_id'),
       field('active', 'Zone active', 'checkbox'),
       geoPolygonField(
         'boundary',
@@ -401,7 +491,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         option('QUARTIER', 'Quartier'),
         option('BLOC', 'Bloc'),
         option('SECTEUR', 'Secteur'),
-        option('MARCHE', 'Marche'),
+        option('MARCHE', 'Marché'),
         option('ZONE_SENSIBLE', 'Zone sensible'),
       ]),
       relationField('parent_id', 'Zone parente', zoneRelation, false),
@@ -419,63 +509,82 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   },
   'referentiel-categories': {
     key: 'referentiel-categories',
-    title: 'Categories',
-    description: 'Premier niveau du referentiel communal.',
+    title: 'Catégories',
+    description: 'Premier niveau du référentiel communal.',
     endpoint: '/api/v1/referentiel/categories',
     editable: true,
     columns: ['nom', 'commune_id', 'description', 'active'],
     detailFields: ['nom', 'commune_id', 'description', 'active'],
+    displayRelations: { commune_id: communeRelation },
+    detail: {
+      summaryFields: ['nom', 'commune_id', 'active'],
+      related: [{ key: 'referentiel-types', title: 'Types', foreignKey: 'category_id' }],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [relationFilter('commune_id', 'Commune', communeRelation), activeFilter()],
     createFields: [
       relationField('commune_id', 'Commune', communeRelation),
-      field('nom', 'Nom categorie', 'text', true),
+      field('nom', 'Nom catégorie', 'text', true),
       field('description', 'Description', 'textarea'),
-      field('active', 'Categorie active', 'checkbox'),
+      field('active', 'Catégorie active', 'checkbox'),
     ],
     patchFields: [
-      field('nom', 'Nom categorie', 'text', true),
+      field('nom', 'Nom catégorie', 'text', true),
       field('description', 'Description', 'textarea'),
-      field('active', 'Categorie active', 'checkbox'),
+      field('active', 'Catégorie active', 'checkbox'),
     ],
     actions: [
       deleteAction(
         'Supprimer',
         (row) => `/api/v1/referentiel/categories/${row['id']}`,
-        'Supprimer cette categorie ?',
+        'Supprimer cette catégorie ?',
       ),
     ],
   },
   'referentiel-types': {
     key: 'referentiel-types',
     title: 'Types intervention',
-    description: 'Deuxieme niveau du referentiel communal.',
+    description: 'Deuxième niveau du référentiel communal.',
     endpoint: '/api/v1/referentiel/types',
     editable: true,
     columns: ['nom', 'category_id', 'commune_id', 'description', 'active'],
     detailFields: ['nom', 'category_id', 'commune_id', 'description', 'active'],
+    displayRelations: { commune_id: communeRelation, category_id: categoryRelation },
+    detail: {
+      summaryFields: ['nom', 'category_id', 'commune_id'],
+      related: [
+        { key: 'referentiel-interventions', title: 'Interventions', foreignKey: 'type_id' },
+      ],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [
       relationFilter('commune_id', 'Commune', communeRelation),
-      relationFilter('category_id', 'Categorie', categoryRelation),
+      relationFilter('category_id', 'Catégorie', categoryRelation),
       activeFilter(),
     ],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade referentiel'),
-      relationField('category_id', 'Categorie', categoryRelation, true, 'Cascade referentiel'),
-      field('nom', 'Nom type', 'text', true, undefined, undefined, 'Definition'),
-      field('description', 'Description', 'textarea', false, undefined, undefined, 'Definition'),
-      field('active', 'Type actif', 'checkbox', false, undefined, undefined, 'Definition'),
+      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade référentiel'),
+      relationField(
+        'category_id',
+        'Catégorie',
+        categoryRelation,
+        true,
+        'Cascade référentiel',
+        'commune_id',
+      ),
+      field('nom', 'Nom type', 'text', true, undefined, undefined, 'Définition'),
+      field('description', 'Description', 'textarea', false, undefined, undefined, 'Définition'),
+      field('active', 'Type actif', 'checkbox', false, undefined, undefined, 'Définition'),
     ],
     patchFields: [
-      relationField('category_id', 'Categorie', categoryRelation, true, 'Cascade referentiel'),
-      field('nom', 'Nom type', 'text', true, undefined, undefined, 'Definition'),
-      field('description', 'Description', 'textarea', false, undefined, undefined, 'Definition'),
-      field('active', 'Type actif', 'checkbox', false, undefined, undefined, 'Definition'),
+      relationField('category_id', 'Catégorie', categoryRelation, true, 'Cascade référentiel'),
+      field('nom', 'Nom type', 'text', true, undefined, undefined, 'Définition'),
+      field('description', 'Description', 'textarea', false, undefined, undefined, 'Définition'),
+      field('active', 'Type actif', 'checkbox', false, undefined, undefined, 'Définition'),
     ],
     actions: [
       deleteAction(
@@ -488,7 +597,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   'referentiel-interventions': {
     key: 'referentiel-interventions',
     title: 'Interventions',
-    description: 'Montants, delais, penalites et references de deliberation.',
+    description: 'Montants, délais, pénalités et références de délibération.',
     endpoint: '/api/v1/referentiel/interventions',
     editable: true,
     columns: ['nom', 'type_id', 'sujet_paiement', 'montant_fcfa', 'delai_paiement_jours', 'active'],
@@ -499,6 +608,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'category_id',
       'type_id',
       'description',
+      'requires_vehicle',
       'sujet_paiement',
       'montant_fcfa',
       'delai_paiement_jours',
@@ -506,20 +616,42 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'reference_deliberation',
       'active',
     ],
+    displayRelations: {
+      commune_id: communeRelation,
+      category_id: categoryRelation,
+      type_id: typeRelation,
+    },
+    detail: {
+      summaryFields: ['nom', 'type_id', 'montant_fcfa'],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [
       relationFilter('commune_id', 'Commune', communeRelation),
-      relationFilter('category_id', 'Categorie', categoryRelation),
+      relationFilter('category_id', 'Catégorie', categoryRelation),
       relationFilter('type_id', 'Type', typeRelation),
       activeFilter(),
     ],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade referentiel'),
-      relationField('category_id', 'Categorie', categoryRelation, false, 'Cascade referentiel'),
-      relationField('type_id', 'Type intervention', typeRelation, true, 'Cascade referentiel'),
-      field('nom', 'Nom intervention', 'text', true, undefined, undefined, 'Regle financiere'),
+      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade référentiel'),
+      relationField(
+        'category_id',
+        'Catégorie',
+        categoryRelation,
+        false,
+        'Cascade référentiel',
+        'commune_id',
+      ),
+      relationField(
+        'type_id',
+        'Type intervention',
+        typeRelation,
+        true,
+        'Cascade référentiel',
+        'category_id',
+      ),
+      field('nom', 'Nom intervention', 'text', true, undefined, undefined, 'Règle financière'),
       field(
         'description',
         'Description',
@@ -527,16 +659,34 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
-        'sujet_paiement',
-        'Sujet a paiement',
+        'requires_vehicle',
+        'Véhicule requis',
         'checkbox',
         false,
         undefined,
-        'Desactive pour un avertissement ou une intervention non payante.',
-        'Regle financiere',
+        'Affiche les champs véhicule par défaut sur mobile.',
+        'Règle financière',
+      ),
+      field(
+        'requires_vehicle',
+        'Véhicule requis',
+        'checkbox',
+        false,
+        undefined,
+        'Affiche les champs véhicule par défaut sur mobile.',
+        'Règle financière',
+      ),
+      field(
+        'sujet_paiement',
+        'Sujet à paiement',
+        'checkbox',
+        false,
+        undefined,
+        'Désactivé pour un avertissement ou une intervention non payante.',
+        'Règle financière',
       ),
       field(
         'montant_fcfa',
@@ -544,35 +694,35 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'money',
         false,
         undefined,
-        'Montant officiel issu de la deliberation.',
-        'Regle financiere',
+        'Montant officiel issu de la délibération.',
+        'Règle financière',
       ),
       field(
         'delai_paiement_jours',
-        'Delai paiement',
+        'Délai paiement',
         'number',
         false,
         '30',
-        'Nombre de jours avant penalite.',
-        'Regle financiere',
+        'Nombre de jours avant pénalité.',
+        'Règle financière',
       ),
       field(
         'taux_penalite_basis_points',
-        'Penalite',
+        'Pénalité',
         'number',
         false,
         '500',
         'Basis points: 500 = 5%.',
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
         'reference_deliberation',
-        'Reference deliberation',
+        'Référence délibération',
         'text',
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
         'active',
@@ -581,12 +731,12 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
     ],
     patchFields: [
-      relationField('type_id', 'Type intervention', typeRelation, true, 'Cascade referentiel'),
-      field('nom', 'Nom intervention', 'text', true, undefined, undefined, 'Regle financiere'),
+      relationField('type_id', 'Type intervention', typeRelation, true, 'Cascade référentiel'),
+      field('nom', 'Nom intervention', 'text', true, undefined, undefined, 'Règle financière'),
       field(
         'description',
         'Description',
@@ -594,16 +744,16 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
         'sujet_paiement',
-        'Sujet a paiement',
+        'Sujet à paiement',
         'checkbox',
         false,
         undefined,
-        'Desactive pour un avertissement ou une intervention non payante.',
-        'Regle financiere',
+        'Désactivé pour un avertissement ou une intervention non payante.',
+        'Règle financière',
       ),
       field(
         'montant_fcfa',
@@ -611,35 +761,35 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'money',
         false,
         undefined,
-        'Montant officiel issu de la deliberation.',
-        'Regle financiere',
+        'Montant officiel issu de la délibération.',
+        'Règle financière',
       ),
       field(
         'delai_paiement_jours',
-        'Delai paiement',
+        'Délai paiement',
         'number',
         false,
         '30',
-        'Nombre de jours avant penalite.',
-        'Regle financiere',
+        'Nombre de jours avant pénalité.',
+        'Règle financière',
       ),
       field(
         'taux_penalite_basis_points',
-        'Penalite',
+        'Pénalité',
         'number',
         false,
         '500',
         'Basis points: 500 = 5%.',
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
         'reference_deliberation',
-        'Reference deliberation',
+        'Référence délibération',
         'text',
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
       field(
         'active',
@@ -648,7 +798,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        'Regle financiere',
+        'Règle financière',
       ),
     ],
     actions: [
@@ -661,8 +811,8 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   },
   pvs: {
     key: 'pvs',
-    title: 'Proces-verbaux',
-    description: 'Creation, suivi, QR code et impression des PV.',
+    title: 'Procès-verbaux',
+    description: 'Création, suivi, QR code et impression des PV.',
     endpoint: '/api/v1/pvs',
     columns: [
       'pv_number',
@@ -706,6 +856,10 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'notes_internes',
       'created_at',
     ],
+    displayRelations: { zone_id: zoneRelation, agent_id: agentRelation },
+    detail: {
+      summaryFields: ['pv_number', 'status', 'amount_initial_fcfa'],
+    },
     labels: commonLabels(),
     createRoles: ['APM_AGENT'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'],
@@ -725,7 +879,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'Type de PV',
         true,
         pvSubjectTypeOptions,
-        'Le backend exige ensuite les champs usager/vehicule coherents avec ce type.',
+        'Le backend exige ensuite les champs usager/véhicule cohérents avec ce type.',
         '1. Type',
       ),
       relationMultiField(
@@ -735,18 +889,10 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         true,
         '2. Infractions',
       ),
-      field(
-        'verbalized_last_name',
-        'Nom',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '3. Contrevenant',
-      ),
+      field('verbalized_last_name', 'Nom', 'text', true, undefined, undefined, '3. Contrevenant'),
       field(
         'verbalized_first_name',
-        'Prenom',
+        'Prénom',
         'text',
         false,
         undefined,
@@ -755,33 +901,33 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       ),
       selectField(
         'verbalized_identity_type',
-        'Type d identite',
+        "Type d'identité",
         false,
         [
           option('CNI', 'CNI'),
           option('PASSEPORT', 'Passeport'),
           option('PERMIS_CONDUIRE', 'Permis de conduire'),
-          option('CARTE_SEJOUR', 'Carte de sejour'),
+          option('CARTE_SEJOUR', 'Carte de séjour'),
           option('NIU', 'NIU'),
           option('AUTRE', 'Autre'),
         ],
-        'Requis si un numero d identite est renseigne.',
+        "Requis si un numéro d'identité est renseigné.",
         '3. Contrevenant',
       ),
       field(
         'verbalized_identity_number',
-        'Numero d identite',
+        "Numéro d'identité",
         'text',
         false,
-        'Numero CNI, passeport, permis...',
+        'Numéro CNI, passeport, permis...',
         undefined,
         '3. Contrevenant',
       ),
       field(
         'verbalized_phone',
-        'Telephone',
+        'Téléphone',
         'text',
-        false,
+        true,
         undefined,
         undefined,
         '3. Contrevenant',
@@ -795,59 +941,27 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         undefined,
         '3. Contrevenant',
       ),
-      field(
-        'vehicle_plate',
-        'Plaque vehicule',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
+      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '4. Véhicule'),
       field(
         'vehicle_registration_card_number',
-        'Numero carte grise',
+        'Numéro carte grise',
         'text',
         false,
         undefined,
-        'Alternative a la plaque pour identifier le vehicule.',
-        '4. Vehicule',
+        'Alternative à la plaque pour identifier le véhicule.',
+        '4. Véhicule',
       ),
-      field(
-        'vehicle_make',
-        'Marque',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
-      field(
-        'vehicle_model',
-        'Modele',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
-      field(
-        'vehicle_color',
-        'Couleur',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
+      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '4. Véhicule'),
       field(
         'vehicle_owner_name',
-        'Proprietaire',
+        'Propriétaire',
         'text',
         false,
         undefined,
         undefined,
-        '4. Vehicule',
+        '4. Véhicule',
       ),
       relationField('zone_id', 'Zone', zoneRelation, false, '5. Localisation'),
       field(
@@ -873,7 +987,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '6. Recapitulatif',
+        '6. Récapitulatif',
       ),
     ],
     patchFields: [
@@ -882,7 +996,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'Type de PV',
         true,
         pvSubjectTypeOptions,
-        'Modification refusee par l API si le PV est paye ou annule.',
+        "Modification refusée par l'API si le PV est payé ou annulé.",
         '1. Type',
       ),
       relationMultiField(
@@ -892,18 +1006,10 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         true,
         '2. Infractions',
       ),
-      field(
-        'verbalized_last_name',
-        'Nom',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '3. Contrevenant',
-      ),
+      field('verbalized_last_name', 'Nom', 'text', false, undefined, undefined, '3. Contrevenant'),
       field(
         'verbalized_first_name',
-        'Prenom',
+        'Prénom',
         'text',
         false,
         undefined,
@@ -912,31 +1018,31 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       ),
       selectField(
         'verbalized_identity_type',
-        'Type d identite',
+        "Type d'identité",
         false,
         [
           option('CNI', 'CNI'),
           option('PASSEPORT', 'Passeport'),
           option('PERMIS_CONDUIRE', 'Permis de conduire'),
-          option('CARTE_SEJOUR', 'Carte de sejour'),
+          option('CARTE_SEJOUR', 'Carte de séjour'),
           option('NIU', 'NIU'),
           option('AUTRE', 'Autre'),
         ],
-        'Requis si un numero d identite est renseigne.',
+        "Requis si un numéro d'identité est renseigné.",
         '3. Contrevenant',
       ),
       field(
         'verbalized_identity_number',
-        'Numero d identite',
+        "Numéro d'identité",
         'text',
         false,
-        'Numero CNI, passeport, permis...',
+        'Numéro CNI, passeport, permis...',
         undefined,
         '3. Contrevenant',
       ),
       field(
         'verbalized_phone',
-        'Telephone',
+        'Téléphone',
         'text',
         false,
         undefined,
@@ -952,59 +1058,27 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         undefined,
         '3. Contrevenant',
       ),
-      field(
-        'vehicle_plate',
-        'Plaque vehicule',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
+      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '4. Véhicule'),
       field(
         'vehicle_registration_card_number',
-        'Numero carte grise',
+        'Numéro carte grise',
         'text',
         false,
         undefined,
-        'Alternative a la plaque pour identifier le vehicule.',
-        '4. Vehicule',
+        'Alternative à la plaque pour identifier le véhicule.',
+        '4. Véhicule',
       ),
-      field(
-        'vehicle_make',
-        'Marque',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
-      field(
-        'vehicle_model',
-        'Modele',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
-      field(
-        'vehicle_color',
-        'Couleur',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '4. Vehicule',
-      ),
+      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '4. Véhicule'),
       field(
         'vehicle_owner_name',
-        'Proprietaire',
+        'Propriétaire',
         'text',
         false,
         undefined,
         undefined,
-        '4. Vehicule',
+        '4. Véhicule',
       ),
       relationField('zone_id', 'Zone', zoneRelation, false, '5. Localisation'),
       field(
@@ -1021,7 +1095,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'gps_longitude',
         'Position GPS',
         '5. Localisation',
-        'Cliquez sur la carte ou recherchez une adresse. La zone est deduite automatiquement.',
+        'Cliquez sur la carte ou recherchez une adresse. La zone est déduite automatiquement.',
       ),
       field(
         'notes_internes',
@@ -1030,7 +1104,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '6. Recapitulatif',
+        '6. Récapitulatif',
       ),
     ],
     actions: [
@@ -1065,7 +1139,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
             key: 'reason',
             label: 'Motif',
             type: 'textarea',
-            placeholder: 'Motif du changement de statut (journalise).',
+            placeholder: 'Motif du changement de statut (journalisé).',
           },
         ],
         roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -1099,6 +1173,9 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'created_at',
       'updated_at',
     ],
+    detail: {
+      summaryFields: ['signalement_number', 'type_incident', 'status'],
+    },
     labels: commonLabels(),
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [
@@ -1117,7 +1194,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
             type: 'textarea',
             placeholder: 'Suivi interne (visible back-office uniquement).',
           },
-          { key: 'assigned_to', label: 'Affecter a', type: 'relation', relation: userRelation },
+          { key: 'assigned_to', label: 'Affecter à', type: 'relation', relation: userRelation },
         ],
         roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
       }),
@@ -1126,7 +1203,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   patrouilles: {
     key: 'patrouilles',
     title: 'Patrouilles',
-    description: 'Planification, demarrage et cloture des patrouilles.',
+    description: 'Planification, démarrage et clôture des patrouilles.',
     endpoint: '/api/v1/patrouilles',
     editable: true,
     columns: ['nom', 'status', 'zone_id', 'date_debut', 'date_fin'],
@@ -1137,9 +1214,15 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'commune_id',
       'zone_id',
       'status',
+      'date_debut_prevue',
+      'date_fin_prevue',
       'date_debut',
       'date_fin',
     ],
+    displayRelations: { commune_id: communeRelation, zone_id: zoneRelation },
+    detail: {
+      summaryFields: ['nom', 'status', 'zone_id'],
+    },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -1150,25 +1233,30 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     manageAgents: true,
     createFields: [
       relationField('commune_id', 'Commune', communeRelation),
-      relationField('zone_id', 'Zone', zoneRelation, false),
-      field('nom', 'Nom patrouille', 'text', true),
+      relationField('zone_id', 'Zone', zoneRelation, true, undefined, 'commune_id'),
+      field('nom', 'Nom patrouille', 'text', false, undefined, 'Auto-généré si vide.'),
       field('description', 'Description', 'textarea'),
+      field('date_debut_prevue', 'Début prévu', 'datetime'),
+      field('date_fin_prevue', 'Fin prévue', 'datetime'),
+      relationMultiField('agent_ids', 'Agents affectés', activeAgentRelation, true, undefined, 'commune_id'),
     ],
     patchFields: [
       relationField('zone_id', 'Zone', zoneRelation, false),
       field('nom', 'Nom patrouille', 'text', true),
       field('description', 'Description', 'textarea'),
+      field('date_debut_prevue', 'Début prévu', 'datetime'),
+      field('date_fin_prevue', 'Fin prévue', 'datetime'),
     ],
     actions: [
       sensitiveAction(
-        'Demarrer',
+        'Démarrer',
         (row) => `/api/v1/patrouilles/${row['id']}/start`,
-        'Demarrer cette patrouille ?',
+        'Démarrer cette patrouille ?',
       ),
       sensitiveAction(
-        'Cloturer',
+        'Clôturer',
         (row) => `/api/v1/patrouilles/${row['id']}/end`,
-        'Cloturer cette patrouille ?',
+        'Clôturer cette patrouille ?',
       ),
     ],
   },
@@ -1188,6 +1276,10 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'user_agent',
       'created_at',
     ],
+    displayRelations: { user_id: userRelation, commune_id: communeRelation },
+    detail: {
+      summaryFields: ['action', 'entity_type', 'user_id'],
+    },
     labels: commonLabels(),
     filters: [relationFilter('commune_id', 'Commune', communeRelation)],
   },
@@ -1211,8 +1303,9 @@ function relationField(
   relation: RelationConfig,
   required = true,
   section?: string,
+  dependsOn?: string,
 ): ResourceField {
-  return { key, label, type: 'relation', required, relation, section };
+  return { key, label, type: 'relation', required, relation, section, dependsOn };
 }
 
 function relationMultiField(
@@ -1221,8 +1314,9 @@ function relationMultiField(
   relation: RelationConfig,
   required = true,
   section?: string,
+  dependsOn?: string,
 ): ResourceField {
-  return { key, label, type: 'relation_multi', required, relation, section };
+  return { key, label, type: 'relation_multi', required, relation, section, dependsOn };
 }
 
 function selectField(
@@ -1268,7 +1362,7 @@ function statusFilter(options: SelectOption[]): ResourceFilter {
 function activeFilter(): ResourceFilter {
   return {
     key: 'active',
-    label: 'Etat',
+    label: 'État',
     type: 'active',
     options: [option(true, 'Actif'), option(false, 'Inactif')],
   };
@@ -1291,9 +1385,9 @@ function sensitiveAction(
     confirmTitle,
     confirmMessage: (row) => {
       const target = String(
-        row['full_name'] ?? row['nom'] ?? row['pv_number'] ?? row['id'] ?? 'cet element',
+        row['full_name'] ?? row['nom'] ?? row['pv_number'] ?? row['id'] ?? 'cet élément',
       );
-      return `Cette action modifie un statut sensible pour ${target}. Elle sera journalisee.`;
+      return `Cette action modifie un statut sensible pour ${target}. Elle sera journalisée.`;
     },
   };
 }
@@ -1313,9 +1407,9 @@ function deleteAction(
     roles,
     confirmMessage: (row) => {
       const target = String(
-        row['full_name'] ?? row['nom'] ?? row['pv_number'] ?? row['id'] ?? 'cet element',
+        row['full_name'] ?? row['nom'] ?? row['pv_number'] ?? row['id'] ?? 'cet élément',
       );
-      return `Suppression definitive de ${target}. Cette action est journalisee et irreversible cote liste.`;
+      return `Suppression définitive de ${target}. Cette action est journalisée et irréversible côté liste.`;
     },
   };
 }
@@ -1347,23 +1441,26 @@ function commonLabels(): Record<string, string> {
     nom: 'Nom',
     full_name: 'Nom complet',
     email: 'Email',
-    roles: 'Roles',
+    roles: 'Rôles',
     commune_id: 'Commune',
     active: 'Actif',
+    subscription_status: 'Abonnement',
+    subscription_started_at: 'Début abonnement',
+    subscription_expires_at: 'Expiration abonnement',
+    subscription_active: 'Abonnement valide',
+    public_visible: 'Visible public',
     status: 'Statut',
     matricule: 'Matricule',
-    grade: 'Grade',
     date_prise_fonction: 'Prise de fonction',
-    formation_nasla: 'NASLA',
-    region: 'Region',
-    departement: 'Departement',
+    region: 'Région',
+    departement: 'Département',
     adresse: 'Adresse',
-    telephone: 'Telephone',
-    theme_color: 'Couleur theme',
+    telephone: 'Téléphone',
+    theme_color: 'Couleur thème',
     type_zone: 'Type',
     parent_id: 'Zone parente',
     description: 'Description',
-    category_id: 'Categorie',
+    category_id: 'Catégorie',
     type_id: 'Type',
     intervention_id: 'Intervention',
     intervention_ids: 'Infractions',
@@ -1372,39 +1469,41 @@ function commonLabels(): Record<string, string> {
     sujet_paiement: 'Payant',
     montant_fcfa: 'Montant FCFA',
     amount_initial_fcfa: 'Montant FCFA',
-    amount_paid_fcfa: 'Montant encaisse',
-    delai_paiement_jours: 'Delai',
-    taux_penalite_basis_points: 'Penalite',
-    reference_deliberation: 'Deliberation',
-    pv_number: 'Numero PV',
-    verbalized_name: 'Verbalise',
+    amount_paid_fcfa: 'Montant encaissé',
+    delai_paiement_jours: 'Délai',
+    taux_penalite_basis_points: 'Pénalité',
+    reference_deliberation: 'Délibération',
+    pv_number: 'Numéro PV',
+    verbalized_name: 'Verbalisé',
     verbalized_identifier: 'Identifiant',
-    verbalized_first_name: 'Prenom',
+    verbalized_first_name: 'Prénom',
     verbalized_last_name: 'Nom',
-    verbalized_identity_type: 'Type identite',
-    verbalized_identity_number: 'Numero identite',
-    verbalized_phone: 'Telephone',
+    verbalized_identity_type: "Type d'identité",
+    verbalized_identity_number: 'Numéro identité',
+    verbalized_phone: 'Téléphone',
     verbalized_address: 'Adresse',
     vehicle_plate: 'Plaque',
     vehicle_registration_card_number: 'Carte grise',
     vehicle_make: 'Marque',
-    vehicle_model: 'Modele',
+    vehicle_model: 'Modèle',
     vehicle_color: 'Couleur',
-    vehicle_owner_name: 'Proprietaire',
+    vehicle_owner_name: 'Propriétaire',
     gps_latitude: 'Latitude',
     gps_longitude: 'Longitude',
     notes_internes: 'Notes internes',
-    created_at: 'Cree le',
-    updated_at: 'Mis a jour',
-    date_debut: 'Debut',
+    created_at: 'Créé le',
+    updated_at: 'Mis à jour',
+    date_debut: 'Début',
     date_fin: 'Fin',
+    date_debut_prevue: 'Début prévu',
+    date_fin_prevue: 'Fin prévue',
     zone_id: 'Zone',
-    signalement_number: 'Numero',
+    signalement_number: 'Numéro',
     type_incident: 'Incident',
     location_description: 'Lieu',
     contact_anonyme: 'Anonyme',
-    entity_type: 'Entite',
-    entity_id: 'Entite ID',
+    entity_type: 'Entité',
+    entity_id: 'Entité ID',
     user_id: 'Utilisateur',
     action: 'Action',
     ip_address: 'IP',
