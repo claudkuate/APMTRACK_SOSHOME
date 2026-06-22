@@ -8,7 +8,7 @@ import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
     <main class="relative min-h-screen">
       <!-- Fond : photo de Yaoundé fixe + voile clair pour la lisibilité -->
       <img
-        src="/yaounde-login-hero.png"
+        src="/yaounde-reunification-login-hero.png"
         alt=""
         aria-hidden="true"
         class="pointer-events-none fixed inset-0 -z-20 h-full w-full select-none object-cover"
