@@ -81,7 +81,7 @@ class ProfilePage extends StatelessWidget {
               ),
               SizedBox(height: 8),
               Text(
-                'APMTRACK mobile est online-first. Les brouillons locaux peuvent etre saisis sans reseau ; seuls les PV synchronises par le serveur sont officiels, avec numero, montant et QR.',
+                'G-APM mobile est online-first. Les brouillons locaux peuvent etre saisis sans reseau ; seuls les PV synchronises par le serveur sont officiels, avec numero, montant et QR.',
                 style: TextStyle(color: apmMuted),
               ),
             ],

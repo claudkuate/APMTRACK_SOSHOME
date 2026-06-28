@@ -2,11 +2,13 @@ import { Component, HostListener, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { Router, RouterLink } from '@angular/router';
 
+import { I18nService } from '../../core/i18n/i18n.service';
+import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { AuthService } from '../../core/services/auth.service';
 
 @Component({
   selector: 'app-login-page',
-  imports: [ReactiveFormsModule, RouterLink],
+  imports: [ReactiveFormsModule, RouterLink, AutoTranslatePipe],
   template: `
     <main class="relative min-h-screen w-full overflow-hidden bg-[var(--sidebar-bottom)]">
       <!-- Couche image plein écran (parallaxe souris) -->
@@ -33,8 +35,8 @@ import { AuthService } from '../../core/services/auth.service';
             <img class="brand-logo" src="/armoiries-cameroun.svg" alt="Armoiries de la République du Cameroun" />
           </span>
           <div class="min-w-0 text-white">
-            <strong class="block text-xl">APMTRACK</strong>
-            <span class="text-sm text-slate-200">Gestion Police Municipale</span>
+            <strong class="block text-xl">G-APM</strong>
+            <span class="text-sm text-slate-200">{{ 'Gestion des Activités de Police Municipale' | auto }}</span>
           </div>
         </header>
 
@@ -46,26 +48,26 @@ import { AuthService } from '../../core/services/auth.service';
             class="min-w-0 max-w-xl text-white [transition:transform_180ms_ease-out] [will-change:transform]"
             [style.transform]="textTransform()"
           >
-            <p class="mb-3 text-sm font-bold uppercase tracking-wide text-[var(--cameroon-yellow)]">Back-office</p>
+            <p class="mb-3 text-sm font-bold uppercase tracking-wide text-[var(--cameroon-yellow)]">{{ 'Back-office' | auto }}</p>
             <h1 class="break-words text-3xl font-black leading-tight drop-shadow-[0_2px_12px_rgba(0,0,0,0.45)] sm:text-4xl md:text-5xl">
-              Administration communale sobre et tracable.
+              {{ 'Administration communale sobre et tracable.' | auto }}
             </h1>
             <p class="mt-5 max-w-lg text-slate-100 drop-shadow-[0_1px_8px_rgba(0,0,0,0.5)]">
-              Acces reserve aux profils autorises. Les roles et les restrictions de commune sont verifies par le backend.
+              {{ 'Acces reserve aux profils autorises. Les roles et les restrictions de commune sont verifies par le backend.' | auto }}
             </p>
 
             <nav class="mt-7 flex flex-wrap gap-2 text-sm">
               <a routerLink="/public/agent" class="btn-ghost border-white/25 bg-white/10 text-white backdrop-blur-sm">
-                Verifier agent
+                {{ 'Verifier agent' | auto }}
               </a>
               <a routerLink="/public/pv" class="btn-ghost border-white/25 bg-white/10 text-white backdrop-blur-sm">
-                Verifier PV
+                {{ 'Verifier PV' | auto }}
               </a>
               <a
                 routerLink="/public/signalement"
                 class="btn-ghost border-white/25 bg-white/10 text-white backdrop-blur-sm"
               >
-                Signalement
+                {{ 'Signalement' | auto }}
               </a>
             </nav>
           </div>
@@ -75,9 +77,9 @@ import { AuthService } from '../../core/services/auth.service';
             [formGroup]="form"
             (ngSubmit)="submit()"
           >
-            <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Session</p>
-            <h2 class="mt-1 text-2xl font-black">Connexion</h2>
-            <p class="mt-2 text-sm text-[var(--text-muted)]">Utilise un compte APMTRACK actif.</p>
+            <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'Session' | auto }}</p>
+            <h2 class="mt-1 text-2xl font-black">{{ 'Connexion' | auto }}</h2>
+            <p class="mt-2 text-sm text-[var(--text-muted)]">{{ 'Utilise un compte G-APM actif.' | auto }}</p>
 
             <div class="mt-6 grid gap-4">
               <div class="field">
@@ -85,7 +87,7 @@ import { AuthService } from '../../core/services/auth.service';
                 <input id="email" type="email" formControlName="email" autocomplete="email" />
               </div>
               <div class="field">
-                <label for="password">Mot de passe</label>
+                <label for="password">{{ 'Mot de passe' | auto }}</label>
                 <input id="password" type="password" formControlName="password" autocomplete="current-password" />
               </div>
             </div>
@@ -97,7 +99,7 @@ import { AuthService } from '../../core/services/auth.service';
             }
 
             <button type="submit" class="btn-primary mt-6 w-full" [disabled]="form.invalid || loading()">
-              {{ loading() ? 'Connexion...' : 'Se connecter' }}
+              {{ (loading() ? 'Connexion...' : 'Se connecter') | auto }}
             </button>
           </form>
         </div>
@@ -109,6 +111,7 @@ export class LoginPage {
   private readonly fb = inject(FormBuilder);
   private readonly auth = inject(AuthService);
   private readonly router = inject(Router);
+  private readonly i18n = inject(I18nService);
 
   protected readonly loading = signal(false);
   protected readonly error = signal<string | null>(null);
@@ -153,7 +156,7 @@ export class LoginPage {
     this.auth.login(email, password).subscribe({
       next: () => this.router.navigateByUrl('/dashboard'),
       error: () => {
-        this.error.set('Identifiants invalides ou compte inactif.');
+        this.error.set(this.i18n.auto('Identifiants invalides ou compte inactif.'));
         this.loading.set(false);
       },
     });

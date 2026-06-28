@@ -3,31 +3,35 @@ import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 
 import { apiBaseUrl } from '../../core/config/runtime-config';
+import { I18nService } from '../../core/i18n/i18n.service';
+import { TranslatePipe } from '../../core/i18n/translate.pipe';
 import { ApiService } from '../../core/services/api.service';
-import { formatPublicEntries } from './public-display';
+import { HelpTipComponent } from '../../shared/ui/help-tip.component';
+import { PublicEntry, formatPublicEntries, publicStatusClasses } from './public-display';
 
 @Component({
   selector: 'app-public-verify-page',
-  imports: [FormsModule],
+  imports: [FormsModule, TranslatePipe, HelpTipComponent],
   template: `
     <section class="grid min-w-0 gap-5 lg:grid-cols-[0.8fr_1.2fr]">
       <div class="min-w-0">
-        <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Verification publique</p>
-        <h1 class="mt-1 break-words text-2xl font-black sm:text-3xl">
-          {{ mode() === 'agent' ? 'Verifier un agent' : 'Verifier un PV' }}
+        <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'public.verify.eyebrow' | t }}</p>
+        <h1 class="mt-1 flex items-center gap-2 break-words text-2xl font-black sm:text-3xl">
+          {{ (mode() === 'agent' ? 'public.verify.agent.title' : 'public.verify.pv.title') | t }}
+          <app-help-tip [text]="(mode() === 'agent' ? 'public.verify.agent.help' : 'public.verify.pv.help') | t" />
         </h1>
-        <p class="mt-3 text-[var(--text-muted)]">
-          Les donnees affichees sont limitees aux informations utiles a la verification publique.
-        </p>
+        <p class="mt-3 text-[var(--text-muted)]">{{ 'public.verify.subtitle' | t }}</p>
       </div>
 
       <div class="panel min-w-0 p-5 shadow-[var(--shadow-soft)]">
         <div class="grid gap-3 sm:grid-cols-[1fr_auto]">
           <div class="field min-w-0">
-            <label>{{ mode() === 'agent' ? 'Matricule agent' : 'Numero PV' }}</label>
+            <label>{{ (mode() === 'agent' ? 'public.verify.agent.label' : 'public.verify.pv.label') | t }}</label>
             <input [(ngModel)]="value" [placeholder]="mode() === 'agent' ? 'APM-YDE1-001' : 'PV-YDE1-2026-000001'" />
           </div>
-          <button type="button" class="btn-primary w-full self-end sm:w-auto" (click)="verify()">Verifier</button>
+          <button type="button" class="btn-primary w-full self-end sm:w-auto" (click)="verify()">
+            {{ 'public.verify.submit' | t }}
+          </button>
         </div>
 
         @if (error()) {
@@ -45,7 +49,7 @@ import { formatPublicEntries } from './public-display';
                 @if (photoUrl(); as photo) {
                   <img
                     [src]="photo"
-                    alt="Photo de l'agent"
+                    [alt]="'public.verify.agent.photoAlt' | t"
                     class="h-full w-full object-cover"
                     (error)="onPhotoError()"
                   />
@@ -56,12 +60,18 @@ import { formatPublicEntries } from './public-display';
             }
             <dl class="grid flex-1 gap-3 sm:grid-cols-2">
               @for (item of entries(); track item.key) {
-                <div class="rounded-md bg-[var(--surface-muted)] p-3">
+                <div [class]="cardClass(item)">
                   <dt class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ item.label }}</dt>
                   <dd class="mt-1 font-black">{{ item.value }}</dd>
                 </div>
               }
             </dl>
+          </div>
+        }
+
+        @if (result() || error()) {
+          <div class="mt-4 flex justify-end">
+            <button type="button" class="btn-ghost" (click)="reset()">{{ 'common.close' | t }}</button>
           </div>
         }
       </div>
@@ -71,6 +81,7 @@ import { formatPublicEntries } from './public-display';
 export class PublicVerifyPage implements OnInit {
   private readonly route = inject(ActivatedRoute);
   private readonly api = inject(ApiService);
+  protected readonly i18n = inject(I18nService);
 
   protected readonly mode = signal<'agent' | 'pv'>('agent');
   protected readonly result = signal<Record<string, unknown> | null>(null);
@@ -81,17 +92,14 @@ export class PublicVerifyPage implements OnInit {
   ngOnInit(): void {
     this.route.data.subscribe((data) => {
       this.mode.set(data['mode'] === 'pv' ? 'pv' : 'agent');
-      this.result.set(null);
-      this.error.set(null);
-      this.photoUrl.set(null);
-      this.value = '';
+      this.reset();
     });
   }
 
   protected verify(): void {
     const value = this.value.trim();
     if (!value) {
-      this.error.set('Valeur requise.');
+      this.error.set(this.i18n.t('common.required'));
       return;
     }
     const path =
@@ -111,13 +119,33 @@ export class PublicVerifyPage implements OnInit {
       error: () => {
         this.result.set(null);
         this.photoUrl.set(null);
-        this.error.set('Aucun resultat verifiable pour cette reference.');
+        this.error.set(
+          this.i18n.t(
+            this.mode() === 'agent' ? 'public.verify.agent.notFound' : 'public.verify.pv.notFound',
+          ),
+        );
       },
     });
   }
 
+  /** Réinitialise la vue (bouton Fermer — remarque 7). */
+  protected reset(): void {
+    this.result.set(null);
+    this.error.set(null);
+    this.photoUrl.set(null);
+    this.value = '';
+  }
+
   protected entries() {
-    return formatPublicEntries(this.result());
+    return formatPublicEntries(this.result(), this.i18n);
+  }
+
+  /** Fond coloré pour le champ « Statut », neutre pour les autres. */
+  protected cardClass(item: PublicEntry): string {
+    const base = 'rounded-md p-3';
+    return item.key === 'status'
+      ? `${base} ${publicStatusClasses(item.value)}`
+      : `${base} bg-[var(--surface-muted)]`;
   }
 
   protected initials(name: unknown): string {

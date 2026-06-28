@@ -12,6 +12,7 @@ use crate::extractors::ApiJson;
 use crate::helpers::{resolve_commune_filter, validate_gps};
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
+use crate::modules::whatsapp;
 use crate::modules::rbac::Role;
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::sequences::{next_document_sequence, SEQUENCE_SIGNALEMENT};
@@ -29,7 +30,25 @@ pub fn router() -> Router<AppState> {
             "/signalements/{id}/status",
             axum::routing::patch(patch_signalement_status),
         )
+        .route(
+            "/signalements/{id}/escalate",
+            axum::routing::post(escalate_signalement),
+        )
 }
+
+/// Autorités de tutelle vers lesquelles un signalement peut être escaladé.
+const ESCALATION_TARGETS: [&str; 4] = ["MAIRIE", "NASLA", "MINDDEVEL", "MINAT"];
+
+/// Types d'action contestée par un signalement (plainte contre un agent APM).
+/// Liste fixe — le citoyen choisit l'une de ces valeurs, stockées telles quelles
+/// dans `type_incident` (libellé canonique FR).
+const COMPLAINT_TYPES: [&str; 5] = [
+    "Amende",
+    "Verbalisation",
+    "Mise sous scellé",
+    "Mise en fourrière",
+    "Autre",
+];
 
 pub fn public_router() -> Router<AppState> {
     Router::new()
@@ -57,11 +76,17 @@ pub struct SignalementResponse {
     pub location_description: String,
     pub lieu_dit: Option<String>,
     pub description: String,
+    pub reported_agent_matricule: Option<String>,
+    pub reported_agent_nom: Option<String>,
+    pub incident_datetime: Option<DateTime<Utc>>,
+    pub pv_number_ref: Option<String>,
     pub contact_anonyme: bool,
     pub contact_name: Option<String>,
     pub contact_phone: Option<String>,
     pub contact_info: Option<String>,
     pub status: String,
+    pub escalation_target: Option<String>,
+    pub escalated_at: Option<DateTime<Utc>>,
     pub gps_latitude: Option<f64>,
     pub gps_longitude: Option<f64>,
     pub created_at: DateTime<Utc>,
@@ -70,8 +95,9 @@ pub struct SignalementResponse {
 
 /// Colonnes exposées par les SELECT (lat/lon castées en double precision).
 const SIGNALEMENT_COLUMNS: &str = "id, commune_id, zone_id, signalement_number, type_incident, \
-    location_description, lieu_dit, description, contact_anonyme, contact_name, contact_phone, \
-    contact_info, status, \
+    location_description, lieu_dit, description, reported_agent_matricule, reported_agent_nom, \
+    incident_datetime, pv_number_ref, contact_anonyme, contact_name, contact_phone, \
+    contact_info, status, escalation_target, escalated_at, \
     gps_latitude::double precision AS gps_latitude, \
     gps_longitude::double precision AS gps_longitude, \
     created_at, updated_at";
@@ -100,6 +126,10 @@ pub struct CreateSignalementRequest {
     pub location_description: Option<String>,
     pub lieu_dit: Option<String>,
     pub description: String,
+    pub reported_agent_matricule: Option<String>,
+    pub reported_agent_nom: Option<String>,
+    pub incident_datetime: Option<DateTime<Utc>>,
+    pub pv_number_ref: Option<String>,
     pub contact_anonyme: Option<bool>,
     pub contact_name: Option<String>,
     pub contact_phone: Option<String>,
@@ -124,6 +154,12 @@ pub struct PatchSignalementStatusRequest {
     pub status: String,
     pub admin_notes: Option<String>,
     pub assigned_to: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EscalateSignalementRequest {
+    pub target: String,
+    pub note: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,9 +219,12 @@ async fn create_signalement_public(
         state.config.rate_limit_window_seconds,
     )?;
 
-    let incident_input = required_text(payload.type_incident, "type_incident")?;
+    let type_incident = validate_complaint_type(payload.type_incident)?;
     let description = required_text(payload.description, "description")?;
     let lieu_dit = clean_optional(payload.lieu_dit);
+    let reported_agent_matricule = clean_optional(payload.reported_agent_matricule);
+    let reported_agent_nom = clean_optional(payload.reported_agent_nom);
+    let pv_number_ref = clean_optional(payload.pv_number_ref);
     validate_gps(payload.gps_latitude, payload.gps_longitude)?;
 
     let mut tx = state.db.begin().await?;
@@ -207,8 +246,6 @@ async fn create_signalement_public(
             .await?;
     let commune_code = commune_code.ok_or_else(|| ApiError::not_found("Commune introuvable"))?;
 
-    let type_incident = resolve_public_incident_type(&mut tx, payload.commune_id, &incident_input)
-        .await?;
     let (zone_id, location) =
         resolve_public_signalement_location(&mut tx, payload.commune_id, payload.zone_id, payload.location_description, lieu_dit.as_deref())
             .await?;
@@ -231,10 +268,11 @@ async fn create_signalement_public(
         r#"
         INSERT INTO signalements (
             id, commune_id, zone_id, signalement_number, type_incident,
-            location_description, lieu_dit, description, contact_anonyme,
-            contact_name, contact_phone, contact_info,
+            location_description, lieu_dit, description,
+            reported_agent_matricule, reported_agent_nom, incident_datetime, pv_number_ref,
+            contact_anonyme, contact_name, contact_phone, contact_info,
             gps_latitude, gps_longitude
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(id)
@@ -245,6 +283,10 @@ async fn create_signalement_public(
     .bind(&location)
     .bind(lieu_dit.as_deref())
     .bind(&description)
+    .bind(reported_agent_matricule.as_deref())
+    .bind(reported_agent_nom.as_deref())
+    .bind(payload.incident_datetime)
+    .bind(pv_number_ref.as_deref())
     .bind(anonyme)
     .bind(contact_name.as_deref())
     .bind(contact_phone.as_deref())
@@ -256,6 +298,22 @@ async fn create_signalement_public(
     .map_err(map_database_error)?;
 
     tx.commit().await?;
+
+    // Notification WhatsApp du numéro de suivi (best-effort, sans bloquer la
+    // réponse) : uniquement si la fonctionnalité est configurée et que le
+    // plaignant a fourni un contact non anonyme.
+    if let (Some(cfg), Some(phone)) = (state.config.whatsapp.clone(), contact_phone.clone()) {
+        let body = format!(
+            "APMTRACK : votre signalement a bien été reçu. Numéro de suivi : {number}. \
+             Suivez son avancement sur {}/public/signalement-suivi",
+            state.config.public_web_url
+        );
+        tokio::spawn(async move {
+            if let Err(error) = whatsapp::send_text(&cfg, &phone, &body).await {
+                tracing::warn!(%error, "envoi WhatsApp du numéro de suivi échoué");
+            }
+        });
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -361,6 +419,61 @@ async fn patch_signalement_status(
     Ok(Json(load_signalement(&state.db, id).await?))
 }
 
+/// Escalade vers une autorité de tutelle (Mairie / NASLA / MINDDEVEL / MINAT).
+/// La transmission reste tracée via `audit_logs` ; la cible et l'horodatage
+/// sont conservés sur le signalement.
+async fn escalate_signalement(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<Uuid>,
+    ApiJson(payload): ApiJson<EscalateSignalementRequest>,
+) -> Result<Json<SignalementResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune])?;
+    let existing = load_signalement(&state.db, id).await?;
+    auth_user.require_commune_access(existing.commune_id)?;
+
+    let target = payload.target.trim().to_uppercase();
+    if !ESCALATION_TARGETS.contains(&target.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "Cible d'escalade invalide: {} (attendu: {})",
+            payload.target,
+            ESCALATION_TARGETS.join(", ")
+        )));
+    }
+    let note = clean_optional(payload.note);
+
+    sqlx::query(
+        r#"
+        UPDATE signalements
+        SET escalation_target = $2, escalated_at = now(), escalated_by = $3,
+            escalation_note = COALESCE($4, escalation_note), updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(&target)
+    .bind(auth_user.id)
+    .bind(note.as_deref())
+    .execute(&state.db)
+    .await?;
+
+    audit::record_for_commune(
+        &state.db,
+        Some(existing.commune_id),
+        Some(auth_user.id),
+        "SIGNALEMENT_ESCALATED",
+        "signalements",
+        Some(id),
+        Some(json!({ "escalation_target": existing.escalation_target })),
+        Some(json!({ "escalation_target": target, "note": note })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+
+    Ok(Json(load_signalement(&state.db, id).await?))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,11 +499,17 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
         location_description: row.get("location_description"),
         lieu_dit: row.get("lieu_dit"),
         description: row.get("description"),
+        reported_agent_matricule: row.get("reported_agent_matricule"),
+        reported_agent_nom: row.get("reported_agent_nom"),
+        incident_datetime: row.get("incident_datetime"),
+        pv_number_ref: row.get("pv_number_ref"),
         contact_anonyme: row.get("contact_anonyme"),
         contact_name: row.get("contact_name"),
         contact_phone: row.get("contact_phone"),
         contact_info: row.get("contact_info"),
         status: row.get("status"),
+        escalation_target: row.get("escalation_target"),
+        escalated_at: row.get("escalated_at"),
         gps_latitude: row.get("gps_latitude"),
         gps_longitude: row.get("gps_longitude"),
         created_at: row.get("created_at"),
@@ -398,59 +517,20 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
     }
 }
 
-async fn resolve_public_incident_type(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    commune_id: Uuid,
-    input: &str,
-) -> Result<String, ApiError> {
-    let incident_id = Uuid::parse_str(input).ok();
-    let type_name: Option<String> = sqlx::query_scalar(
-        r#"
-        SELECT it.nom
-        FROM intervention_types it
-        INNER JOIN intervention_categories c ON c.id = it.category_id
-        WHERE it.commune_id = $1
-          AND it.deleted_at IS NULL
-          AND c.deleted_at IS NULL
-          AND it.active = true
-          AND c.active = true
-          AND (it.id = $2 OR lower(it.nom) = lower($3))
-        LIMIT 1
-        "#,
-    )
-    .bind(commune_id)
-    .bind(incident_id)
-    .bind(input)
-    .fetch_optional(&mut **tx)
-    .await?;
-
-    if let Some(name) = type_name {
-        return Ok(name);
-    }
-
-    let active_types: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COUNT(*)
-        FROM intervention_types it
-        INNER JOIN intervention_categories c ON c.id = it.category_id
-        WHERE it.commune_id = $1
-          AND it.deleted_at IS NULL
-          AND c.deleted_at IS NULL
-          AND it.active = true
-          AND c.active = true
-        "#,
-    )
-    .bind(commune_id)
-    .fetch_one(&mut **tx)
-    .await?;
-
-    if active_types > 0 {
-        Err(ApiError::bad_request(
-            "Type d'incident invalide pour cette commune",
-        ))
-    } else {
-        Ok(input.to_string())
-    }
+/// Valide le type d'action contestée contre la liste fixe `COMPLAINT_TYPES`
+/// et renvoie le libellé canonique (comparaison insensible à la casse).
+fn validate_complaint_type(value: String) -> Result<String, ApiError> {
+    let trimmed = value.trim();
+    COMPLAINT_TYPES
+        .iter()
+        .find(|candidate| candidate.eq_ignore_ascii_case(trimmed))
+        .map(|candidate| candidate.to_string())
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Type de signalement invalide (attendu: {})",
+                COMPLAINT_TYPES.join(", ")
+            ))
+        })
 }
 
 async fn resolve_public_signalement_location(

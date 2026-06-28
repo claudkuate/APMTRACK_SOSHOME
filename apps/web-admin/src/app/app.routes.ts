@@ -52,11 +52,16 @@ export const routes: Routes = [
           ),
       },
       {
-        path: 'missions',
+        path: 'a-propos',
         loadComponent: () =>
           import('./features/public/public-missions.page').then(
             (module) => module.PublicMissionsPage,
           ),
+      },
+      {
+        path: 'missions',
+        pathMatch: 'full',
+        redirectTo: 'a-propos',
       },
     ],
   },

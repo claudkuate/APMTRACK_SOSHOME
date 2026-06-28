@@ -32,6 +32,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Démarre le scheduler des rapports quotidiens au Maire (no-op si désactivé).
+    modules::reports::spawn_if_enabled(state.clone());
+
     let app = apmtrack_api::build_app(state);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
 

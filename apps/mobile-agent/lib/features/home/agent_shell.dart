@@ -75,7 +75,7 @@ class _AgentShellState extends State<AgentShell> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('APMTRACK Agent'),
+            const Text('G-APM Agent'),
             if (widget.controller.profile != null)
               Text(
                 widget.controller.profile!.commune.nom,

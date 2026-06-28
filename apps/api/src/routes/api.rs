@@ -16,10 +16,12 @@ pub fn router() -> Router<AppState> {
         .merge(modules::pvs::router())
         .merge(modules::payments::router())
         .merge(modules::signalements::router())
+        .merge(modules::fourrieres::router())
         .merge(modules::patrouilles::router())
         .merge(modules::mobile::router())
         .merge(modules::dashboard::router())
         .merge(modules::geo::router())
+        .merge(modules::geography::router())
         .merge(modules::audit_logs::router())
         .merge(modules::exports::router())
         .merge(modules::search::router())
@@ -28,7 +30,8 @@ pub fn router() -> Router<AppState> {
             modules::agents::public_router()
                 .merge(modules::pvs::public_router())
                 .merge(modules::signalements::public_router())
-                .merge(modules::communes::public_router()),
+                .merge(modules::communes::public_router())
+                .merge(modules::geography::public_router()),
         )
 }
 

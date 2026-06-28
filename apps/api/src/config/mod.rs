@@ -15,12 +15,38 @@ pub struct AppConfig {
     pub jwt_refresh_token_ttl_days: i64,
     pub cors_allowed_origins: Vec<String>,
     pub public_api_url: String,
+    pub public_web_url: String,
     pub run_migrations_on_startup: bool,
     pub rate_limit_enabled: bool,
     pub rate_limit_window_seconds: u64,
     pub rate_limit_login_max: u32,
     pub rate_limit_public_max: u32,
     pub s3: Option<S3Config>,
+    pub smtp: Option<SmtpConfig>,
+    pub whatsapp: Option<WhatsAppConfig>,
+    pub daily_report_enabled: bool,
+    pub daily_report_hour_utc: u32,
+}
+
+/// SMTP configuration for outbound email (daily mayor reports). Optional: when
+/// the required variables are absent, email delivery is reported as disabled.
+#[derive(Clone, Debug)]
+pub struct SmtpConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub from: String,
+}
+
+/// WhatsApp Cloud API (Meta) configuration for outbound notifications (citizen
+/// report tracking number). Optional: when the required variables are absent,
+/// WhatsApp delivery is silently skipped.
+#[derive(Clone, Debug)]
+pub struct WhatsAppConfig {
+    pub api_base_url: String,
+    pub phone_number_id: String,
+    pub access_token: String,
 }
 
 /// Object storage (MinIO/S3) configuration for PV photos. Optional: when the
@@ -87,6 +113,11 @@ impl AppConfig {
 
         let public_api_url =
             env::var("PUBLIC_API_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let public_web_url = env::var("PUBLIC_WEB_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| public_api_url.clone());
         let run_migrations_on_startup = optional_bool("RUN_MIGRATIONS_ON_STARTUP", false);
         let rate_limit_enabled = optional_bool("RATE_LIMIT_ENABLED", true);
         let rate_limit_window_seconds =
@@ -97,6 +128,10 @@ impl AppConfig {
             optional_u32("RATE_LIMIT_PUBLIC_MAX", 60, "RATE_LIMIT_PUBLIC_MAX")?;
 
         let s3 = load_s3_config();
+        let smtp = load_smtp_config();
+        let whatsapp = load_whatsapp_config();
+        let daily_report_enabled = optional_bool("DAILY_REPORT_ENABLED", false);
+        let daily_report_hour_utc = optional_hour("DAILY_REPORT_HOUR_UTC", 5)?;
 
         Ok(Self {
             app_env,
@@ -110,12 +145,17 @@ impl AppConfig {
             jwt_refresh_token_ttl_days,
             cors_allowed_origins,
             public_api_url,
+            public_web_url,
             run_migrations_on_startup,
             rate_limit_enabled,
             rate_limit_window_seconds,
             rate_limit_login_max,
             rate_limit_public_max,
             s3,
+            smtp,
+            whatsapp,
+            daily_report_enabled,
+            daily_report_hour_utc,
         })
     }
 }
@@ -135,6 +175,59 @@ fn load_s3_config() -> Option<S3Config> {
         access_key,
         secret_key,
     })
+}
+
+fn load_smtp_config() -> Option<SmtpConfig> {
+    let host = env::var("SMTP_HOST").ok().filter(|v| !v.trim().is_empty())?;
+    let from = env::var("SMTP_FROM").ok().filter(|v| !v.trim().is_empty())?;
+    let port = env::var("SMTP_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(587);
+    let username = env::var("SMTP_USERNAME")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let password = env::var("SMTP_PASSWORD")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    Some(SmtpConfig {
+        host,
+        port,
+        username,
+        password,
+        from,
+    })
+}
+
+fn load_whatsapp_config() -> Option<WhatsAppConfig> {
+    let phone_number_id = env::var("WHATSAPP_PHONE_NUMBER_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
+    let access_token = env::var("WHATSAPP_ACCESS_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
+    Some(WhatsAppConfig {
+        api_base_url: env::var("WHATSAPP_API_BASE_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| "https://graph.facebook.com/v21.0".to_string()),
+        phone_number_id,
+        access_token,
+    })
+}
+
+/// Heure UTC (0–23) d'envoi du rapport quotidien. Tolère 0 (minuit) et borne à 23.
+fn optional_hour(name: &'static str, default: u32) -> Result<u32, ConfigError> {
+    match env::var(name) {
+        Ok(value) => {
+            let parsed = value
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| ConfigError::InvalidInteger { name, value })?;
+            Ok(parsed.min(23))
+        }
+        Err(_) => Ok(default),
+    }
 }
 
 fn required_env(name: &'static str) -> Result<String, ConfigError> {

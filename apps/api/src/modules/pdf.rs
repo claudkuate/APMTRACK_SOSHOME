@@ -258,7 +258,7 @@ fn build_pv_pdf(
 
     // Pied de page
     current_layer.use_text(
-        "Document généré par le système APMTRACK",
+        "Document généré par le système G-APM",
         8.0,
         Mm(20.0),
         Mm(20.0),
@@ -363,7 +363,7 @@ fn build_receipt_pdf(
     current_layer.use_text("PAIEMENT VALIDÉ", 14.0, Mm(20.0), Mm(48.0), &font);
 
     current_layer.use_text(
-        "Document généré par APMTRACK",
+        "Document généré par G-APM",
         8.0,
         Mm(20.0),
         Mm(15.0),

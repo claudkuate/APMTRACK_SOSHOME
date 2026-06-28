@@ -90,6 +90,16 @@ export interface ResourceAction {
   statusTransitions?: Record<string, string[]>;
   /** Extra fields submitted alongside the status (reason, notes, assignment...). */
   statusExtra?: StatusExtraField[];
+  /** Body key carrying the selected value (default 'status'). Use 'target' for escalation. */
+  statusKey?: string;
+  /** HTTP method for a 'status' action (default 'patch'). */
+  method?: 'patch' | 'post';
+  /** Override the select label in the dialog (default 'Nouveau statut'). */
+  selectLabel?: string;
+  /** Override the "current value" caption in the dialog (default 'Statut courant'). */
+  currentLabel?: string;
+  /** Override the success toast (default 'Statut mis a jour.'). */
+  successMessage?: string;
 }
 
 /** Section « entités liées » affichée sous le détail d'une fiche. */
@@ -168,6 +178,12 @@ const statusOptions: Record<string, SelectOption[]> = {
     option('CLOTUREE', 'Clôturée'),
     option('ANNULEE', 'Annulée'),
   ],
+  fourrieres: [
+    option('EN_FOURRIERE', 'En fourrière'),
+    option('RESTITUE', 'Restitué'),
+    option('VENDU', 'Vendu'),
+    option('DETRUIT', 'Détruit'),
+  ],
 };
 
 const pvSubjectTypeOptions: SelectOption[] = [
@@ -180,6 +196,18 @@ const communeRelation: RelationConfig = {
   labelKey: 'nom',
   metaKey: 'code',
   statusKey: 'active',
+};
+
+const regionRelation: RelationConfig = {
+  endpoint: '/api/v1/geography/regions',
+  labelKey: 'nom',
+  metaKey: 'code',
+};
+
+const departementRelation: RelationConfig = {
+  endpoint: '/api/v1/geography/departements',
+  labelKey: 'nom',
+  parentKey: 'region_id',
 };
 
 const zoneRelation: RelationConfig = {
@@ -307,8 +335,8 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     createFields: [
       field('code', 'Code commune', 'text', true, 'YDE1'),
       field('nom', 'Nom officiel', 'text', true),
-      field('region', 'Région', 'text', true),
-      field('departement', 'Département', 'text', true),
+      relationField('region_id', 'Région', regionRelation, true),
+      relationField('departement_id', 'Département', departementRelation, true, undefined, 'region_id'),
       field('adresse', 'Adresse', 'text'),
       field('telephone', 'Téléphone', 'text'),
       field('email', 'Email', 'email'),
@@ -1169,6 +1197,8 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'location_description',
       'description',
       'status',
+      'escalation_target',
+      'escalated_at',
       'contact_anonyme',
       'created_at',
       'updated_at',
@@ -1195,6 +1225,71 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
             placeholder: 'Suivi interne (visible back-office uniquement).',
           },
           { key: 'assigned_to', label: 'Affecter à', type: 'relation', relation: userRelation },
+        ],
+        roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
+      }),
+      escalateAction({
+        path: (row) => `/api/v1/signalements/${row['id']}/escalate`,
+        roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
+      }),
+    ],
+  },
+  fourrieres: {
+    key: 'fourrieres',
+    title: 'Fourrières',
+    description: 'Mises en fourrière de véhicules, gardiennage et restitution.',
+    endpoint: '/api/v1/fourrieres',
+    columns: ['fourriere_number', 'vehicle_plate', 'vehicle_type', 'status', 'entered_at'],
+    secondaryColumns: ['motif'],
+    detailFields: [
+      'fourriere_number',
+      'vehicle_plate',
+      'vehicle_type',
+      'vehicle_details',
+      'motif',
+      'lieu_enlevement',
+      'status',
+      'daily_fee_fcfa',
+      'frais_gardiennage_fcfa',
+      'entered_at',
+      'released_at',
+      'released_to',
+      'commune_id',
+      'created_at',
+      'updated_at',
+    ],
+    displayRelations: { commune_id: communeRelation },
+    detail: {
+      summaryFields: ['fourriere_number', 'vehicle_plate', 'status'],
+    },
+    labels: commonLabels(),
+    createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
+    mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
+    filters: [
+      statusFilter(statusOptions['fourrieres']),
+      relationFilter('commune_id', 'Commune', communeRelation),
+    ],
+    createFields: [
+      relationField('commune_id', 'Commune', communeRelation),
+      field('vehicle_plate', 'Plaque', 'text', true),
+      field('vehicle_type', 'Type de véhicule', 'text', false, 'Berline, moto, camion…'),
+      field('vehicle_details', 'Détails véhicule', 'textarea'),
+      field('motif', 'Motif', 'textarea', true, "Raison de la mise en fourrière."),
+      field('lieu_enlevement', "Lieu d'enlèvement", 'text'),
+      field('daily_fee_fcfa', 'Tarif journalier FCFA', 'money', false, 'Frais de gardiennage / jour.'),
+    ],
+    actions: [
+      statusAction({
+        label: 'Changer le statut',
+        path: (row) => `/api/v1/fourrieres/${row['id']}/status`,
+        options: statusOptions['fourrieres'],
+        extra: [
+          {
+            key: 'released_to',
+            label: 'Restitué à',
+            type: 'text',
+            placeholder: 'Nom du propriétaire (en cas de restitution).',
+          },
         ],
         roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
       }),
@@ -1434,6 +1529,42 @@ function statusAction(config: {
   };
 }
 
+const escalationTargetOptions: SelectOption[] = [
+  option('MAIRIE', 'Mairie'),
+  option('NASLA', 'NASLA'),
+  option('MINDDEVEL', 'MINDDEVEL'),
+  option('MINAT', 'MINAT'),
+];
+
+/** Escalade d'un signalement vers une autorité de tutelle (POST /escalate). */
+function escalateAction(config: {
+  path: (row: Record<string, unknown>) => string;
+  roles?: RoleCode[];
+}): ResourceAction {
+  return {
+    label: 'Escalader',
+    kind: 'status',
+    path: config.path,
+    sensitive: true,
+    roles: config.roles,
+    method: 'post',
+    statusKey: 'target',
+    statusFromKey: 'escalation_target',
+    selectLabel: 'Autorité destinataire',
+    currentLabel: 'Escalade actuelle',
+    successMessage: 'Signalement escaladé.',
+    statusOptions: escalationTargetOptions,
+    statusExtra: [
+      {
+        key: 'note',
+        label: 'Note de transmission',
+        type: 'textarea',
+        placeholder: 'Précisions transmises à l’autorité (journalisé).',
+      },
+    ],
+  };
+}
+
 function commonLabels(): Record<string, string> {
   return {
     id: 'ID',
@@ -1450,6 +1581,18 @@ function commonLabels(): Record<string, string> {
     subscription_active: 'Abonnement valide',
     public_visible: 'Visible public',
     status: 'Statut',
+    escalation_target: 'Escaladé vers',
+    escalated_at: "Date d'escalade",
+    fourriere_number: 'Numéro fourrière',
+    vehicle_type: 'Type de véhicule',
+    vehicle_details: 'Détails véhicule',
+    motif: 'Motif',
+    lieu_enlevement: "Lieu d'enlèvement",
+    daily_fee_fcfa: 'Tarif journalier FCFA',
+    frais_gardiennage_fcfa: 'Frais de gardiennage FCFA',
+    entered_at: 'Entrée en fourrière',
+    released_at: 'Date de sortie',
+    released_to: 'Restitué à',
     matricule: 'Matricule',
     date_prise_fonction: 'Prise de fonction',
     region: 'Région',

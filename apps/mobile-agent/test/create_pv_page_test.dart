@@ -29,9 +29,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Continuer'));
-    await tester.pumpAndSettle();
-
     expect(find.text(_defautNom), findsOneWidget);
     expect(find.text(_stationnementNom), findsOneWidget);
     expect(find.text(_depotNom), findsOneWidget);
@@ -97,8 +94,6 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Continuer'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text(_stationnementNom));
     await tester.enterText(
       find.byKey(const Key('intervention-search-field')),
@@ -130,7 +125,7 @@ void main() {
     await tester.tap(find.text('Continuer'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Etape 6/6 - Revue'), findsOneWidget);
+    expect(find.text('Etape 5/5 - Revue'), findsOneWidget);
     expect(find.text(_defautNom), findsOneWidget);
     expect(find.text(_stationnementNom), findsOneWidget);
     expect(find.text(_depotNom), findsOneWidget);
@@ -140,6 +135,43 @@ void main() {
     );
     expect(find.text('Montant indicatif'), findsOneWidget);
     expect(find.text(formatFcfa(55000)), findsOneWidget);
+  });
+
+  testWidgets('offers retry when referentiel is empty and offline', (
+    tester,
+  ) async {
+    final controller = _buildEmptyController(offline: true);
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildApmtrackTheme(),
+        home: CreatePvPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Referentiel non charge'), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Reessayer'), findsOneWidget);
+    expect(find.text('Le referentiel mobile est vide.'), findsNothing);
+  });
+
+  testWidgets('shows empty message when referentiel is genuinely empty', (
+    tester,
+  ) async {
+    final controller = _buildEmptyController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildApmtrackTheme(),
+        home: CreatePvPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Le referentiel mobile est vide.'), findsOneWidget);
+    expect(find.text('Reessayer'), findsNothing);
   });
 }
 
@@ -152,6 +184,18 @@ SessionController _buildController() {
     ..session = _session
     ..status = SessionStatus.authenticated
     ..interventions = _interventions;
+}
+
+SessionController _buildEmptyController({bool offline = false}) {
+  return SessionController(
+      api: _NoopApi(),
+      store: MemorySessionStore(),
+      cache: MemoryOfflineCacheStore(),
+    )
+    ..session = _session
+    ..status = SessionStatus.authenticated
+    ..interventions = const []
+    ..offline = offline;
 }
 
 bool? _checkboxValue(WidgetTester tester, String title) {

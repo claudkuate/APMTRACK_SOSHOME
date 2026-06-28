@@ -7,6 +7,8 @@ import { Subscription, filter } from 'rxjs';
 import { ApiService } from '../core/services/api.service';
 import { AuthService } from '../core/services/auth.service';
 import { CommuneContextService } from '../core/services/commune-context.service';
+import { I18nService } from '../core/i18n/i18n.service';
+import { AutoTranslatePipe } from '../core/i18n/auto-translate.pipe';
 import { RoleCode, SearchResult } from '../shared/api-types';
 
 type IconKey =
@@ -18,6 +20,7 @@ type IconKey =
   | 'agents'
   | 'patrouilles'
   | 'zones'
+  | 'fourrieres'
   | 'referentiel'
   | 'communes'
   | 'users'
@@ -53,6 +56,8 @@ const ICONS: Record<IconKey, string> = {
   patrouilles: '<path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="m9 12 2 2 4-4"/>',
   zones:
     '<path d="m9 4 6 2 5-2v14l-5 2-6-2-5 2V6z"/><path d="M9 4v14M15 6v14"/>',
+  fourrieres:
+    '<path d="M3 13l2-5a2 2 0 0 1 1.9-1.3h10.2A2 2 0 0 1 19 8l2 5v4h-2a2 2 0 0 1-4 0H9a2 2 0 0 1-4 0H3z"/><path d="M3 13h18"/>',
   referentiel: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/>',
   communes:
     '<path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-4h6v4"/><path d="M9 10h.01M15 10h.01"/>',
@@ -66,7 +71,7 @@ const ICONS: Record<IconKey, string> = {
 
 @Component({
   selector: 'app-shell',
-  imports: [FormsModule, RouterLink, RouterLinkActive, RouterOutlet],
+  imports: [FormsModule, RouterLink, RouterLinkActive, RouterOutlet, AutoTranslatePipe],
   template: `
     <main class="min-h-screen bg-[var(--surface-canvas)] text-[var(--text-strong)]">
       <!-- Sidebar -->
@@ -81,15 +86,15 @@ const ICONS: Record<IconKey, string> = {
             <img class="brand-logo" src="/armoiries-cameroun.svg" alt="" />
           </span>
           <span class="min-w-0">
-            <span class="side-brand-name block truncate text-[1.05rem]">APMTRACK</span>
-            <span class="side-brand-sub">Police municipale</span>
+            <span class="side-brand-name block truncate text-[1.05rem]">G-APM</span>
+            <span class="side-brand-sub">{{ 'Police municipale' | auto }}</span>
           </span>
         </a>
 
         <nav class="mt-6 grid flex-1 content-start gap-5 overflow-y-auto">
           @for (group of visibleGroups(); track group.label) {
             <section class="grid gap-1">
-              <p class="side-group-label mb-1">{{ group.label }}</p>
+              <p class="side-group-label mb-1">{{ group.label | auto }}</p>
               @for (item of group.items; track item.route) {
                 <a
                   [routerLink]="item.route"
@@ -98,7 +103,7 @@ const ICONS: Record<IconKey, string> = {
                   (click)="mobileNavOpen.set(false)"
                 >
                   <span class="grid place-items-center" [innerHTML]="iconFor(item.icon)"></span>
-                  <span class="truncate">{{ item.label }}</span>
+                  <span class="truncate">{{ item.label | auto }}</span>
                   @if (badgeValue(item.badge); as count) {
                     <span class="count-badge">{{ count }}</span>
                   }
@@ -112,7 +117,7 @@ const ICONS: Record<IconKey, string> = {
           <span class="side-user-avatar" aria-hidden="true">{{ userInitials() }}</span>
           <span class="min-w-0">
             <span class="block truncate text-sm font-bold text-white">{{ user()?.full_name ?? 'Session' }}</span>
-            <span class="block truncate text-xs text-[rgba(184,220,198,0.8)]">{{ roleLabel() }}</span>
+            <span class="block truncate text-xs text-[rgba(184,220,198,0.8)]">{{ roleLabel() | auto }}</span>
           </span>
           <button
             type="button"
@@ -188,7 +193,7 @@ const ICONS: Record<IconKey, string> = {
                     [attr.aria-selected]="!commune.communeId()"
                     (click)="selectCommune(null)"
                   >
-                    Toutes les communes
+                    {{ 'Toutes les communes' | auto }}
                   </button>
                   @for (item of commune.communes(); track item.id) {
                     <button
@@ -257,9 +262,19 @@ const ICONS: Record<IconKey, string> = {
               <span class="hidden sm:block">
                 <span class="pill-online" [class.is-offline]="!commune.online()">
                   <span class="pill-online__dot" aria-hidden="true"></span>
-                  {{ commune.online() ? 'En ligne' : 'Hors ligne' }}
+                  {{ (commune.online() ? 'En ligne' : 'Hors ligne') | auto }}
                 </span>
               </span>
+
+              <select
+                class="rounded-md border border-[var(--line-subtle)] bg-white px-2 py-1.5 text-sm font-semibold"
+                [value]="i18n.lang()"
+                (change)="i18n.setLang($any($event.target).value)"
+                aria-label="Langue / Language"
+              >
+                <option value="fr">FR</option>
+                <option value="en">EN</option>
+              </select>
 
               <span class="md:hidden">
                 <button type="button" class="icon-btn" aria-label="Rechercher" (click)="openMobileSearch()">
@@ -291,14 +306,14 @@ const ICONS: Record<IconKey, string> = {
                 @if (bellOpen()) {
                   <div class="user-menu" role="menu" (click)="$event.stopPropagation()">
                     <div class="border-b border-[var(--line-subtle)] px-3 py-2">
-                      <strong class="text-sm">Notifications</strong>
+                      <strong class="text-sm">{{ 'Notifications' | auto }}</strong>
                     </div>
                     <a routerLink="/payments" class="user-menu-item justify-between" role="menuitem" (click)="bellOpen.set(false)">
-                      <span>PV en attente de paiement</span>
+                      <span>{{ 'PV en attente de paiement' | auto }}</span>
                       <span class="count-badge">{{ commune.pvEnAttente() }}</span>
                     </a>
                     <a routerLink="/signalements" class="user-menu-item justify-between" role="menuitem" (click)="bellOpen.set(false)">
-                      <span>Signalements reçus</span>
+                      <span>{{ 'Signalements reçus' | auto }}</span>
                       <span class="count-badge">{{ commune.signalementsRecus() }}</span>
                     </a>
                   </div>
@@ -372,6 +387,7 @@ export class AppShellComponent implements OnDestroy {
   private readonly router = inject(Router);
   private readonly sanitizer = inject(DomSanitizer);
   protected readonly commune = inject(CommuneContextService);
+  protected readonly i18n = inject(I18nService);
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly iconCache = new Map<IconKey, SafeHtml>();
   private readonly routerSub: Subscription;
@@ -416,6 +432,7 @@ export class AppShellComponent implements OnDestroy {
       items: [
         { label: 'Agents APM', route: '/agents', icon: 'agents', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },
         { label: 'Patrouilles', route: '/patrouilles', icon: 'patrouilles', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR', 'APM_AGENT'] },
+        { label: 'Fourrières', route: '/fourrieres', icon: 'fourrieres', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },
         { label: 'Zones géographiques', route: '/zones', icon: 'zones', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },
       ],
     },
@@ -472,9 +489,9 @@ export class AppShellComponent implements OnDestroy {
   protected communeName(): string {
     const current = this.commune.current();
     if (current) {
-      return `Commune de ${current.nom}`;
+      return `${this.i18n.auto('Commune de')} ${current.nom}`;
     }
-    return this.canSwitchCommune() ? 'Toutes les communes' : 'Périmètre communal';
+    return this.i18n.auto(this.canSwitchCommune() ? 'Toutes les communes' : 'Périmètre communal');
   }
 
   protected communeMeta(): string {
@@ -482,7 +499,7 @@ export class AppShellComponent implements OnDestroy {
     if (current) {
       return `${current.code}${current.region ? ' · ' + current.region : ''}`;
     }
-    return this.canSwitchCommune() ? 'Vue globale' : 'Accès restreint';
+    return this.i18n.auto(this.canSwitchCommune() ? 'Vue globale' : 'Accès restreint');
   }
 
   protected toggleCommuneMenu(event: MouseEvent): void {
@@ -598,7 +615,7 @@ export class AppShellComponent implements OnDestroy {
   }
 
   protected userInitials(): string {
-    const value = this.user()?.full_name || this.user()?.email || 'APMTRACK';
+    const value = this.user()?.full_name || this.user()?.email || 'G-APM';
     return value
       .split(/[ .@_-]+/)
       .filter(Boolean)

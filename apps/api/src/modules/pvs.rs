@@ -105,8 +105,9 @@ pub struct PvInterventionResponse {
 pub struct PvPublicResponse {
     pub pv_number: String,
     pub commune_nom: String,
-    pub commune_code: String,
     pub status: String,
+    /// Matricule de l'agent ayant dressé le PV (« Dressé par »).
+    pub agent_matricule: Option<String>,
     pub amount_initial: Option<f64>,
     pub amount_initial_fcfa: Option<i64>,
     pub created_at: DateTime<Utc>,
@@ -908,9 +909,11 @@ async fn verify_pv_public(
             p.status,
             p.amount_initial::DOUBLE PRECISION AS amount_initial,
             p.amount_initial_fcfa, p.created_at,
-            c.nom AS commune_nom, c.code AS commune_code
+            c.nom AS commune_nom,
+            a.matricule AS agent_matricule
         FROM pvs p
         INNER JOIN communes c ON c.id = p.commune_id
+        LEFT JOIN agents a ON a.id = p.agent_id
         WHERE p.pv_number = $1 AND p.deleted_at IS NULL
           AND c.deleted_at IS NULL
         "#,
@@ -923,8 +926,8 @@ async fn verify_pv_public(
     Ok(Json(PvPublicResponse {
         pv_number,
         commune_nom: row.get("commune_nom"),
-        commune_code: row.get("commune_code"),
         status: row.get("status"),
+        agent_matricule: row.get("agent_matricule"),
         amount_initial: row.get("amount_initial"),
         amount_initial_fcfa: row.get("amount_initial_fcfa"),
         created_at: row.get("created_at"),

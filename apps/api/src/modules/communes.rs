@@ -202,8 +202,14 @@ async fn public_signalement_options(
 struct CreateCommuneRequest {
     code: String,
     nom: String,
-    region: String,
-    departement: String,
+    /// Région en texte (rétro-compatible) — résolue depuis `region_id` si absente.
+    region: Option<String>,
+    /// Département en texte (rétro-compatible) — résolu depuis `departement_id` si absent.
+    departement: Option<String>,
+    /// Référence vers la table `regions` (cascade géographique).
+    region_id: Option<Uuid>,
+    /// Référence vers la table `departements` (cascade géographique).
+    departement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -224,6 +230,8 @@ struct PatchCommuneRequest {
     nom: Option<String>,
     region: Option<String>,
     departement: Option<String>,
+    region_id: Option<Uuid>,
+    departement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -245,6 +253,8 @@ pub struct CommuneResponse {
     nom: String,
     region: String,
     departement: String,
+    region_id: Option<Uuid>,
+    departement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -266,7 +276,8 @@ pub struct CommuneResponse {
 }
 
 /// Colonnes exposées par les SELECT (le contour est converti en GeoJSON texte).
-const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, adresse, telephone, email, \
+const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, region_id, departement_id, \
+    adresse, telephone, email, \
     site_web, logo_url, theme_color, active, subscription_status, subscription_started_at, \
     subscription_expires_at, \
     (subscription_status IN ('ACTIVE', 'TRIAL') AND \
@@ -370,29 +381,42 @@ async fn create_commune(
     let subscription_status = validate_subscription_status(
         payload.subscription_status.as_deref().unwrap_or("ACTIVE"),
     )?;
+    // region/departement peuvent être fournis en texte OU via leurs identifiants
+    // (cascade géographique) — le trigger `communes_link_geography` réconcilie.
+    let region = clean_optional(payload.region);
+    let departement = clean_optional(payload.departement);
+    if region.is_none() && payload.region_id.is_none() {
+        return Err(ApiError::bad_request("region est requis"));
+    }
+    if departement.is_none() && payload.departement_id.is_none() {
+        return Err(ApiError::bad_request("departement est requis"));
+    }
     let commune_id = Uuid::new_v4();
-    // $13 (contour GeoJSON) alimente `boundary` (forcé MultiPolygon) et le `centre` (centroïde).
+    // $18 (contour GeoJSON) alimente `boundary` (forcé MultiPolygon) et le `centre` (centroïde).
     sqlx::query(
         r#"
         INSERT INTO communes (
-            id, code, nom, region, departement, adresse, telephone,
-            email, site_web, logo_url, theme_color, active,
+            id, code, nom, region, departement, region_id, departement_id,
+            adresse, telephone, email, site_web, logo_url, theme_color, active,
             subscription_status, subscription_started_at, subscription_expires_at,
             boundary, centre
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15,
-            ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)),
-            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326))
+            $1, $2, $3, $4, $5, $6, $7,
+            $8, $9, $10, $11, $12, $13, $14,
+            $15, $16, $17,
+            ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)),
+            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326))
         )
         "#,
     )
     .bind(commune_id)
     .bind(required_text(payload.code, "code")?)
     .bind(required_text(payload.nom, "nom")?)
-    .bind(required_text(payload.region, "region")?)
-    .bind(required_text(payload.departement, "departement")?)
+    .bind(region)
+    .bind(departement)
+    .bind(payload.region_id)
+    .bind(payload.departement_id)
     .bind(clean_optional(payload.adresse))
     .bind(clean_optional(payload.telephone))
     .bind(clean_optional(payload.email))
@@ -443,23 +467,27 @@ async fn patch_commune(
     let nom = payload.nom.map_or(Ok(existing.nom.clone()), |value| {
         required_text(value, "nom")
     })?;
-    let region = payload
-        .region
-        .map_or(Ok(existing.region.clone()), |value| {
-            required_text(value, "region")
-        })?;
-    let departement = payload
-        .departement
-        .map_or(Ok(existing.departement.clone()), |value| {
-            required_text(value, "departement")
-        })?;
+    // Identifiants géographiques : nouvelle valeur fournie, sinon l'existant.
+    let region_id = payload.region_id.or(existing.region_id);
+    let departement_id = payload.departement_id.or(existing.departement_id);
+    // Texte : explicite > recalcul par le trigger (None) si un nouvel id arrive > existant.
+    let region: Option<String> = match payload.region {
+        Some(value) => Some(required_text(value, "region")?),
+        None if payload.region_id.is_some() => None,
+        None => Some(existing.region.clone()),
+    };
+    let departement: Option<String> = match payload.departement {
+        Some(value) => Some(required_text(value, "departement")?),
+        None if payload.departement_id.is_some() => None,
+        None => Some(existing.departement.clone()),
+    };
     let subscription_status = match payload.subscription_status.as_deref() {
         Some(value) => validate_subscription_status(value)?,
         None => existing.subscription_status.clone(),
     };
     let boundary_json = prepare_boundary(payload.boundary)?;
 
-    // Le contour ($13) n'est mis à jour que s'il est fourni (COALESCE conserve l'existant sinon).
+    // Le contour ($18) n'est mis à jour que s'il est fourni (COALESCE conserve l'existant sinon).
     sqlx::query(
         r#"
         UPDATE communes
@@ -467,18 +495,20 @@ async fn patch_commune(
             nom = $3,
             region = $4,
             departement = $5,
-            adresse = $6,
-            telephone = $7,
-            email = $8,
-            site_web = $9,
-            logo_url = $10,
-            theme_color = $11,
-            active = $12,
-            subscription_status = $13,
-            subscription_started_at = $14,
-            subscription_expires_at = $15,
-            boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)), boundary),
-            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($16), 4326)), centre),
+            region_id = $6,
+            departement_id = $7,
+            adresse = $8,
+            telephone = $9,
+            email = $10,
+            site_web = $11,
+            logo_url = $12,
+            theme_color = $13,
+            active = $14,
+            subscription_status = $15,
+            subscription_started_at = $16,
+            subscription_expires_at = $17,
+            boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), boundary),
+            centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), centre),
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -488,6 +518,8 @@ async fn patch_commune(
     .bind(&nom)
     .bind(&region)
     .bind(&departement)
+    .bind(region_id)
+    .bind(departement_id)
     .bind(payload.adresse.or(existing.adresse.clone()))
     .bind(payload.telephone.or(existing.telephone.clone()))
     .bind(payload.email.or(existing.email.clone()))
@@ -543,6 +575,8 @@ fn row_to_commune(row: sqlx::postgres::PgRow) -> CommuneResponse {
         nom: row.get("nom"),
         region: row.get("region"),
         departement: row.get("departement"),
+        region_id: row.get("region_id"),
+        departement_id: row.get("departement_id"),
         adresse: row.get("adresse"),
         telephone: row.get("telephone"),
         email: row.get("email"),

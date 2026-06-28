@@ -11,6 +11,8 @@ import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../core/services/api.service';
 import { AuthService } from '../../core/services/auth.service';
+import { I18nService } from '../../core/i18n/i18n.service';
+import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { LookupService } from '../../core/services/lookup.service';
 import { LookupOption, Paginated, RoleCode } from '../../shared/api-types';
 import {
@@ -61,6 +63,7 @@ interface AgentsDialogContext {
     PatrouilleAgentsDialog,
     LocationPickerComponent,
     ZoneEditorComponent,
+    AutoTranslatePipe,
   ],
   template: `
     @if (config(); as cfg) {
@@ -68,20 +71,20 @@ interface AgentsDialogContext {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p class="text-xs font-bold uppercase text-[var(--text-muted)]">
-              Donnees operationnelles
+              {{ 'Donnees operationnelles' | auto }}
             </p>
-            <h2 class="text-2xl font-black">{{ cfg.title }}</h2>
-            <p class="mt-1 max-w-3xl text-sm text-[var(--text-muted)]">{{ cfg.description }}</p>
+            <h2 class="text-2xl font-black">{{ cfg.title | auto }}</h2>
+            <p class="mt-1 max-w-3xl text-sm text-[var(--text-muted)]">{{ cfg.description | auto }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             @if (canExportCurrentRows()) {
               <button type="button" class="btn-secondary" (click)="exportCurrentRows(cfg)">
-                Exporter
+                {{ 'Exporter' | auto }}
               </button>
             }
             @if (cfg.key === 'agents' && canMutate(cfg)) {
               <button type="button" class="btn-secondary" (click)="openImportDialog()">
-                Importer CSV
+                {{ 'Importer CSV' | auto }}
               </button>
             }
             @if (canCreate(cfg)) {
@@ -89,7 +92,7 @@ interface AgentsDialogContext {
                 {{ createLabel(cfg) }}
               </button>
             }
-            <button type="button" class="btn-secondary" (click)="load()">Rafraichir</button>
+            <button type="button" class="btn-secondary" (click)="load()">{{ 'Rafraichir' | auto }}</button>
           </div>
         </div>
 
@@ -124,22 +127,22 @@ interface AgentsDialogContext {
                   </p>
                 </div>
                 @if (cfg.key === 'pvs') {
-                  <span class="status-badge warn">Montant non modifiable</span>
+                  <span class="status-badge warn">{{ 'Montant non modifiable' | auto }}</span>
                 }
-                <button type="button" class="btn-ghost" (click)="closeForm()">Fermer</button>
+                <button type="button" class="btn-ghost" (click)="closeForm()">{{ 'Fermer' | auto }}</button>
               </header>
 
               <form class="mt-4 grid gap-5" [formGroup]="form" (ngSubmit)="submit(cfg)">
                 @for (section of formSections(effectiveFields(cfg)); track section.title) {
                   <fieldset class="grid gap-4">
                     <legend class="text-sm font-black text-[var(--text-strong)]">
-                      {{ section.title }}
+                      {{ section.title | auto }}
                     </legend>
                     <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                       @for (field of section.fields; track field.key) {
                         <div class="field" [class.field-wide]="isWideField(field)">
                           <label [for]="field.key">
-                            {{ field.label }}
+                            {{ field.label | auto }}
                             @if (field.required) {
                               <span class="text-[var(--cameroon-red)]">*</span>
                             }
@@ -170,7 +173,7 @@ interface AgentsDialogContext {
                           } @else if (field.type === 'checkbox') {
                             <label class="toggle-field">
                               <input type="checkbox" [formControlName]="field.key" />
-                              <span>Oui</span>
+                              <span>{{ 'Oui' | auto }}</span>
                             </label>
                           } @else if (field.type === 'relation_multi') {
                             <select [id]="field.key" [formControlName]="field.key" multiple>
@@ -180,16 +183,16 @@ interface AgentsDialogContext {
                             </select>
                           } @else if (field.type === 'relation') {
                             <select [id]="field.key" [formControlName]="field.key">
-                              <option value="">Choisir...</option>
+                              <option value="">{{ 'Choisir...' | auto }}</option>
                               @for (option of optionsForField(field); track option.id) {
                                 <option [value]="option.id">{{ optionLabel(option) }}</option>
                               }
                             </select>
                           } @else if (field.type === 'select' || field.type === 'status') {
                             <select [id]="field.key" [formControlName]="field.key">
-                              <option value="">Choisir...</option>
+                              <option value="">{{ 'Choisir...' | auto }}</option>
                               @for (option of field.options ?? []; track option.value) {
-                                <option [value]="option.value">{{ option.label }}</option>
+                                <option [value]="option.value">{{ option.label | auto }}</option>
                               }
                             </select>
                           } @else {
@@ -202,7 +205,7 @@ interface AgentsDialogContext {
                           }
 
                           @if (field.help) {
-                            <p class="field-help">{{ field.help }}</p>
+                            <p class="field-help">{{ field.help | auto }}</p>
                           }
                         </div>
                       }
@@ -214,16 +217,16 @@ interface AgentsDialogContext {
                   <div
                     class="rounded-md border border-[var(--line-subtle)] bg-[var(--surface-muted)] p-3 text-sm"
                   >
-                    <strong class="block">Recapitulatif montant</strong>
+                    <strong class="block">{{ 'Recapitulatif montant' | auto }}</strong>
                     <span class="text-[var(--text-muted)]">{{ selectedInterventionMeta() }}</span>
                   </div>
                 }
 
                 <div class="flex flex-wrap items-center gap-2">
                   <button type="submit" class="btn-primary" [disabled]="form.invalid || saving()">
-                    {{ saving() ? 'Enregistrement...' : 'Enregistrer' }}
+                    {{ (saving() ? 'Enregistrement...' : 'Enregistrer') | auto }}
                   </button>
-                  <button type="button" class="btn-secondary" (click)="closeForm()">Annuler</button>
+                  <button type="button" class="btn-secondary" (click)="closeForm()">{{ 'Annuler' | auto }}</button>
                 </div>
               </form>
             </div>
@@ -350,7 +353,7 @@ interface AgentsDialogContext {
                       </button>
                     </th>
                   }
-                  <th>Actions</th>
+                  <th>{{ 'Actions' | auto }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -415,7 +418,7 @@ interface AgentsDialogContext {
                               role="menuitem"
                               (click)="selectRowFromMenu(row, $event)"
                             >
-                              Detail
+                              {{ 'Detail' | auto }}
                             </button>
                             @if (canMutate(cfg) && hasEditableFields(cfg)) {
                               <button
@@ -424,7 +427,7 @@ interface AgentsDialogContext {
                                 role="menuitem"
                                 (click)="openEditFromMenu(cfg, row, $event)"
                               >
-                                Editer
+                                {{ 'Editer' | auto }}
                               </button>
                             }
                             @if (cfg.manageAgents && canMutate(cfg)) {
@@ -434,7 +437,7 @@ interface AgentsDialogContext {
                                 role="menuitem"
                                 (click)="openAgentsFromMenu(cfg, row, $event)"
                               >
-                                Gerer les agents
+                                {{ 'Gerer les agents' | auto }}
                               </button>
                             }
                             <button
@@ -443,7 +446,7 @@ interface AgentsDialogContext {
                               role="menuitem"
                               (click)="exportRow(cfg, row, $event)"
                             >
-                              Exporter ligne
+                              {{ 'Exporter ligne' | auto }}
                             </button>
                             @for (action of visibleActions(cfg); track action.label) {
                               <button
@@ -452,7 +455,7 @@ interface AgentsDialogContext {
                                 role="menuitem"
                                 (click)="runAction(action, row, $event)"
                               >
-                                {{ action.label }}
+                                {{ action.label | auto }}
                               </button>
                             }
                           </div>
@@ -466,7 +469,7 @@ interface AgentsDialogContext {
                       class="px-4 py-8 text-center text-[var(--text-muted)]"
                       [attr.colspan]="cfg.columns.length + 1"
                     >
-                      Aucune donnee exploitable avec ces filtres.
+                      {{ 'Aucune donnee exploitable avec ces filtres.' | auto }}
                     </td>
                   </tr>
                 }
@@ -595,7 +598,7 @@ interface AgentsDialogContext {
             <div class="modal-panel" (click)="$event.stopPropagation()">
               <h3 class="text-lg font-black">{{ ctx.action.label }}</h3>
               <p class="mt-1 text-sm text-[var(--text-muted)]">
-                Statut courant :
+                {{ ctx.action.currentLabel ?? 'Statut courant' }} :
                 <span [class]="badgeClass('status', ctx.current)">{{
                   display('status', ctx.current)
                 }}</span>
@@ -617,7 +620,8 @@ interface AgentsDialogContext {
                 >
                   <div class="field">
                     <label for="status-target"
-                      >Nouveau statut <span class="text-[var(--cameroon-red)]">*</span></label
+                      >{{ ctx.action.selectLabel ?? 'Nouveau statut' }}
+                      <span class="text-[var(--cameroon-red)]">*</span></label
                     >
                     <select id="status-target" formControlName="status">
                       <option value="">Choisir...</option>
@@ -696,6 +700,7 @@ export class ResourcePage implements OnInit, OnDestroy {
   private readonly api = inject(ApiService);
   private readonly auth = inject(AuthService);
   private readonly lookup = inject(LookupService);
+  protected readonly i18n = inject(I18nService);
   private subscription?: Subscription;
 
   protected readonly config = signal<ResourceConfig | null>(null);
@@ -800,7 +805,9 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   protected formTitle(cfg: ResourceConfig): string {
-    return this.formMode() === 'edit' ? `Modifier - ${cfg.title}` : this.createLabel(cfg);
+    return this.formMode() === 'edit'
+      ? `${this.i18n.auto('Modifier')} · ${this.i18n.auto(cfg.title)}`
+      : this.createLabel(cfg);
   }
 
   protected canOpenForm(cfg: ResourceConfig): boolean {
@@ -957,7 +964,7 @@ export class ResourcePage implements OnInit, OnDestroy {
       return;
     }
     const raw = this.statusForm.getRawValue() as Record<string, unknown>;
-    const payload: Record<string, unknown> = { status: raw['status'] };
+    const payload: Record<string, unknown> = { [ctx.action.statusKey ?? 'status']: raw['status'] };
     for (const extra of ctx.action.statusExtra ?? []) {
       const value = raw[extra.key];
       if (value !== '' && value !== null && value !== undefined) {
@@ -966,11 +973,15 @@ export class ResourcePage implements OnInit, OnDestroy {
     }
     this.saving.set(true);
     this.error.set(null);
-    this.api.patch(ctx.action.path(ctx.row), payload).subscribe({
+    const path = ctx.action.path(ctx.row);
+    const request$ =
+      ctx.action.method === 'post' ? this.api.post(path, payload) : this.api.patch(path, payload);
+    const successMessage = ctx.action.successMessage ?? 'Statut mis a jour.';
+    request$.subscribe({
       next: () => {
         this.saving.set(false);
         this.statusContext.set(null);
-        this.message.set('Statut mis a jour.');
+        this.message.set(successMessage);
         this.load();
       },
       error: () => {
@@ -1133,12 +1144,12 @@ export class ResourcePage implements OnInit, OnDestroy {
 
   protected createLabel(cfg: ResourceConfig): string {
     if (cfg.key === 'pvs') {
-      return 'Nouveau PV';
+      return this.i18n.auto('Nouveau PV');
     }
     if (cfg.key === 'referentiel-interventions') {
-      return 'Nouvelle intervention';
+      return this.i18n.auto('Nouvelle intervention');
     }
-    return 'Nouvel element';
+    return this.i18n.auto('Nouvel element');
   }
 
   protected formSections(fields: ResourceField[]): FormSection[] {
@@ -1210,7 +1221,7 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   protected label(cfg: ResourceConfig, column: string): string {
-    return cfg.labels[column] ?? column;
+    return this.i18n.auto(cfg.labels[column] ?? column);
   }
 
   protected avatarFor(row: Row): string | null {
@@ -1275,16 +1286,16 @@ export class ResourcePage implements OnInit, OnDestroy {
       return value.join(', ');
     }
     if (typeof value === 'boolean') {
-      return value ? 'Oui' : 'Non';
+      return this.i18n.yesNo(value);
     }
     if (this.isMoneyColumn(column)) {
-      return `${Number(value ?? 0).toLocaleString('fr-FR')} FCFA`;
+      return this.i18n.formatMoneyFcfa(value ?? 0);
     }
     if (typeof value === 'string' && value.includes('T') && value.endsWith('Z')) {
-      return new Date(value).toLocaleString('fr-FR');
+      return this.i18n.formatDate(value);
     }
     if (column === 'status') {
-      return this.humanStatus(String(value));
+      return this.i18n.auto(this.humanStatus(String(value)));
     }
     return String(value);
   }

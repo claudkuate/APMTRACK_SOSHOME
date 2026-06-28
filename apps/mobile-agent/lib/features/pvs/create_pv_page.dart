@@ -25,7 +25,6 @@ class CreatePvPage extends StatefulWidget {
 
 class _CreatePvPageState extends State<CreatePvPage> {
   static const _stepLabels = [
-    'Type',
     'Infractions',
     'Sujet',
     'Localisation',
@@ -50,7 +49,6 @@ class _CreatePvPageState extends State<CreatePvPage> {
   final _interventionSearchController = TextEditingController();
 
   int _step = 0;
-  String _subjectType = PvSubjectTypes.personWithVehicle;
   String? _selectedCategoryId;
   String? _selectedTypeId;
   String? _identityType;
@@ -114,9 +112,6 @@ class _CreatePvPageState extends State<CreatePvPage> {
       }
       return;
     }
-    _subjectType = pv.subjectType == PvSubjectTypes.vehicleOnly
-        ? PvSubjectTypes.personWithVehicle
-        : pv.subjectType;
     _firstNameController.text = pv.verbalizedFirstName ?? '';
     _lastNameController.text = pv.verbalizedLastName ?? pv.verbalizedName ?? '';
     _identityType = pv.verbalizedIdentityType;
@@ -182,8 +177,17 @@ class _CreatePvPageState extends State<CreatePvPage> {
     return _selectedInterventions.any((item) => item.requiresVehicle);
   }
 
+  bool get _hasVehicleInput {
+    return _clean(_plateController.text) != null ||
+        _clean(_registrationCardController.text) != null ||
+        _clean(_vehicleMakeController.text) != null ||
+        _clean(_vehicleModelController.text) != null ||
+        _clean(_vehicleColorController.text) != null ||
+        _clean(_vehicleOwnerController.text) != null;
+  }
+
   bool get _vehicleInvolved {
-    return _selectedRequiresVehicle || _subjectType == PvSubjectTypes.personWithVehicle;
+    return _selectedRequiresVehicle || _hasVehicleInput;
   }
 
   List<Intervention> get _categoryOptions {
@@ -394,13 +398,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   CreatePvPayload _payload() {
     final ids = _selectedInterventions.map((item) => item.id).toList();
-    const hasPerson = true;
     final hasVehicle = _vehicleInvolved;
-    final identityNumber = hasPerson
-        ? _clean(_identityNumberController.text)
-        : null;
-    final firstName = hasPerson ? _clean(_firstNameController.text) : null;
-    final lastName = hasPerson ? _clean(_lastNameController.text) : null;
+    final identityNumber = _clean(_identityNumberController.text);
+    final firstName = _clean(_firstNameController.text);
+    final lastName = _clean(_lastNameController.text);
     final name = [firstName, lastName].whereType<String>().join(' ');
     return CreatePvPayload(
       interventionId: ids.first,
@@ -414,8 +415,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
       verbalizedLastName: lastName,
       verbalizedIdentityType: identityNumber == null ? null : _identityType,
       verbalizedIdentityNumber: identityNumber,
-      verbalizedPhone: hasPerson ? _clean(_phoneController.text) : null,
-      verbalizedAddress: hasPerson ? _clean(_addressController.text) : null,
+      verbalizedPhone: _clean(_phoneController.text),
+      verbalizedAddress: _clean(_addressController.text),
       vehiclePlate: hasVehicle
           ? _clean(_plateController.text)?.toUpperCase()
           : null,
@@ -438,7 +439,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
   int? _firstInvalidStep() {
     if (_selectedInterventionIds.isEmpty) {
       _setError('Selectionnez au moins une infraction');
-      return 1;
+      return 0;
     }
     final hasLastName = _clean(_lastNameController.text) != null;
     final hasPhone = _clean(_phoneController.text) != null;
@@ -449,23 +450,23 @@ class _CreatePvPageState extends State<CreatePvPage> {
         _clean(_registrationCardController.text) != null;
     if (!hasLastName) {
       _setError('Nom du contrevenant requis');
-      return 2;
+      return 1;
     }
     if (!hasPhone) {
       _setError('Telephone du contrevenant requis');
-      return 2;
+      return 1;
     }
     if (hasIdentityNumber && !hasIdentityType) {
       _setError('Type d identite requis avec le numero');
-      return 2;
+      return 1;
     }
-    if (_vehicleInvolved && !hasVehicle) {
+    if (_selectedRequiresVehicle && !hasVehicle) {
       _setError('Plaque ou carte grise requise');
-      return 2;
+      return 1;
     }
     if (_clean(_locationController.text) == null) {
       _setError('Lieu requis');
-      return 3;
+      return 2;
     }
     setState(() => _error = null);
     return null;
@@ -619,41 +620,23 @@ class _CreatePvPageState extends State<CreatePvPage> {
 
   Widget _buildStep() {
     return switch (_step) {
-      0 => _buildTypeStep(),
-      1 => _buildInfractionsStep(),
-      2 => _buildSubjectStep(),
-      3 => _buildLocationStep(),
-      4 => _buildPhotosStep(),
+      0 => _buildInfractionsStep(),
+      1 => _buildSubjectStep(),
+      2 => _buildLocationStep(),
+      3 => _buildPhotosStep(),
       _ => _buildReviewStep(),
     };
   }
 
-  Widget _buildTypeStep() {
-    return SectionPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SegmentedButton<String>(
-            segments: const [
-              ButtonSegment(
-                value: PvSubjectTypes.personWithVehicle,
-                icon: Icon(Icons.person_pin_circle_outlined),
-                label: Text('Avec vehicule'),
-              ),
-              ButtonSegment(
-                value: PvSubjectTypes.personOnly,
-                icon: Icon(Icons.person_outline),
-                label: Text('Sans vehicule'),
-              ),
-            ],
-            selected: {_subjectType},
-            onSelectionChanged: (values) {
-              setState(() => _subjectType = values.single);
-            },
-          ),
-        ],
-      ),
-    );
+  Future<void> _retryReferentiel() async {
+    await widget.controller.refreshData();
+    if (!mounted) return;
+    setState(() {
+      if (_selectedInterventionIds.isEmpty &&
+          widget.controller.interventions.isNotEmpty) {
+        _selectedInterventionIds.add(widget.controller.interventions.first.id);
+      }
+    });
   }
 
   Widget _buildInfractionsStep() {
@@ -665,13 +648,44 @@ class _CreatePvPageState extends State<CreatePvPage> {
       child: Column(
         children: [
           if (interventions.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: EmptyState(
-                title: 'Aucune infraction',
-                message: 'Le referentiel mobile est vide.',
-                icon: Icons.rule_folder_outlined,
-              ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: widget.controller.offline
+                  ? Column(
+                      children: [
+                        const EmptyState(
+                          title: 'Referentiel non charge',
+                          message:
+                              'Connexion au serveur impossible (hors-ligne ou erreur). Reessayez une fois en ligne.',
+                          icon: Icons.cloud_off_outlined,
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: widget.controller.loadingData
+                              ? null
+                              : _retryReferentiel,
+                          icon: widget.controller.loadingData
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.refresh),
+                          label: Text(
+                            widget.controller.loadingData
+                                ? 'Chargement...'
+                                : 'Reessayer',
+                          ),
+                        ),
+                      ],
+                    )
+                  : const EmptyState(
+                      title: 'Aucune infraction',
+                      message: 'Le referentiel mobile est vide.',
+                      icon: Icons.rule_folder_outlined,
+                    ),
             )
           else ...[
             Padding(
@@ -810,8 +824,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildPersonFields(),
-          if (_vehicleInvolved) const SizedBox(height: 16),
-          if (_vehicleInvolved) _buildVehicleFields(),
+          const SizedBox(height: 16),
+          _buildVehicleFields(),
         ],
       ),
     );
@@ -897,7 +911,19 @@ class _CreatePvPageState extends State<CreatePvPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('Vehicule', style: TextStyle(fontWeight: FontWeight.w900)),
+        Row(
+          children: [
+            const Text(
+              'Vehicule',
+              style: TextStyle(fontWeight: FontWeight.w900),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              _selectedRequiresVehicle ? '(requis)' : '(optionnel)',
+              style: const TextStyle(color: apmMuted, fontSize: 12),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
         TextField(
           controller: _plateController,

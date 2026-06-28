@@ -7,6 +7,7 @@ use crate::errors::ApiError;
 pub const SEQUENCE_PV: &str = "PV";
 pub const SEQUENCE_RECEIPT: &str = "RECEIPT";
 pub const SEQUENCE_SIGNALEMENT: &str = "SIGNALEMENT";
+pub const SEQUENCE_FOURRIERE: &str = "FOURRIERE";
 
 pub async fn next_document_sequence(
     tx: &mut Transaction<'_, Postgres>,

@@ -61,6 +61,18 @@ export interface LookupOption {
   parentId?: string;
 }
 
+export interface PublicRegionOption {
+  id: string;
+  code: string;
+  nom: string;
+}
+
+export interface PublicDepartementOption {
+  id: string;
+  region_id: string;
+  nom: string;
+}
+
 export interface PublicCommuneOption {
   id: string;
   code: string;

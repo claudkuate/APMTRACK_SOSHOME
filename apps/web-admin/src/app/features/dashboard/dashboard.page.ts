@@ -48,7 +48,7 @@ interface StatusBar {
       <div class="flex flex-wrap items-end justify-between gap-3">
         <div>
           <p class="text-xs font-bold uppercase tracking-wide text-[var(--cameroon-green-strong)]">
-            Pilotage › Tableau de bord
+            APM_MANAGER › Pilotage › Tableau de bord
           </p>
           <h2 class="mt-1 text-3xl font-bold">Supervision communale</h2>
           <p class="mt-1 text-sm text-[var(--text-muted)]">

@@ -114,6 +114,10 @@ flutter run --dart-define=API_URL=http://10.0.2.2:8080 --dart-define=APP_ENV=dev
 | `S3_BUCKET` | ❌ | `apmtrack-pv-photos` | |
 | `S3_ACCESS_KEY` | ❌ | — | Required (with secret + endpoint) to enable photo storage |
 | `S3_SECRET_KEY` | ❌ | — | |
+| `PUBLIC_WEB_URL` | ❌ | = `PUBLIC_API_URL` | Public front (citizen portal) base URL — used in WhatsApp tracking links |
+| `WHATSAPP_API_BASE_URL` | ❌ | `https://graph.facebook.com/v21.0` | Meta Cloud API base |
+| `WHATSAPP_PHONE_NUMBER_ID` | ❌ | — | Required (with token) to enable WhatsApp delivery of the signalement tracking number |
+| `WHATSAPP_ACCESS_TOKEN` | ❌ | — | Meta WhatsApp Business access token |
 
 See `apps/api/.env.example` for a full template.
 

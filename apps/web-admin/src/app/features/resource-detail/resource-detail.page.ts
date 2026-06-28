@@ -3,6 +3,8 @@ import { ActivatedRoute, RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 
 import { ApiService } from '../../core/services/api.service';
+import { I18nService } from '../../core/i18n/i18n.service';
+import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { GeoGeometry } from '../../core/services/geo.service';
 import { LookupService } from '../../core/services/lookup.service';
 import {
@@ -58,12 +60,12 @@ const STATUS_LABELS: Record<string, string> = {
 
 @Component({
   selector: 'app-resource-detail-page',
-  imports: [RouterLink, MiniMapComponent, PatrouilleAgentsDialog],
+  imports: [RouterLink, MiniMapComponent, PatrouilleAgentsDialog, AutoTranslatePipe],
   template: `
     @if (config(); as cfg) {
       <section class="grid gap-5">
         <nav class="flex items-center gap-2 text-xs font-bold uppercase text-[var(--text-muted)]">
-          <a [routerLink]="['/', cfg.key]" class="hover:underline">{{ cfg.title }}</a>
+          <a [routerLink]="['/', cfg.key]" class="hover:underline">{{ cfg.title | auto }}</a>
           <span aria-hidden="true">›</span>
           <span class="text-[var(--text-strong)]">{{ title() }}</span>
         </nav>
@@ -71,7 +73,7 @@ const STATUS_LABELS: Record<string, string> = {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 class="text-2xl font-black">{{ title() }}</h2>
-            <p class="mt-1 max-w-3xl text-sm text-[var(--text-muted)]">{{ cfg.description }}</p>
+            <p class="mt-1 max-w-3xl text-sm text-[var(--text-muted)]">{{ cfg.description | auto }}</p>
             @if (row(); as item) {
               <div class="mt-3 flex flex-wrap gap-2">
                 @for (field of summaryFields(cfg); track field) {
@@ -84,7 +86,7 @@ const STATUS_LABELS: Record<string, string> = {
             }
           </div>
           <a [routerLink]="['/', cfg.key]" class="btn-secondary" aria-label="Retour à la liste">
-            Retour liste
+            {{ 'Retour liste' | auto }}
           </a>
         </div>
 
@@ -95,7 +97,7 @@ const STATUS_LABELS: Record<string, string> = {
         }
 
         @if (loading()) {
-          <div class="panel p-5 text-[var(--text-muted)]">Chargement du détail...</div>
+          <div class="panel p-5 text-[var(--text-muted)]">{{ 'Chargement du détail...' | auto }}</div>
         } @else if (row(); as item) {
           <nav class="settings-tabs" aria-label="Sections de la fiche">
             @for (tab of tabs(cfg, item); track tab.key) {
@@ -105,7 +107,7 @@ const STATUS_LABELS: Record<string, string> = {
                 [class.is-active]="effectiveTab(cfg, item) === tab.key"
                 (click)="activeTab.set(tab.key)"
               >
-                {{ tab.label }}
+                {{ tab.label | auto }}
               </button>
             }
           </nav>
@@ -113,7 +115,7 @@ const STATUS_LABELS: Record<string, string> = {
           @if (effectiveTab(cfg, item) === 'informations') {
           <section class="panel overflow-hidden">
             <header class="border-b border-[var(--line-subtle)] p-5">
-              <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Informations</p>
+              <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'Informations' | auto }}</p>
               <h3 class="mt-1 text-xl font-black">{{ title() }}</h3>
             </header>
             @if (cfg.photoEndpoint && item['id']) {
@@ -125,13 +127,13 @@ const STATUS_LABELS: Record<string, string> = {
                     <img [src]="url" alt="Photo de profil" class="h-full w-full object-cover" />
                   } @else {
                     <div class="grid h-full w-full place-items-center text-center text-xs text-[var(--text-muted)]">
-                      Aucune photo
+                      {{ 'Aucune photo' | auto }}
                     </div>
                   }
                 </div>
                 <div class="grid gap-2">
                   <label class="btn-secondary cursor-pointer">
-                    {{ uploading() ? 'Envoi...' : 'Changer la photo' }}
+                    {{ (uploading() ? 'Envoi...' : 'Changer la photo') | auto }}
                     <input
                       type="file"
                       accept="image/*"
@@ -158,7 +160,7 @@ const STATUS_LABELS: Record<string, string> = {
                           [routerLink]="link"
                           class="font-semibold text-[var(--cameroon-red)] hover:underline"
                         >
-                          Voir la fiche
+                          {{ 'Voir la fiche' | auto }}
                         </a>
                       } @else {
                         <span>{{ display('entity_type', item['entity_type']) }}</span>
@@ -178,8 +180,8 @@ const STATUS_LABELS: Record<string, string> = {
           @if (effectiveTab(cfg, item) === 'localisation' && hasLocation(item)) {
             <section class="panel overflow-hidden">
               <header class="border-b border-[var(--line-subtle)] p-5">
-                <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Localisation</p>
-                <h3 class="mt-1 text-xl font-black">Carte</h3>
+                <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'Localisation' | auto }}</p>
+                <h3 class="mt-1 text-xl font-black">{{ 'Carte' | auto }}</h3>
               </header>
               <div class="p-5">
                 <app-mini-map
@@ -201,13 +203,13 @@ const STATUS_LABELS: Record<string, string> = {
                   class="flex items-center justify-between border-b border-[var(--line-subtle)] p-5"
                 >
                   <div>
-                    <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Liens</p>
-                    <h3 class="mt-1 text-xl font-black">{{ section.title }}</h3>
+                    <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'Liens' | auto }}</p>
+                    <h3 class="mt-1 text-xl font-black">{{ section.title | auto }}</h3>
                   </div>
-                  <a [routerLink]="['/', child.key]" class="btn-ghost text-xs">Voir tout</a>
+                  <a [routerLink]="['/', child.key]" class="btn-ghost text-xs">{{ 'Voir tout' | auto }}</a>
                 </header>
                 @if (relatedFor(section).loading) {
-                  <div class="p-5 text-sm text-[var(--text-muted)]">Chargement...</div>
+                  <div class="p-5 text-sm text-[var(--text-muted)]">{{ 'Chargement...' | auto }}</div>
                 } @else if (relatedFor(section).error) {
                   <div class="p-5 text-sm text-[var(--text-muted)]">
                     {{ relatedFor(section).error }}
@@ -217,7 +219,7 @@ const STATUS_LABELS: Record<string, string> = {
                     <table class="data-table w-full border-collapse text-left text-sm">
                       <thead>
                         <tr>
-                          <th scope="col">{{ child.title }}</th>
+                          <th scope="col">{{ child.title | auto }}</th>
                           @for (col of relatedColumns(section); track col) {
                             <th scope="col">{{ label(child, col) }}</th>
                           }
@@ -254,7 +256,7 @@ const STATUS_LABELS: Record<string, string> = {
                     </table>
                   </div>
                 } @else {
-                  <div class="p-5 text-sm text-[var(--text-muted)]">Aucun élément lié.</div>
+                  <div class="p-5 text-sm text-[var(--text-muted)]">{{ 'Aucun élément lié.' | auto }}</div>
                 }
               </section>
             }
@@ -264,8 +266,8 @@ const STATUS_LABELS: Record<string, string> = {
           @if (effectiveTab(cfg, item) === 'effectif') {
             <section class="panel overflow-hidden">
               <header class="border-b border-[var(--line-subtle)] p-5">
-                <p class="text-xs font-bold uppercase text-[var(--text-muted)]">Effectif</p>
-                <h3 class="mt-1 text-xl font-black">Agents affectés à la patrouille</h3>
+                <p class="text-xs font-bold uppercase text-[var(--text-muted)]">{{ 'Effectif' | auto }}</p>
+                <h3 class="mt-1 text-xl font-black">{{ 'Agents affectés à la patrouille' | auto }}</h3>
               </header>
               <app-patrouille-agents-dialog
                 [embedded]="true"
@@ -280,11 +282,11 @@ const STATUS_LABELS: Record<string, string> = {
       </section>
     } @else {
       <section class="panel p-5">
-        <h2 class="text-xl font-black">Détail indisponible</h2>
+        <h2 class="text-xl font-black">{{ 'Détail indisponible' | auto }}</h2>
         <p class="mt-2 text-[var(--text-muted)]">
-          La route demandée ne correspond à aucun module détaillé.
+          {{ 'La route demandée ne correspond à aucun module détaillé.' | auto }}
         </p>
-        <a routerLink="/dashboard" class="btn-primary mt-4">Retour dashboard</a>
+        <a routerLink="/dashboard" class="btn-primary mt-4">{{ 'Retour dashboard' | auto }}</a>
       </section>
     }
   `,
@@ -293,6 +295,7 @@ export class ResourceDetailPage implements OnInit, OnDestroy {
   private readonly route = inject(ActivatedRoute);
   private readonly api = inject(ApiService);
   private readonly lookup = inject(LookupService);
+  protected readonly i18n = inject(I18nService);
   private subscription?: Subscription;
 
   protected readonly config = signal<ResourceConfig | null>(null);
@@ -410,15 +413,15 @@ export class ResourceDetailPage implements OnInit, OnDestroy {
 
   /** Onglets disponibles pour la fiche courante (selon localisation et entités liées). */
   protected tabs(cfg: ResourceConfig, item: Row): { key: string; label: string }[] {
-    const tabs = [{ key: 'informations', label: 'Informations' }];
+    const tabs = [{ key: 'informations', label: this.i18n.auto('Informations') }];
     if (this.hasLocation(item)) {
-      tabs.push({ key: 'localisation', label: 'Localisation' });
+      tabs.push({ key: 'localisation', label: this.i18n.auto('Localisation') });
     }
     if (this.relatedSections(cfg).length) {
-      tabs.push({ key: 'liens', label: 'Entités liées' });
+      tabs.push({ key: 'liens', label: this.i18n.auto('Entités liées') });
     }
     if (cfg.manageAgents) {
-      tabs.push({ key: 'effectif', label: 'Effectif' });
+      tabs.push({ key: 'effectif', label: this.i18n.auto('Effectif') });
     }
     return tabs;
   }
@@ -455,7 +458,7 @@ export class ResourceDetailPage implements OnInit, OnDestroy {
   }
 
   protected label(cfg: ResourceConfig, field: string): string {
-    return cfg.labels[field] ?? field;
+    return this.i18n.auto(cfg.labels[field] ?? field);
   }
 
   protected display(field: string, value: unknown): string {
@@ -476,16 +479,16 @@ export class ResourceDetailPage implements OnInit, OnDestroy {
       return value.join(', ');
     }
     if (typeof value === 'boolean') {
-      return value ? 'Oui' : 'Non';
+      return this.i18n.yesNo(value);
     }
     if (this.isMoneyField(field)) {
-      return `${Number(value ?? 0).toLocaleString('fr-FR')} FCFA`;
+      return this.i18n.formatMoneyFcfa(value ?? 0);
     }
     if (typeof value === 'string' && value.includes('T') && value.endsWith('Z')) {
-      return new Date(value).toLocaleString('fr-FR');
+      return this.i18n.formatDate(value);
     }
     if (field === 'status') {
-      return this.humanStatus(String(value));
+      return this.i18n.auto(this.humanStatus(String(value)));
     }
     if (typeof value === 'object') {
       return JSON.stringify(value);
@@ -610,11 +613,11 @@ export class ResourceDetailPage implements OnInit, OnDestroy {
   private displaySubjectType(value: unknown): string {
     switch (String(value)) {
       case 'PERSON_ONLY':
-        return 'Usager sans véhicule';
+        return this.i18n.auto('Usager sans véhicule');
       case 'VEHICLE_ONLY':
-        return 'Véhicule sans conducteur';
+        return this.i18n.auto('Véhicule sans conducteur');
       case 'PERSON_WITH_VEHICLE':
-        return 'Usager avec véhicule';
+        return this.i18n.auto('Usager avec véhicule');
       default:
         return String(value);
     }

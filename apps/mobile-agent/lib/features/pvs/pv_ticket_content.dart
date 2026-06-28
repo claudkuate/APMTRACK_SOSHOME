@@ -76,7 +76,7 @@ class PvTicketContentBuilder {
     }
 
     return PvTicketContent(
-      headerLines: ['APMTRACK', if (profile != null) profile.commune.nom],
+      headerLines: ['G-APM', if (profile != null) profile.commune.nom],
       detailLines: detailLines,
       infractionLines: infractionLines,
       totalLine: 'Montant total: ${formatFcfa(pv.amountInitialFcfa)}',

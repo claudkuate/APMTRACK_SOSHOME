@@ -17,7 +17,7 @@ void main() {
     );
     final printable = content.allTextLines.join('\n');
 
-    expect(printable, contains('APMTRACK'));
+    expect(printable, contains('G-APM'));
     expect(printable, contains('Commune d arrondissement de Yaounde Ier'));
     expect(printable, contains('PV-YDE1-2026-000004'));
     expect(printable, contains('Marie Ngono'));

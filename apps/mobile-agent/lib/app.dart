@@ -42,7 +42,7 @@ class _ApmtrackAgentAppState extends State<ApmtrackAgentApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'APMTRACK Agent',
+      title: 'G-APM Agent',
       debugShowCheckedModeBanner: false,
       theme: buildApmtrackTheme(),
       home: AnimatedBuilder(

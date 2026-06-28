@@ -102,6 +102,18 @@ const REFERENTIEL: &[InterventionSeed] = &[
         penalite_pct: 5,
     },
     InterventionSeed {
+        cat_slug: "voirie",
+        cat_nom: "Voirie & domaine public",
+        type_slug: "occupation-domaine-public",
+        type_nom: "Occupation du domaine public",
+        slug: "occupation-illegale-domaine",
+        nom: "Occupation illégale du domaine public",
+        description: "Occupation sans titre ni autorisation du domaine public communal",
+        montant_fcfa: 30000,
+        delai_jours: 15,
+        penalite_pct: 10,
+    },
+    InterventionSeed {
         cat_slug: "commerce",
         cat_nom: "Commerce & activités économiques",
         type_slug: "vente-sauvette",
@@ -146,6 +158,18 @@ const REFERENTIEL: &[InterventionSeed] = &[
         nom: "Tapage ou nuisances sonores",
         description: "Nuisances sonores troublant la tranquillité publique",
         montant_fcfa: 10000,
+        delai_jours: 7,
+        penalite_pct: 10,
+    },
+    InterventionSeed {
+        cat_slug: "salubrite",
+        cat_nom: "Salubrité & environnement",
+        type_slug: "divagation-animaux",
+        type_nom: "Divagation d'animaux",
+        slug: "divagation-animaux",
+        nom: "Divagation d'animaux sur la voie publique",
+        description: "Animaux errants ou en divagation sur le domaine public",
+        montant_fcfa: 15000,
         delai_jours: 7,
         penalite_pct: 10,
     },
@@ -473,6 +497,7 @@ pub async fn seed_demo(pool: &sqlx::PgPool, app_env: &str) -> anyhow::Result<()>
         seed_referentiel(pool, commune).await?;
         seed_pvs_payments(pool, commune).await?;
         seed_signalements(pool, commune).await?;
+        seed_fourrieres(pool, commune).await?;
         seed_patrouille(pool, commune).await?;
         seed_document_sequences(pool, commune).await?;
     }
@@ -927,6 +952,40 @@ async fn seed_signalements(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
     Ok(())
 }
 
+async fn seed_fourrieres(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
+    let commune_id = det_id(&format!("commune:{}", c.code));
+    let admin_user_id = det_id(&format!("user:admin:{}", c.code));
+    let id = det_id(&format!("fourriere:{}:1", c.code));
+    let numero = format!("FOUR-{}-2026-000001", c.code);
+    let plate = format!("{}-1234", c.code);
+
+    sqlx::query(
+        r#"
+        INSERT INTO fourrieres (
+            id, commune_id, fourriere_number, vehicle_plate, vehicle_type,
+            motif, lieu_enlevement, status, daily_fee_fcfa, created_by
+        )
+        VALUES ($1, $2, $3, $4, 'Berline', 'Stationnement gênant - enlèvement',
+                $5, 'EN_FOURRIERE', 2000, $6)
+        ON CONFLICT (id) DO UPDATE SET
+            vehicle_plate = EXCLUDED.vehicle_plate,
+            motif = EXCLUDED.motif,
+            status = EXCLUDED.status,
+            updated_at = now()
+        "#,
+    )
+    .bind(id)
+    .bind(commune_id)
+    .bind(numero)
+    .bind(plate)
+    .bind(c.siege)
+    .bind(admin_user_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 async fn seed_patrouille(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
     let commune_id = det_id(&format!("commune:{}", c.code));
     let admin_user_id = det_id(&format!("user:admin:{}", c.code));
@@ -978,10 +1037,12 @@ async fn seed_document_sequences(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result
     let commune_id = det_id(&format!("commune:{}", c.code));
     let paid_count = PV_SPECS.iter().filter(|spec| spec.2 == "PAYE").count() as i64;
 
-    let sequences: [(&str, i64); 3] = [
+    let sequences: [(&str, i64); 4] = [
         ("PV", PV_SPECS.len() as i64 + 1),
         ("RECEIPT", paid_count + 1),
         ("SIGNALEMENT", SIGNALEMENT_SPECS.len() as i64 + 1),
+        // 1 fourrière semée par commune (FOUR-...-000001).
+        ("FOURRIERE", 2),
     ];
 
     for (kind, next_value) in sequences {

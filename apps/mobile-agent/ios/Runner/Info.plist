@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Apmtrack Agent</string>
+	<string>G-APM Agent</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -50,11 +50,11 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>APMTRACK utilise la camera pour scanner les QR codes des PV et photographier des preuves.</string>
+	<string>G-APM utilise la camera pour scanner les QR codes des PV et photographier des preuves.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>APMTRACK permet de joindre des photos preuve depuis votre galerie a un PV.</string>
+	<string>G-APM permet de joindre des photos preuve depuis votre galerie a un PV.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>APMTRACK utilise la position pour rattacher un PV ou une patrouille au terrain.</string>
+	<string>G-APM utilise la position pour rattacher un PV ou une patrouille au terrain.</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

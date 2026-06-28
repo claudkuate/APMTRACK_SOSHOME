@@ -30,7 +30,7 @@ void main() {
     );
     await _pumpUntilFound(tester, find.text('Se connecter'));
 
-    expect(find.text('APMTRACK Agent'), findsWidgets);
+    expect(find.text('G-APM Agent'), findsWidgets);
     expect(find.byKey(const Key('login-hero-image')), findsOneWidget);
     expect(find.byKey(const Key('cameroon-seal-image')), findsOneWidget);
     expect(find.text('Connexion agent terrain'), findsOneWidget);
