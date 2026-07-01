@@ -1403,20 +1403,6 @@ fn has_person_identity(verbalized_name: Option<&str>, identity_number: Option<&s
     verbalized_name.is_some() || identity_number.is_some()
 }
 
-fn has_person_any(
-    verbalized_name: Option<&str>,
-    identity_type: Option<&str>,
-    identity_number: Option<&str>,
-    phone: Option<&str>,
-    address: Option<&str>,
-) -> bool {
-    verbalized_name.is_some()
-        || identity_type.is_some()
-        || identity_number.is_some()
-        || phone.is_some()
-        || address.is_some()
-}
-
 fn has_vehicle_identity(
     vehicle_plate: Option<&str>,
     registration_card_number: Option<&str>,
@@ -1485,7 +1471,7 @@ fn validate_subject_fields(
     verbalized_identity_type: Option<&str>,
     verbalized_identity_number: Option<&str>,
     verbalized_phone: Option<&str>,
-    verbalized_address: Option<&str>,
+    _verbalized_address: Option<&str>,
     vehicle_plate: Option<&str>,
     vehicle_registration_card_number: Option<&str>,
     vehicle_make: Option<&str>,
@@ -1509,13 +1495,6 @@ fn validate_subject_fields(
         ));
     }
     let has_person_identity = has_person_identity(verbalized_name, verbalized_identity_number);
-    let has_person_any = has_person_any(
-        verbalized_name,
-        verbalized_identity_type,
-        verbalized_identity_number,
-        verbalized_phone,
-        verbalized_address,
-    );
     let has_vehicle_identity =
         has_vehicle_identity(vehicle_plate, vehicle_registration_card_number);
     let has_vehicle_any = has_vehicle_any(
@@ -1535,12 +1514,6 @@ fn validate_subject_fields(
         )),
         "PERSON_ONLY" if has_vehicle_any => Err(ApiError::bad_request(
             "Un PV usager sans vehicule ne doit pas contenir de donnees vehicule",
-        )),
-        "VEHICLE_ONLY" if !has_vehicle_identity => Err(ApiError::bad_request(
-            "Un PV vehicule sans conducteur requiert une plaque ou un numero de carte grise",
-        )),
-        "VEHICLE_ONLY" if has_person_any => Err(ApiError::bad_request(
-            "Un PV vehicule sans conducteur ne doit pas contenir de donnees contrevenant",
         )),
         "PERSON_WITH_VEHICLE" if !has_person_identity || !has_vehicle_identity => {
             Err(ApiError::bad_request(
@@ -1858,7 +1831,7 @@ mod tests {
             Some("Jean Test"),
             Some("CNI"),
             Some("ID123"),
-            None,
+            Some("+237600000000"),
             None,
             None,
             Some("CG123"),
@@ -1872,15 +1845,15 @@ mod tests {
     }
 
     #[test]
-    fn vehicle_only_accepts_registration_card_without_plate() {
+    fn vehicle_only_is_rejected_even_with_full_vehicle_identity() {
         let result = validate_subject_fields(
             "VEHICLE_ONLY",
+            Some("Jean Test"),
             None,
             None,
+            Some("+237600000000"),
             None,
-            None,
-            None,
-            None,
+            Some("CE123AB"),
             Some("CG123"),
             Some("Toyota"),
             None,
@@ -1888,7 +1861,7 @@ mod tests {
             None,
         );
 
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1898,7 +1871,7 @@ mod tests {
             Some("Jean Test"),
             Some("CNI"),
             Some("ID123"),
-            None,
+            Some("+237600000000"),
             None,
             None,
             None,
@@ -1918,7 +1891,7 @@ mod tests {
             Some("Jean Test"),
             None,
             Some("ID123"),
-            None,
+            Some("+237600000000"),
             None,
             None,
             None,
