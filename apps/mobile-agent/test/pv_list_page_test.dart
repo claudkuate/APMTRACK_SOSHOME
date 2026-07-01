@@ -227,6 +227,9 @@ class _NoopApi implements ApmtrackApi {
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>';
 
   @override
+  Future<List<int>> pvPdfBytes(String token, String pvId) async => const <int>[];
+
+  @override
   Future<List<PvPhoto>> listPvPhotos(String token, String pvId) =>
       throw UnimplementedError();
 

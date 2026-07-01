@@ -208,6 +208,9 @@ class SessionController extends ChangeNotifier {
   Future<String> pvQrSvg(String pvId) =>
       _withAuth((token) => api.pvQrSvg(token, pvId));
 
+  Future<List<int>> pvPdfBytes(String pvId) =>
+      _withAuth((token) => api.pvPdfBytes(token, pvId));
+
   Future<List<PvPhoto>> pvPhotos(String pvId) =>
       _withAuth((token) => api.listPvPhotos(token, pvId));
 

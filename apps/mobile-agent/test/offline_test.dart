@@ -318,6 +318,10 @@ class _OfflineFakeApi implements ApmtrackApi {
       throw UnimplementedError();
 
   @override
+  Future<List<int>> pvPdfBytes(String token, String pvId) =>
+      throw UnimplementedError();
+
+  @override
   Future<List<PvPhoto>> listPvPhotos(String token, String pvId) =>
       throw UnimplementedError();
 

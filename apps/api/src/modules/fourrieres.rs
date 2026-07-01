@@ -54,7 +54,9 @@ pub struct FourriereResponse {
     pub commune_id: Uuid,
     pub pv_id: Option<Uuid>,
     pub fourriere_number: String,
-    pub vehicle_plate: String,
+    pub item_type: String,
+    pub designation: Option<String>,
+    pub vehicle_plate: Option<String>,
     pub vehicle_type: Option<String>,
     pub vehicle_details: Option<String>,
     pub motif: String,
@@ -70,9 +72,9 @@ pub struct FourriereResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-const FOURRIERE_COLUMNS: &str = "id, commune_id, pv_id, fourriere_number, vehicle_plate, \
-    vehicle_type, vehicle_details, motif, lieu_enlevement, status, daily_fee_fcfa, \
-    entered_at, released_at, released_to, created_at, updated_at";
+const FOURRIERE_COLUMNS: &str = "id, commune_id, pv_id, fourriere_number, item_type, \
+    designation, vehicle_plate, vehicle_type, vehicle_details, motif, lieu_enlevement, \
+    status, daily_fee_fcfa, entered_at, released_at, released_to, created_at, updated_at";
 
 #[derive(Debug, Deserialize)]
 pub struct FourriereFilterQuery {
@@ -87,7 +89,9 @@ pub struct FourriereFilterQuery {
 pub struct CreateFourriereRequest {
     pub commune_id: Option<Uuid>,
     pub pv_id: Option<Uuid>,
-    pub vehicle_plate: String,
+    pub item_type: Option<String>,
+    pub designation: Option<String>,
+    pub vehicle_plate: Option<String>,
     pub vehicle_type: Option<String>,
     pub vehicle_details: Option<String>,
     pub motif: String,
@@ -172,8 +176,23 @@ async fn create_fourriere(
     let commune_id = resolve_commune_filter(&auth_user, payload.commune_id)?
         .ok_or_else(|| ApiError::bad_request("commune_id est requis"))?;
 
-    let vehicle_plate = required_text(payload.vehicle_plate, "vehicle_plate")?.to_ascii_uppercase();
+    let item_type = normalize_item_type(payload.item_type.as_deref())?;
     let motif = required_text(payload.motif, "motif")?;
+    let vehicle_plate =
+        clean_optional(payload.vehicle_plate).map(|plate| plate.to_ascii_uppercase());
+    let designation = clean_optional(payload.designation);
+    // Un véhicule est identifié par sa plaque ; les autres objets par une désignation.
+    if item_type == "VEHICULE" {
+        if vehicle_plate.is_none() {
+            return Err(ApiError::bad_request(
+                "La plaque est requise pour un véhicule",
+            ));
+        }
+    } else if designation.is_none() {
+        return Err(ApiError::bad_request(
+            "La désignation est requise pour un objet non-véhicule",
+        ));
+    }
     let vehicle_type = clean_optional(payload.vehicle_type);
     let vehicle_details = clean_optional(payload.vehicle_details);
     let lieu_enlevement = clean_optional(payload.lieu_enlevement);
@@ -239,16 +258,18 @@ async fn create_fourriere(
     sqlx::query(
         r#"
         INSERT INTO fourrieres (
-            id, commune_id, pv_id, fourriere_number, vehicle_plate, vehicle_type,
-            vehicle_details, motif, lieu_enlevement, daily_fee_fcfa, created_by
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            id, commune_id, pv_id, fourriere_number, item_type, designation, vehicle_plate,
+            vehicle_type, vehicle_details, motif, lieu_enlevement, daily_fee_fcfa, created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(id)
     .bind(commune_id)
     .bind(payload.pv_id)
     .bind(&number)
-    .bind(&vehicle_plate)
+    .bind(&item_type)
+    .bind(designation.as_deref())
+    .bind(vehicle_plate.as_deref())
     .bind(vehicle_type.as_deref())
     .bind(vehicle_details.as_deref())
     .bind(&motif)
@@ -271,7 +292,12 @@ async fn create_fourriere(
         "fourrieres",
         Some(id),
         None,
-        Some(json!({ "fourriere_number": number, "vehicle_plate": vehicle_plate })),
+        Some(json!({
+            "fourriere_number": number,
+            "item_type": item_type,
+            "designation": designation,
+            "vehicle_plate": vehicle_plate,
+        })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
@@ -340,6 +366,19 @@ async fn patch_fourriere_status(
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Types d'objets pouvant être mis en fourrière (véhicule par défaut).
+const VALID_ITEM_TYPES: [&str; 5] = ["VEHICULE", "ENGIN", "MARCHANDISE", "ANIMAL", "AUTRE"];
+
+fn normalize_item_type(requested: Option<&str>) -> Result<String, ApiError> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok("VEHICULE".to_string()),
+        Some(value) if VALID_ITEM_TYPES.contains(&value) => Ok(value.to_string()),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "item_type invalide: {other}"
+        ))),
+    }
+}
+
 async fn load_fourriere(pool: &PgPool, id: Uuid) -> Result<FourriereResponse, ApiError> {
     let row = sqlx::query(&format!(
         "SELECT {FOURRIERE_COLUMNS} FROM fourrieres WHERE id = $1 AND deleted_at IS NULL"
@@ -362,6 +401,8 @@ fn row_to_fourriere(row: sqlx::postgres::PgRow) -> FourriereResponse {
         commune_id: row.get("commune_id"),
         pv_id: row.get("pv_id"),
         fourriere_number: row.get("fourriere_number"),
+        item_type: row.get("item_type"),
+        designation: row.get("designation"),
         vehicle_plate: row.get("vehicle_plate"),
         vehicle_type: row.get("vehicle_type"),
         vehicle_details: row.get("vehicle_details"),

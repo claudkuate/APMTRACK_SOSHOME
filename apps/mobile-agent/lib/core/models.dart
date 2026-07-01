@@ -305,6 +305,8 @@ class Pv {
     required this.createdAt,
     this.interventions = const [],
     this.subjectType = PvSubjectTypes.personWithVehicle,
+    this.subjectKind,
+    this.raisonSociale,
     this.zoneId,
     this.verbalizedName,
     this.verbalizedIdentifier,
@@ -332,6 +334,8 @@ class Pv {
   final String interventionId;
   final List<PvIntervention> interventions;
   final String subjectType;
+  final String? subjectKind;
+  final String? raisonSociale;
   final String? zoneId;
   final String? verbalizedName;
   final String? verbalizedIdentifier;
@@ -408,6 +412,8 @@ class Pv {
       subjectType:
           readOptionalString(json, 'subject_type') ??
           PvSubjectTypes.personWithVehicle,
+      subjectKind: readOptionalString(json, 'subject_kind'),
+      raisonSociale: readOptionalString(json, 'raison_sociale'),
       zoneId: readOptionalString(json, 'zone_id'),
       verbalizedName: readOptionalString(json, 'verbalized_name'),
       verbalizedIdentifier: readOptionalString(json, 'verbalized_identifier'),
@@ -448,6 +454,8 @@ class Pv {
     'intervention_id': interventionId,
     'interventions': interventions.map((item) => item.toJson()).toList(),
     'subject_type': subjectType,
+    'subject_kind': subjectKind,
+    'raison_sociale': raisonSociale,
     'zone_id': zoneId,
     'verbalized_name': verbalizedName,
     'verbalized_identifier': verbalizedIdentifier,
@@ -537,6 +545,8 @@ class CreatePvPayload {
     required this.interventionId,
     this.interventionIds = const [],
     this.subjectType = PvSubjectTypes.personWithVehicle,
+    this.subjectKind,
+    this.raisonSociale,
     this.verbalizedName,
     this.verbalizedIdentifier,
     this.verbalizedFirstName,
@@ -560,6 +570,8 @@ class CreatePvPayload {
   final String interventionId;
   final List<String> interventionIds;
   final String subjectType;
+  final String? subjectKind;
+  final String? raisonSociale;
   final String? verbalizedName;
   final String? verbalizedIdentifier;
   final String? verbalizedFirstName;
@@ -585,6 +597,8 @@ class CreatePvPayload {
         ? [interventionId]
         : interventionIds,
     'subject_type': subjectType,
+    'subject_kind': subjectKind,
+    'raison_sociale': raisonSociale,
     'verbalized_name': verbalizedName,
     'verbalized_identifier': verbalizedIdentifier,
     'verbalized_first_name': verbalizedFirstName,

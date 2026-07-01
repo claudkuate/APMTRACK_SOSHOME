@@ -174,6 +174,8 @@ CreatePvPayload _payloadFromJson(JsonMap json) => CreatePvPayload(
   subjectType:
       readOptionalString(json, 'subject_type') ??
       PvSubjectTypes.personWithVehicle,
+  subjectKind: readOptionalString(json, 'subject_kind'),
+  raisonSociale: readOptionalString(json, 'raison_sociale'),
   verbalizedName: readOptionalString(json, 'verbalized_name'),
   verbalizedIdentifier: readOptionalString(json, 'verbalized_identifier'),
   verbalizedFirstName: readOptionalString(json, 'verbalized_first_name'),

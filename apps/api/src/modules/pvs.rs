@@ -61,6 +61,8 @@ pub struct PvResponse {
     pub intervention_id: Uuid,
     pub interventions: Vec<PvInterventionResponse>,
     pub subject_type: String,
+    pub subject_kind: String,
+    pub raison_sociale: Option<String>,
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
@@ -137,6 +139,8 @@ pub struct CreatePvRequest {
     pub intervention_id: Option<Uuid>,
     pub intervention_ids: Option<Vec<Uuid>>,
     pub subject_type: Option<String>,
+    pub subject_kind: Option<String>,
+    pub raison_sociale: Option<String>,
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
@@ -163,6 +167,8 @@ pub struct PatchPvRequest {
     pub intervention_id: Option<Uuid>,
     pub intervention_ids: Option<Vec<Uuid>>,
     pub subject_type: Option<String>,
+    pub subject_kind: Option<String>,
+    pub raison_sociale: Option<String>,
     pub zone_id: Option<Uuid>,
     pub verbalized_name: Option<String>,
     pub verbalized_identifier: Option<String>,
@@ -238,7 +244,7 @@ async fn list_pvs(
         r#"
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
-            subject_type,
+            subject_type, subject_kind, raison_sociale,
             verbalized_name, verbalized_identifier,
             verbalized_first_name, verbalized_last_name, verbalized_identity_type,
             verbalized_identity_number, verbalized_phone, verbalized_address,
@@ -335,6 +341,19 @@ async fn create_pv(
     let vehicle_owner_name = clean_optional(payload.vehicle_owner_name);
     let location_description = clean_optional(payload.location_description);
     let notes_internes = clean_optional(payload.notes_internes);
+    let raison_sociale = clean_optional(payload.raison_sociale);
+    let subject_kind = normalize_subject_kind(payload.subject_kind.as_deref())?;
+    if subject_kind == "MORALE" && raison_sociale.is_none() {
+        return Err(ApiError::bad_request(
+            "La raison sociale est requise pour une personne morale",
+        ));
+    }
+    // Pour une personne morale, la raison sociale tient lieu de nom du contrevenant.
+    let verbalized_name = if subject_kind == "MORALE" {
+        raison_sociale.clone()
+    } else {
+        verbalized_name
+    };
     let subject_type = normalize_subject_type(
         payload.subject_type.as_deref(),
         verbalized_name.as_deref(),
@@ -439,7 +458,8 @@ async fn create_pv(
             vehicle_plate, vehicle_registration_card_number,
             vehicle_make, vehicle_model, vehicle_color, vehicle_owner_name,
             location_description, gps_latitude, gps_longitude,
-            amount_initial, amount_initial_fcfa, status, qr_code_svg, notes_internes, created_by
+            amount_initial, amount_initial_fcfa, status, qr_code_svg, notes_internes, created_by,
+            subject_kind, raison_sociale
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9,
@@ -448,7 +468,8 @@ async fn create_pv(
             $16, $17,
             $18, $19, $20, $21,
             $22, $23, $24,
-            $25, $26, $27, $28, $29, $30
+            $25, $26, $27, $28, $29, $30,
+            $31, $32
         )
         "#,
     )
@@ -482,6 +503,8 @@ async fn create_pv(
     .bind(&qr_svg)
     .bind(notes_internes.clone())
     .bind(auth_user.id)
+    .bind(&subject_kind)
+    .bind(raison_sociale.clone())
     .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
@@ -580,6 +603,19 @@ async fn patch_pv(
     let vehicle_owner_name = clean_optional(payload.vehicle_owner_name);
     let location_description = clean_optional(payload.location_description);
     let notes_internes = clean_optional(payload.notes_internes);
+    let raison_sociale = clean_optional(payload.raison_sociale);
+    let subject_kind = normalize_subject_kind(payload.subject_kind.as_deref())?;
+    if subject_kind == "MORALE" && raison_sociale.is_none() {
+        return Err(ApiError::bad_request(
+            "La raison sociale est requise pour une personne morale",
+        ));
+    }
+    // Pour une personne morale, la raison sociale tient lieu de nom du contrevenant.
+    let verbalized_name = if subject_kind == "MORALE" {
+        raison_sociale.clone()
+    } else {
+        verbalized_name
+    };
     let subject_type = normalize_subject_type(
         payload.subject_type.as_deref(),
         verbalized_name.as_deref(),
@@ -665,6 +701,8 @@ async fn patch_pv(
             amount_initial_fcfa = $23,
             status = $24,
             notes_internes = $25,
+            subject_kind = $26,
+            raison_sociale = $27,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -694,6 +732,8 @@ async fn patch_pv(
     .bind(amount_initial_fcfa)
     .bind(next_status)
     .bind(notes_internes.clone())
+    .bind(&subject_kind)
+    .bind(raison_sociale.clone())
     .execute(&mut *tx)
     .await
     .map_err(map_database_error)?;
@@ -943,7 +983,7 @@ pub async fn load_pv(pool: &PgPool, id: Uuid) -> Result<PvResponse, ApiError> {
         r#"
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
-            subject_type,
+            subject_type, subject_kind, raison_sociale,
             verbalized_name, verbalized_identifier,
             verbalized_first_name, verbalized_last_name, verbalized_identity_type,
             verbalized_identity_number, verbalized_phone, verbalized_address,
@@ -1051,6 +1091,8 @@ fn row_to_pv(row: sqlx::postgres::PgRow) -> PvResponse {
         intervention_id: row.get("intervention_id"),
         interventions: Vec::new(),
         subject_type: row.get("subject_type"),
+        subject_kind: row.get("subject_kind"),
+        raison_sociale: row.get("raison_sociale"),
         zone_id: row.get("zone_id"),
         verbalized_name: row.get("verbalized_name"),
         verbalized_identifier: row.get("verbalized_identifier"),
@@ -1100,7 +1142,7 @@ async fn load_pv_for_update_tx(
         r#"
         SELECT
             id, commune_id, agent_id, pv_number, intervention_id, zone_id,
-            subject_type,
+            subject_type, subject_kind, raison_sociale,
             verbalized_name, verbalized_identifier,
             verbalized_first_name, verbalized_last_name, verbalized_identity_type,
             verbalized_identity_number, verbalized_phone, verbalized_address,
@@ -1396,6 +1438,17 @@ fn has_vehicle_any(
         || model.is_some()
         || color.is_some()
         || owner_name.is_some()
+}
+
+/// Normalise le type de personne du contrevenant (physique par défaut / morale).
+fn normalize_subject_kind(requested: Option<&str>) -> Result<String, ApiError> {
+    match requested.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("PHYSIQUE") => Ok("PHYSIQUE".to_string()),
+        Some("MORALE") => Ok("MORALE".to_string()),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "subject_kind invalide: {other}"
+        ))),
+    }
 }
 
 fn normalize_subject_type(

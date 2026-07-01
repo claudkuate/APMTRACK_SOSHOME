@@ -189,6 +189,7 @@ async fn list_pending(
             p.id AS pv_id,
             p.pv_number,
             p.commune_id,
+            p.amount_initial_fcfa,
             p.created_at
         FROM pvs p
         WHERE p.status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
@@ -209,7 +210,12 @@ async fn list_pending(
     for row in rows {
         let pv_id: Uuid = row.get("pv_id");
         let created_at: DateTime<Utc> = row.get("created_at");
-        let computed = payment_computation_pool(&state.db, pv_id, created_at).await?;
+        let amount_initial_fcfa: i64 = row.try_get("amount_initial_fcfa").unwrap_or(0);
+        // Tolérant : un PV hérité sans infraction payante ne doit pas faire échouer
+        // toute la liste des encaissements (retombe sur amount_initial_fcfa).
+        let computed =
+            payment_computation_pool_lenient(&state.db, pv_id, created_at, amount_initial_fcfa)
+                .await?;
         items.push(PendingPvResponse {
             pv_id,
             pv_number: row.get("pv_number"),
@@ -469,11 +475,19 @@ fn row_to_payment(row: sqlx::postgres::PgRow) -> PaymentResponse {
     }
 }
 
-/// Pénalité = montant × taux% si la date d'échéance est dépassée.
-async fn payment_computation_pool(
+/// Variante tolérante réservée à l'affichage de la liste des PV à encaisser.
+///
+/// Certains PV hérités/seed n'ont aucune ligne `pv_interventions` avec
+/// `sujet_paiement = TRUE`. `payment_computation_from_rows` renvoie alors une erreur,
+/// ce qui faisait échouer toute la réponse `list_pending` (un seul PV « pollué » masquait
+/// tous les autres). Ici, on retombe sur `amount_initial_fcfa` du PV, pénalité 0,
+/// échéance à +30 jours, au lieu de propager l'erreur. La validation d'un paiement
+/// (`validate_payment` / `payment_computation_tx`) reste stricte.
+async fn payment_computation_pool_lenient(
     pool: &PgPool,
     pv_id: Uuid,
     created_at: DateTime<Utc>,
+    fallback_amount_fcfa: i64,
 ) -> Result<PaymentComputation, ApiError> {
     let rows = sqlx::query(
         r#"
@@ -487,6 +501,14 @@ async fn payment_computation_pool(
     .bind(pv_id)
     .fetch_all(pool)
     .await?;
+    if rows.is_empty() {
+        return Ok(PaymentComputation {
+            amount_due_fcfa: fallback_amount_fcfa,
+            amount_penalty_fcfa: 0,
+            amount_total_fcfa: fallback_amount_fcfa,
+            due_date: created_at + Duration::days(30),
+        });
+    }
     payment_computation_from_rows(rows, created_at)
 }
 

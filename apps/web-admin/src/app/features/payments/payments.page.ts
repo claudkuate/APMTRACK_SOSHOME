@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/services/api.service';
 import { CommuneContextService } from '../../core/services/commune-context.service';
 import { Paginated } from '../../shared/api-types';
+import { describeHttpError } from '../../shared/http-error';
 
 interface PendingPv {
   pv_id: string;
@@ -267,11 +268,11 @@ export class PaymentsPage implements OnInit {
     const scope = communeId ? { commune_id: communeId } : {};
     this.api.page<PendingPv>('/api/v1/payments/pending', { page_size: 50, ...scope }).subscribe({
       next: (response: Paginated<PendingPv>) => this.pending.set(response.items),
-      error: () => this.message.set('Chargement des PV en attente impossible.'),
+      error: (err: unknown) => this.message.set(describeHttpError(err, 'Chargement des PV en attente')),
     });
     this.api.page<Payment>('/api/v1/payments', { page_size: 50, ...scope }).subscribe({
       next: (response: Paginated<Payment>) => this.payments.set(response.items),
-      error: () => this.message.set("Chargement de l'historique impossible."),
+      error: (err: unknown) => this.message.set(describeHttpError(err, "Chargement de l'historique")),
     });
   }
 

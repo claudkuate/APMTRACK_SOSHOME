@@ -7,7 +7,7 @@ import {
   Validators,
 } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Subscription } from 'rxjs';
+import { Subscription, firstValueFrom } from 'rxjs';
 
 import { ApiService } from '../../core/services/api.service';
 import { AuthService } from '../../core/services/auth.service';
@@ -15,6 +15,7 @@ import { I18nService } from '../../core/i18n/i18n.service';
 import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { LookupService } from '../../core/services/lookup.service';
 import { LookupOption, Paginated, RoleCode } from '../../shared/api-types';
+import { describeHttpError } from '../../shared/http-error';
 import {
   ResourceAction,
   ResourceConfig,
@@ -121,10 +122,6 @@ interface AgentsDialogContext {
               >
                 <div>
                   <h3 class="text-lg font-black">{{ formTitle(cfg) }}</h3>
-                  <p class="mt-1 text-sm text-[var(--text-muted)]">
-                    Les champs critiques restent valides par l'API. Les identifiants techniques sont
-                    remplaces par des listes.
-                  </p>
                 </div>
                 @if (cfg.key === 'pvs') {
                   <span class="status-badge warn">{{ 'Montant non modifiable' | auto }}</span>
@@ -702,6 +699,9 @@ export class ResourcePage implements OnInit, OnDestroy {
   private readonly lookup = inject(LookupService);
   protected readonly i18n = inject(I18nService);
   private subscription?: Subscription;
+  /** Champs du formulaire courant (pour l'affichage conditionnel `visibleWhen`). */
+  private formFields: ResourceField[] = [];
+  private conditionalSub?: Subscription;
 
   protected readonly config = signal<ResourceConfig | null>(null);
   protected readonly rows = signal<Row[]>([]);
@@ -752,6 +752,7 @@ export class ResourcePage implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.subscription?.unsubscribe();
+    this.conditionalSub?.unsubscribe();
     this.clearAvatars();
   }
 
@@ -848,8 +849,7 @@ export class ResourcePage implements OnInit, OnDestroy {
           this.applyTableState();
           this.loadAvatars(cfg);
         },
-        error: () =>
-          this.error.set('Chargement impossible. Verifie les droits ou la disponibilite API.'),
+        error: (err: unknown) => this.error.set(describeHttpError(err, 'Chargement')),
       });
   }
 
@@ -911,6 +911,10 @@ export class ResourcePage implements OnInit, OnDestroy {
       this.api.openDownload(action.path(row), action.filename?.(row) ?? 'document');
       return;
     }
+    if (action.kind === 'share') {
+      void this.runShare(action, row);
+      return;
+    }
     if (action.kind === 'status') {
       this.openStatus(action, row);
       return;
@@ -922,6 +926,47 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.executeAction(action, row);
   }
 
+  /**
+   * Partage natif du PV (Web Share API) : lien de suivi + PDF si le device le permet.
+   * En attendant l'API WhatsApp, l'utilisateur choisit le destinataire via le sélecteur
+   * natif. Fallback desktop : copie du lien dans le presse-papier.
+   */
+  private async runShare(action: ResourceAction, row: Row): Promise<void> {
+    const url = action.shareUrl?.(row) ?? '';
+    const text = action.shareText?.(row) ?? '';
+    const title = String(row['pv_number'] ?? action.label);
+
+    let file: File | undefined;
+    if (action.path && action.filename) {
+      try {
+        const blob = await firstValueFrom(this.api.download(action.path(row)));
+        file = new File([blob], action.filename(row), {
+          type: blob.type || 'application/pdf',
+        });
+      } catch {
+        file = undefined;
+      }
+    }
+
+    if (typeof navigator.share === 'function') {
+      const canShareFile = !!file && navigator.canShare?.({ files: [file] });
+      const data: ShareData = canShareFile ? { title, text, url, files: [file!] } : { title, text, url };
+      try {
+        await navigator.share(data);
+      } catch {
+        // Partage annulé par l'utilisateur : rien à signaler.
+      }
+      return;
+    }
+
+    try {
+      await navigator.clipboard?.writeText(url || text);
+      this.message.set('Lien du PV copié dans le presse-papier.');
+    } catch {
+      this.message.set("Partage non supporté sur cet appareil.");
+    }
+  }
+
   protected visibleActions(cfg: ResourceConfig): ResourceAction[] {
     return (cfg.actions ?? []).filter((action) => this.actionAllowed(cfg, action));
   }
@@ -930,7 +975,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     if (action.roles) {
       return this.auth.hasAnyRole(action.roles);
     }
-    if (action.kind === 'download') {
+    if (action.kind === 'download' || action.kind === 'share') {
       return true;
     }
     return this.canMutate(cfg);
@@ -1155,6 +1200,9 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected formSections(fields: ResourceField[]): FormSection[] {
     const sections = new Map<string, ResourceField[]>();
     for (const field of fields) {
+      if (!this.isFieldVisible(field)) {
+        continue;
+      }
       const title = field.section ?? 'Informations';
       sections.set(title, [...(sections.get(title) ?? []), field]);
     }
@@ -1402,6 +1450,45 @@ export class ResourcePage implements OnInit, OnDestroy {
       );
     }
     this.form = new FormGroup(controls);
+    this.formFields = fields;
+    this.conditionalSub?.unsubscribe();
+    // Réévalue l'affichage conditionnel (visibleWhen) à chaque changement de valeur.
+    this.conditionalSub = this.form.valueChanges.subscribe(() => this.applyConditionalState());
+    this.applyConditionalState();
+  }
+
+  /**
+   * Un champ `visibleWhen` est masqué (et son contrôle désactivé) tant que le champ
+   * pilote n'a pas la valeur attendue. Désactiver le contrôle l'exclut de la validation
+   * Angular et du payload — indispensable pour ne pas bloquer la soumission sur un champ
+   * requis mais caché (ex. « Raison sociale » quand la personne est physique).
+   */
+  private applyConditionalState(): void {
+    for (const field of this.formFields) {
+      if (!field.visibleWhen) {
+        continue;
+      }
+      const control = this.form.get(field.key);
+      if (!control) {
+        continue;
+      }
+      const visible = this.matchesVisibleWhen(field.visibleWhen);
+      if (visible && control.disabled) {
+        control.enable({ emitEvent: false });
+      } else if (!visible && control.enabled) {
+        control.disable({ emitEvent: false });
+      }
+    }
+  }
+
+  private matchesVisibleWhen(rule: { field: string; equals: string | string[] }): boolean {
+    const current = String(this.form.get(rule.field)?.value ?? '');
+    const expected = Array.isArray(rule.equals) ? rule.equals : [rule.equals];
+    return expected.includes(current);
+  }
+
+  protected isFieldVisible(field: ResourceField): boolean {
+    return !field.visibleWhen || this.matchesVisibleWhen(field.visibleWhen);
   }
 
   private patchForm(fields: ResourceField[], row: Row): void {
@@ -1438,9 +1525,41 @@ export class ResourcePage implements OnInit, OnDestroy {
         control.setValue(raw);
       }
     }
+    this.backfillCascadeParents();
+    this.applyConditionalState();
+  }
+
+  /**
+   * En édition, un champ en cascade (ex. `commune_id` filtré par `departement_id`) doit
+   * retrouver la valeur de ses parents pour rester affichable. On dérive la valeur parente
+   * depuis le `parentId` de l'option enfant chargée (commune → département → région).
+   * Parcours en ordre inverse pour propager en une passe.
+   */
+  private backfillCascadeParents(): void {
+    for (const field of [...this.formFields].reverse()) {
+      if (!field.dependsOn) {
+        continue;
+      }
+      const control = this.form.get(field.key);
+      const parentControl = this.form.get(field.dependsOn);
+      if (!control || !parentControl) {
+        continue;
+      }
+      const childValue = control.value;
+      if (!childValue || parentControl.value) {
+        continue;
+      }
+      const option = this.optionsFor(field.key).find((item) => item.id === String(childValue));
+      if (option?.parentId) {
+        parentControl.setValue(option.parentId);
+      }
+    }
   }
 
   private defaultValue(field: ResourceField): unknown {
+    if (field.default !== undefined) {
+      return field.default;
+    }
     if (field.type === 'checkbox') {
       return field.key === 'active' ? true : false;
     }
@@ -1502,6 +1621,10 @@ export class ResourcePage implements OnInit, OnDestroy {
     const raw = this.form.getRawValue() as Record<string, unknown>;
     const payload: Record<string, unknown> = {};
     for (const field of fields) {
+      // Champs purement UI (filtres Région/Département) ou masqués : jamais envoyés.
+      if (field.uiOnly || !this.isFieldVisible(field)) {
+        continue;
+      }
       if (field.type === 'geopoint') {
         const latKey = field.latKey ?? field.key;
         const lonKey = field.lonKey ?? 'gps_longitude';

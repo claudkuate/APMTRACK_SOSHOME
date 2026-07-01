@@ -19,6 +19,7 @@ abstract class ApmtrackApi {
   Future<Pv> createPv(String token, CreatePvPayload payload);
   Future<Pv> updatePv(String token, String pvId, CreatePvPayload payload);
   Future<String> pvQrSvg(String token, String pvId);
+  Future<List<int>> pvPdfBytes(String token, String pvId);
   Future<List<PvPhoto>> listPvPhotos(String token, String pvId);
   Future<PvPhoto> uploadPvPhoto(
     String token,
@@ -256,6 +257,15 @@ class HttpApmtrackApi implements ApmtrackApi {
     );
     _ensureOk(response);
     return response.body;
+  }
+
+  @override
+  Future<List<int>> pvPdfBytes(String token, String pvId) async {
+    final response = await _send(
+      _client.get(_uri('/api/v1/pvs/$pvId/pdf'), headers: _headers(token)),
+    );
+    _ensureOk(response);
+    return response.bodyBytes;
   }
 
   @override

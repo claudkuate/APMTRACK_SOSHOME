@@ -1,4 +1,5 @@
 import { RoleCode } from './api-types';
+import { apiBaseUrl } from '../core/config/runtime-config';
 
 export type FieldType =
   | 'text'
@@ -47,6 +48,12 @@ export interface ResourceField {
   relation?: RelationConfig;
   readonly?: boolean;
   dependsOn?: string;
+  /** Champ purement UI (ex. filtre Région/Département) : jamais envoyé dans le payload. */
+  uiOnly?: boolean;
+  /** Affiche ce champ uniquement quand le champ `field` vaut `equals` (valeur ou liste). */
+  visibleWhen?: { field: string; equals: string | string[] };
+  /** Valeur initiale du contrôle à la création (sinon vide / false / []). */
+  default?: string | number | boolean;
   /** geopoint: clés de formulaire alimentées par le sélecteur de position. */
   latKey?: string;
   lonKey?: string;
@@ -72,9 +79,13 @@ export interface StatusExtraField {
 
 export interface ResourceAction {
   label: string;
-  kind: 'download' | 'post' | 'delete' | 'status';
+  kind: 'download' | 'post' | 'delete' | 'status' | 'share';
   path: (row: Record<string, unknown>) => string;
   filename?: (row: Record<string, unknown>) => string;
+  /** share-kind: lien de suivi à partager (ouvre le partage natif du device). */
+  shareUrl?: (row: Record<string, unknown>) => string;
+  /** share-kind: texte accompagnant le partage. */
+  shareText?: (row: Record<string, unknown>) => string;
   sensitive?: boolean;
   confirmTitle?: string;
   confirmMessage?: (row: Record<string, unknown>) => string;
@@ -196,6 +207,9 @@ const communeRelation: RelationConfig = {
   labelKey: 'nom',
   metaKey: 'code',
   statusKey: 'active',
+  // Permet la cascade Région → Département → Commune (filtrage client par département).
+  // Sans effet sur les usages plats (filtres, displayRelations) qui ignorent parentId.
+  parentKey: 'departement_id',
 };
 
 const regionRelation: RelationConfig = {
@@ -386,7 +400,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       field('email', 'Email', 'email', true),
       field('password', 'Mot de passe initial', 'password', true),
       field('full_name', 'Nom complet', 'text', true),
-      relationField('commune_id', 'Commune', communeRelation),
+      ...communeCascadeFields(true),
       selectField(
         'roles',
         'Rôles',
@@ -413,7 +427,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'Laisser vide pour conserver le mot de passe actuel.',
       ),
       field('full_name', 'Nom complet', 'text', true),
-      relationField('commune_id', 'Commune', communeRelation, false),
+      ...communeCascadeFields(false),
       selectField(
         'roles',
         'Rôles',
@@ -454,7 +468,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     createFields: [
       field('matricule', 'Matricule', 'text', true, 'APM-YDE1-001', undefined, 'Identité'),
       field('full_name', 'Nom complet', 'text', true, undefined, undefined, 'Identité'),
-      relationField('commune_id', "Commune d'attache", communeRelation, true, 'Affectation'),
+      ...communeCascadeFields(true, 'Affectation', "Commune d'attache"),
     ],
     actions: [
       sensitiveAction(
@@ -495,7 +509,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [relationFilter('commune_id', 'Commune', communeRelation), activeFilter()],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation),
+      ...communeCascadeFields(true),
       field('nom', 'Nom de zone', 'text', true),
       selectField('type_zone', 'Type de zone', true, [
         option('QUARTIER', 'Quartier'),
@@ -553,7 +567,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     filters: [relationFilter('commune_id', 'Commune', communeRelation), activeFilter()],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation),
+      ...communeCascadeFields(true),
       field('nom', 'Nom catégorie', 'text', true),
       field('description', 'Description', 'textarea'),
       field('active', 'Catégorie active', 'checkbox'),
@@ -595,7 +609,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       activeFilter(),
     ],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade référentiel'),
+      ...communeCascadeFields(true, 'Cascade référentiel'),
       relationField(
         'category_id',
         'Catégorie',
@@ -662,7 +676,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       activeFilter(),
     ],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation, true, 'Cascade référentiel'),
+      ...communeCascadeFields(true, 'Cascade référentiel'),
       relationField(
         'category_id',
         'Catégorie',
@@ -861,6 +875,8 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'pv_number',
       'status',
       'subject_type',
+      'subject_kind',
+      'raison_sociale',
       'interventions',
       'amount_initial_fcfa',
       'vehicle_plate',
@@ -917,16 +933,45 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         true,
         '2. Infractions',
       ),
-      field('verbalized_last_name', 'Nom', 'text', true, undefined, undefined, '3. Contrevenant'),
-      field(
-        'verbalized_first_name',
-        'Prénom',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '3. Contrevenant',
-      ),
+      {
+        ...selectField(
+          'subject_kind',
+          'Type de personne',
+          true,
+          [option('PHYSIQUE', 'Personne physique'), option('MORALE', 'Personne morale')],
+          'Une personne morale est identifiée par sa raison sociale.',
+          '3. Contrevenant',
+        ),
+        default: 'PHYSIQUE',
+      },
+      {
+        ...field(
+          'raison_sociale',
+          'Raison sociale',
+          'text',
+          true,
+          'Ets CAMERAMAN',
+          undefined,
+          '3. Contrevenant',
+        ),
+        visibleWhen: { field: 'subject_kind', equals: 'MORALE' },
+      },
+      {
+        ...field('verbalized_last_name', 'Nom', 'text', true, undefined, undefined, '3. Contrevenant'),
+        visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
+      },
+      {
+        ...field(
+          'verbalized_first_name',
+          'Prénom',
+          'text',
+          false,
+          undefined,
+          undefined,
+          '3. Contrevenant',
+        ),
+        visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
+      },
       selectField(
         'verbalized_identity_type',
         "Type d'identité",
@@ -1034,16 +1079,53 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         true,
         '2. Infractions',
       ),
-      field('verbalized_last_name', 'Nom', 'text', false, undefined, undefined, '3. Contrevenant'),
-      field(
-        'verbalized_first_name',
-        'Prénom',
-        'text',
-        false,
-        undefined,
-        undefined,
-        '3. Contrevenant',
-      ),
+      {
+        ...selectField(
+          'subject_kind',
+          'Type de personne',
+          true,
+          [option('PHYSIQUE', 'Personne physique'), option('MORALE', 'Personne morale')],
+          'Une personne morale est identifiée par sa raison sociale.',
+          '3. Contrevenant',
+        ),
+        default: 'PHYSIQUE',
+      },
+      {
+        ...field(
+          'raison_sociale',
+          'Raison sociale',
+          'text',
+          true,
+          'Ets CAMERAMAN',
+          undefined,
+          '3. Contrevenant',
+        ),
+        visibleWhen: { field: 'subject_kind', equals: 'MORALE' },
+      },
+      {
+        ...field(
+          'verbalized_last_name',
+          'Nom',
+          'text',
+          false,
+          undefined,
+          undefined,
+          '3. Contrevenant',
+        ),
+        visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
+      },
+      {
+        ...field(
+          'verbalized_first_name',
+          'Prénom',
+          'text',
+          false,
+          undefined,
+          undefined,
+          '3. Contrevenant',
+        ),
+        visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
+      },
       selectField(
         'verbalized_identity_type',
         "Type d'identité",
@@ -1148,6 +1230,16 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         path: (row) => `/api/v1/pvs/${row['id']}/pdf`,
         filename: (row) => `${row['pv_number']}.pdf`,
       },
+      {
+        // Partage natif (Web Share API) : envoie le PV vers un numéro via le sélecteur du
+        // device, en attendant l'API WhatsApp. Le lien de suivi est celui encodé dans le QR.
+        label: 'Partager',
+        kind: 'share',
+        path: (row) => `/api/v1/pvs/${row['id']}/pdf`,
+        filename: (row) => `${row['pv_number']}.pdf`,
+        shareUrl: (row) => `${apiBaseUrl()}/api/v1/public/pvs/${row['pv_number']}`,
+        shareText: (row) => `Procès-verbal ${row['pv_number']} — suivi et paiement`,
+      },
       statusAction({
         label: 'Changer statut',
         path: (row) => `/api/v1/pvs/${row['id']}/status`,
@@ -1237,12 +1329,14 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
   fourrieres: {
     key: 'fourrieres',
     title: 'Fourrières',
-    description: 'Mises en fourrière de véhicules, gardiennage et restitution.',
+    description: 'Mises en fourrière (véhicules et autres objets), gardiennage et restitution.',
     endpoint: '/api/v1/fourrieres',
-    columns: ['fourriere_number', 'vehicle_plate', 'vehicle_type', 'status', 'entered_at'],
+    columns: ['fourriere_number', 'item_type', 'designation', 'vehicle_plate', 'status', 'entered_at'],
     secondaryColumns: ['motif'],
     detailFields: [
       'fourriere_number',
+      'item_type',
+      'designation',
       'vehicle_plate',
       'vehicle_type',
       'vehicle_details',
@@ -1260,7 +1354,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     ],
     displayRelations: { commune_id: communeRelation },
     detail: {
-      summaryFields: ['fourriere_number', 'vehicle_plate', 'status'],
+      summaryFields: ['fourriere_number', 'item_type', 'status'],
     },
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
@@ -1270,10 +1364,45 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       relationFilter('commune_id', 'Commune', communeRelation),
     ],
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation),
-      field('vehicle_plate', 'Plaque', 'text', true),
-      field('vehicle_type', 'Type de véhicule', 'text', false, 'Berline, moto, camion…'),
-      field('vehicle_details', 'Détails véhicule', 'textarea'),
+      ...communeCascadeFields(true),
+      {
+        ...selectField(
+          'item_type',
+          "Type d'objet",
+          true,
+          [
+            option('VEHICULE', 'Véhicule'),
+            option('ENGIN', 'Engin / matériel'),
+            option('MARCHANDISE', 'Marchandise saisie'),
+            option('ANIMAL', 'Animal'),
+            option('AUTRE', 'Autre'),
+          ],
+          undefined,
+        ),
+        default: 'VEHICULE',
+      },
+      {
+        ...field(
+          'designation',
+          'Désignation',
+          'text',
+          true,
+          "Libellé de l'objet mis en fourrière.",
+        ),
+        visibleWhen: { field: 'item_type', equals: ['ENGIN', 'MARCHANDISE', 'ANIMAL', 'AUTRE'] },
+      },
+      {
+        ...field('vehicle_plate', 'Plaque', 'text', true),
+        visibleWhen: { field: 'item_type', equals: 'VEHICULE' },
+      },
+      {
+        ...field('vehicle_type', 'Type de véhicule', 'text', false, 'Berline, moto, camion…'),
+        visibleWhen: { field: 'item_type', equals: 'VEHICULE' },
+      },
+      {
+        ...field('vehicle_details', 'Détails véhicule', 'textarea'),
+        visibleWhen: { field: 'item_type', equals: 'VEHICULE' },
+      },
       field('motif', 'Motif', 'textarea', true, "Raison de la mise en fourrière."),
       field('lieu_enlevement', "Lieu d'enlèvement", 'text'),
       field('daily_fee_fcfa', 'Tarif journalier FCFA', 'money', false, 'Frais de gardiennage / jour.'),
@@ -1327,7 +1456,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     ],
     manageAgents: true,
     createFields: [
-      relationField('commune_id', 'Commune', communeRelation),
+      ...communeCascadeFields(true),
       relationField('zone_id', 'Zone', zoneRelation, true, undefined, 'commune_id'),
       field('nom', 'Nom patrouille', 'text', false, undefined, 'Auto-généré si vide.'),
       field('description', 'Description', 'textarea'),
@@ -1412,6 +1541,35 @@ function relationMultiField(
   dependsOn?: string,
 ): ResourceField {
   return { key, label, type: 'relation_multi', required, relation, section, dependsOn };
+}
+
+/**
+ * Sélection géographique hiérarchique Région → Département → Commune.
+ *
+ * Les champs `region_id` et `departement_id` sont purement UI (`uiOnly`, jamais envoyés) :
+ * ils ne servent qu'à filtrer la liste des communes. Seul `commune_id` est persisté.
+ * À utiliser dans tout formulaire où l'on choisit une commune à un niveau libre.
+ */
+function communeCascadeFields(
+  communeRequired = false,
+  section?: string,
+  communeLabel = 'Commune',
+): ResourceField[] {
+  return [
+    { ...relationField('region_id', 'Région', regionRelation, false, section), uiOnly: true },
+    {
+      ...relationField(
+        'departement_id',
+        'Département',
+        departementRelation,
+        false,
+        section,
+        'region_id',
+      ),
+      uiOnly: true,
+    },
+    relationField('commune_id', communeLabel, communeRelation, communeRequired, section, 'departement_id'),
+  ];
 }
 
 function selectField(
@@ -1609,6 +1767,10 @@ function commonLabels(): Record<string, string> {
     intervention_ids: 'Infractions',
     interventions: 'Infractions',
     subject_type: 'Type PV',
+    subject_kind: 'Type de personne',
+    raison_sociale: 'Raison sociale',
+    item_type: "Type d'objet",
+    designation: 'Désignation',
     sujet_paiement: 'Payant',
     montant_fcfa: 'Montant FCFA',
     amount_initial_fcfa: 'Montant FCFA',

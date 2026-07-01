@@ -1,11 +1,15 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:thermal_printer_plus/thermal_printer.dart';
 
 import '../../core/api/api_client.dart';
 import '../../core/auth/session_controller.dart';
+import '../../core/config.dart';
 import '../../core/models.dart';
 import '../../core/theme.dart';
 import '../../core/ui/common.dart';
@@ -39,6 +43,11 @@ class _PvDetailPageState extends State<PvDetailPage> {
       appBar: AppBar(
         title: Text(pv.pvNumber),
         actions: [
+          IconButton(
+            tooltip: 'Partager',
+            icon: const Icon(Icons.share_outlined),
+            onPressed: _sharePv,
+          ),
           IconButton(
             tooltip: 'Imprimer',
             icon: const Icon(Icons.print_outlined),
@@ -86,6 +95,11 @@ class _PvDetailPageState extends State<PvDetailPage> {
                 ),
                 _DetailRow(label: 'Date', value: formatShortDate(pv.createdAt)),
                 _DetailRow(label: 'Type', value: pv.subjectLabel),
+                if (pv.subjectKind == 'MORALE')
+                  _DetailRow(
+                    label: 'Raison sociale',
+                    value: pv.raisonSociale ?? pv.verbalizedName ?? '-',
+                  ),
                 _DetailRow(label: 'Plaque', value: pv.vehiclePlate ?? '-'),
                 _DetailRow(
                   label: 'Carte grise',
@@ -207,6 +221,37 @@ class _PvDetailPageState extends State<PvDetailPage> {
         ],
       ),
     );
+  }
+
+  /// Partage natif du PV : lien public de suivi + PDF joint (via le sélecteur du
+  /// téléphone → WhatsApp, SMS, e-mail…). En attendant l'API WhatsApp officielle.
+  /// Hors-ligne ou PDF indisponible : repli sur le partage du texte + lien seuls.
+  Future<void> _sharePv() async {
+    final pv = widget.pv;
+    final link = '$apiBaseUrl/api/v1/public/pvs/${pv.pvNumber}';
+    final text = 'Proces-verbal ${pv.pvNumber}\nSuivi et paiement : $link';
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final bytes = await widget.controller.pvPdfBytes(pv.id);
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/${pv.pvNumber}.pdf');
+      await file.writeAsBytes(bytes, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          text: text,
+          files: [XFile(file.path, mimeType: 'application/pdf')],
+        ),
+      );
+    } catch (_) {
+      try {
+        await SharePlus.instance.share(ShareParams(text: text));
+      } catch (error) {
+        if (!mounted) return;
+        messenger.showSnackBar(
+          SnackBar(content: Text('Partage impossible : $error')),
+        );
+      }
+    }
   }
 
   void _openPrintSheet(BuildContext context) {

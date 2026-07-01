@@ -35,6 +35,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
   final _picker = ImagePicker();
   final _firstNameController = TextEditingController();
   final _lastNameController = TextEditingController();
+  final _raisonSocialeController = TextEditingController();
   final _identityNumberController = TextEditingController();
   final _phoneController = TextEditingController();
   final _addressController = TextEditingController();
@@ -52,6 +53,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
   String? _selectedCategoryId;
   String? _selectedTypeId;
   String? _identityType;
+  // Type de personne du contrevenant : 'PHYSIQUE' (défaut) ou 'MORALE'.
+  String _subjectKind = 'PHYSIQUE';
   final Set<String> _selectedInterventionIds = {};
   final List<PvDraftPhoto> _photos = [];
   Position? _position;
@@ -112,6 +115,9 @@ class _CreatePvPageState extends State<CreatePvPage> {
       }
       return;
     }
+    _subjectKind = pv.subjectKind ?? 'PHYSIQUE';
+    _raisonSocialeController.text =
+        pv.raisonSociale ?? (_subjectKind == 'MORALE' ? pv.verbalizedName ?? '' : '');
     _firstNameController.text = pv.verbalizedFirstName ?? '';
     _lastNameController.text = pv.verbalizedLastName ?? pv.verbalizedName ?? '';
     _identityType = pv.verbalizedIdentityType;
@@ -152,6 +158,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
   void dispose() {
     _firstNameController.dispose();
     _lastNameController.dispose();
+    _raisonSocialeController.dispose();
     _identityNumberController.dispose();
     _phoneController.dispose();
     _addressController.dispose();
@@ -399,17 +406,25 @@ class _CreatePvPageState extends State<CreatePvPage> {
   CreatePvPayload _payload() {
     final ids = _selectedInterventions.map((item) => item.id).toList();
     final hasVehicle = _vehicleInvolved;
+    final isMorale = _subjectKind == 'MORALE';
     final identityNumber = _clean(_identityNumberController.text);
-    final firstName = _clean(_firstNameController.text);
-    final lastName = _clean(_lastNameController.text);
-    final name = [firstName, lastName].whereType<String>().join(' ');
+    final raisonSociale = _clean(_raisonSocialeController.text);
+    // En personne morale, la raison sociale tient lieu de nom du contrevenant ;
+    // Nom/Prénom ne sont pas saisis.
+    final firstName = isMorale ? null : _clean(_firstNameController.text);
+    final lastName = isMorale ? null : _clean(_lastNameController.text);
+    final name = isMorale
+        ? raisonSociale
+        : [firstName, lastName].whereType<String>().join(' ');
     return CreatePvPayload(
       interventionId: ids.first,
       interventionIds: ids,
       subjectType: hasVehicle
           ? PvSubjectTypes.personWithVehicle
           : PvSubjectTypes.personOnly,
-      verbalizedName: name.isEmpty ? null : name,
+      subjectKind: isMorale ? 'MORALE' : null,
+      raisonSociale: isMorale ? raisonSociale : null,
+      verbalizedName: name == null || name.isEmpty ? null : name,
       verbalizedIdentifier: identityNumber,
       verbalizedFirstName: firstName,
       verbalizedLastName: lastName,
@@ -441,14 +456,20 @@ class _CreatePvPageState extends State<CreatePvPage> {
       _setError('Selectionnez au moins une infraction');
       return 0;
     }
+    final isMorale = _subjectKind == 'MORALE';
     final hasLastName = _clean(_lastNameController.text) != null;
+    final hasRaisonSociale = _clean(_raisonSocialeController.text) != null;
     final hasPhone = _clean(_phoneController.text) != null;
     final hasIdentityNumber = _clean(_identityNumberController.text) != null;
     final hasIdentityType = _identityType != null && _identityType!.isNotEmpty;
     final hasVehicle =
         _clean(_plateController.text) != null ||
         _clean(_registrationCardController.text) != null;
-    if (!hasLastName) {
+    if (isMorale && !hasRaisonSociale) {
+      _setError('Raison sociale requise');
+      return 1;
+    }
+    if (!isMorale && !hasLastName) {
       _setError('Nom du contrevenant requis');
       return 1;
     }
@@ -840,28 +861,50 @@ class _CreatePvPageState extends State<CreatePvPage> {
           style: TextStyle(fontWeight: FontWeight.w900),
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _lastNameController,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(
-                  labelText: 'Nom',
-                  prefixIcon: Icon(Icons.person_outline),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'PHYSIQUE', label: Text('Personne physique')),
+            ButtonSegment(value: 'MORALE', label: Text('Personne morale')),
+          ],
+          selected: {_subjectKind},
+          showSelectedIcon: false,
+          onSelectionChanged: (selection) =>
+              setState(() => _subjectKind = selection.first),
+        ),
+        const SizedBox(height: 12),
+        if (_subjectKind == 'MORALE')
+          TextField(
+            controller: _raisonSocialeController,
+            textCapitalization: TextCapitalization.words,
+            decoration: const InputDecoration(
+              labelText: 'Raison sociale',
+              hintText: 'Ex. Ets CAMERAMAN',
+              prefixIcon: Icon(Icons.business_outlined),
+            ),
+          )
+        else
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _lastNameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(
+                    labelText: 'Nom',
+                    prefixIcon: Icon(Icons.person_outline),
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: TextField(
-                controller: _firstNameController,
-                textCapitalization: TextCapitalization.words,
-                decoration: const InputDecoration(labelText: 'Prenom'),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  controller: _firstNameController,
+                  textCapitalization: TextCapitalization.words,
+                  decoration: const InputDecoration(labelText: 'Prenom'),
+                ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
           initialValue: _identityType,
@@ -1120,13 +1163,25 @@ class _CreatePvPageState extends State<CreatePvPage> {
           _ReviewInfractionsRow(selected: selected),
           _ReviewRow(label: 'Montant indicatif', value: formatFcfa(_totalFcfa)),
           _ReviewRow(
+            label: 'Type de personne',
+            value: _subjectKind == 'MORALE'
+                ? 'Personne morale'
+                : 'Personne physique',
+          ),
+          _ReviewRow(
             label: 'Contrevenant',
-            value: _summaryText([
-              _clean(_lastNameController.text),
-              _clean(_firstNameController.text),
-              if (_clean(_identityNumberController.text) != null)
-                '${_identityType ?? '-'} ${_clean(_identityNumberController.text)}',
-            ]),
+            value: _subjectKind == 'MORALE'
+                ? _summaryText([
+                    _clean(_raisonSocialeController.text),
+                    if (_clean(_identityNumberController.text) != null)
+                      '${_identityType ?? '-'} ${_clean(_identityNumberController.text)}',
+                  ])
+                : _summaryText([
+                    _clean(_lastNameController.text),
+                    _clean(_firstNameController.text),
+                    if (_clean(_identityNumberController.text) != null)
+                      '${_identityType ?? '-'} ${_clean(_identityNumberController.text)}',
+                  ]),
           ),
           _ReviewRow(
             label: 'Vehicule',
