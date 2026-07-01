@@ -17,6 +17,7 @@ import { LookupService } from '../../core/services/lookup.service';
 import { LookupOption, Paginated, RoleCode } from '../../shared/api-types';
 import { describeHttpError } from '../../shared/http-error';
 import {
+  RelationConfig,
   ResourceAction,
   ResourceConfig,
   ResourceField,
@@ -989,6 +990,21 @@ export class ResourcePage implements OnInit, OnDestroy {
     };
     for (const extra of action.statusExtra ?? []) {
       controls[extra.key] = new FormControl('', extra.required ? [Validators.required] : []);
+    }
+    // Relations contextuelles : recharge les options avec les paramètres dérivés
+    // de la ligne (ex. « Affecter à » limité à la commune du signalement).
+    const rowRelations = new Map<string, RelationConfig>();
+    for (const extra of action.statusExtra ?? []) {
+      if (extra.relation && extra.rowQuery) {
+        rowRelations.set(extra.key, {
+          ...extra.relation,
+          query: { ...(extra.relation.query ?? {}), ...extra.rowQuery(row) },
+        });
+      }
+    }
+    if (rowRelations.size > 0) {
+      this.lookup.clear([...rowRelations.keys()]);
+      this.lookup.loadRelations(rowRelations);
     }
     this.statusForm = new FormGroup(controls);
     this.statusContext.set({ action, row, options, current });

@@ -28,7 +28,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if command.as_deref() == Some("seed-demo") {
-        modules::demo_seed::seed_demo(&state.db, &state.config.app_env).await?;
+        modules::demo_seed::seed_demo(
+            &state.db,
+            &state.config.app_env,
+            state.storage.as_deref(),
+        )
+        .await?;
         return Ok(());
     }
 

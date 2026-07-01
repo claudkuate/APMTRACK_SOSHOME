@@ -5,11 +5,12 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
 use crate::extractors::ApiJson;
+use crate::helpers::resolve_commune_filter;
 use crate::modules::agents::{read_image_field, serve_avatar};
 use crate::modules::audit;
 use crate::modules::auth::{
@@ -43,6 +44,17 @@ struct CreateUserRequest {
     full_name: String,
     commune_id: Option<Uuid>,
     roles: Vec<String>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    commune_id: Option<Uuid>,
+    /// Ajoute les superviseurs globaux (SUPER_ADMIN / SUPERVISEUR sans commune)
+    /// au filtre commune — utilisé pour les sélecteurs d'affectation.
+    include_global: Option<bool>,
     active: Option<bool>,
 }
 
@@ -97,62 +109,59 @@ async fn get_user(
     Ok(Json(user))
 }
 
+/// Clause commune partagée entre le COUNT et le SELECT de `list_users`.
+fn apply_user_filters(
+    qb: &mut QueryBuilder<'_, sqlx::Postgres>,
+    commune_filter: Option<Uuid>,
+    include_global: bool,
+    active: Option<bool>,
+) {
+    if let Some(commune_id) = commune_filter {
+        if include_global {
+            qb.push(" AND (commune_id = ")
+                .push_bind(commune_id)
+                .push(
+                    " OR (commune_id IS NULL AND EXISTS (\
+                     SELECT 1 FROM user_roles ur JOIN roles r ON r.id = ur.role_id \
+                     WHERE ur.user_id = users.id AND r.code IN ('SUPER_ADMIN', 'SUPERVISEUR'))))",
+                );
+        } else {
+            qb.push(" AND commune_id = ").push_bind(commune_id);
+        }
+    }
+    if let Some(active) = active {
+        qb.push(" AND active = ").push_bind(active);
+    }
+}
+
 async fn list_users(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(query): Query<PaginationQuery>,
+    Query(query): Query<UserFilterQuery>,
 ) -> Result<Json<Paginated<UserResponse>>, ApiError> {
     auth_user.require_any_role(&[Role::SuperAdmin, Role::AdminCommune, Role::Superviseur])?;
-    let pagination = Pagination::from_query(query)?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+    let include_global = query.include_global.unwrap_or(false);
 
-    let (rows, total) = if auth_user.has_role(Role::SuperAdmin)
-        || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
-    {
-        let total = sqlx::query("SELECT COUNT(*) AS total FROM users WHERE deleted_at IS NULL")
-            .fetch_one(&state.db)
-            .await?
-            .get("total");
-        let rows = sqlx::query(
-            r#"
-            SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at
-            FROM users
-            WHERE deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            "#,
-        )
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total)
-    } else {
-        let commune_id = auth_user
-            .commune_id
-            .ok_or_else(|| ApiError::forbidden("Utilisateur non rattache a une commune"))?;
-        let total = sqlx::query(
-            "SELECT COUNT(*) AS total FROM users WHERE commune_id = $1 AND deleted_at IS NULL",
-        )
-        .bind(commune_id)
-        .fetch_one(&state.db)
-        .await?
-        .get("total");
-        let rows = sqlx::query(
-            r#"
-            SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at
-            FROM users
-            WHERE commune_id = $1 AND deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(commune_id)
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total)
-    };
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM users WHERE deleted_at IS NULL");
+    apply_user_filters(&mut count_qb, commune_filter, include_global, query.active);
+    let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
+
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+        "SELECT id, email, full_name, commune_id, active, photo_url, created_at, updated_at \
+         FROM users WHERE deleted_at IS NULL",
+    );
+    apply_user_filters(&mut qb, commune_filter, include_global, query.active);
+    qb.push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(pagination.limit)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset);
+    let rows = qb.build().fetch_all(&state.db).await?;
 
     // Charger tous les rôles en une seule requête (évite le N+1)
     let user_rows: Vec<UserRow> = rows.into_iter().map(row_to_user).collect();

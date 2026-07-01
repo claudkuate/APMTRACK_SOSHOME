@@ -75,6 +75,10 @@ export interface StatusExtraField {
   relation?: RelationConfig;
   required?: boolean;
   placeholder?: string;
+  /** Params de requête dérivés de la ligne : les options de la relation sont
+   *  rechargées à l'ouverture du dialogue avec ces paramètres (fusionnés à
+   *  `relation.query`). Ex. restreindre « Affecter à » à la commune de la ligne. */
+  rowQuery?: (row: Record<string, unknown>) => Record<string, string | number | boolean>;
 }
 
 export interface ResourceAction {
@@ -275,6 +279,14 @@ const agentRelation: RelationConfig = {
 const activeAgentRelation: RelationConfig = {
   ...agentRelation,
   query: { status: 'ACTIF' },
+};
+
+const pvRelation: RelationConfig = {
+  endpoint: '/api/v1/pvs',
+  labelKey: 'pv_number',
+  metaKey: 'verbalized_name',
+  parentKey: 'commune_id',
+  statusKey: 'status',
 };
 
 /** Détecte une valeur ressemblant à un UUID afin de ne jamais l'afficher en clair. */
@@ -655,6 +667,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'montant_fcfa',
       'delai_paiement_jours',
       'taux_penalite_basis_points',
+      'penalite_fcfa',
       'reference_deliberation',
       'active',
     ],
@@ -750,11 +763,20 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       ),
       field(
         'taux_penalite_basis_points',
-        'Pénalité',
+        'Pénalité (taux)',
         'number',
         false,
         '500',
-        'Basis points: 500 = 5%.',
+        'Basis points: 500 = 5%. Ignoré si une pénalité forfaitaire est définie.',
+        'Règle financière',
+      ),
+      field(
+        'penalite_fcfa',
+        'Pénalité forfaitaire (FCFA)',
+        'money',
+        false,
+        undefined,
+        'Montant fixe délibéré par la commune. Si > 0, remplace le taux ; 0 ou vide = pénalité au taux.',
         'Règle financière',
       ),
       field(
@@ -817,11 +839,20 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       ),
       field(
         'taux_penalite_basis_points',
-        'Pénalité',
+        'Pénalité (taux)',
         'number',
         false,
         '500',
-        'Basis points: 500 = 5%.',
+        'Basis points: 500 = 5%. Ignoré si une pénalité forfaitaire est définie.',
+        'Règle financière',
+      ),
+      field(
+        'penalite_fcfa',
+        'Pénalité forfaitaire (FCFA)',
+        'money',
+        false,
+        undefined,
+        'Montant fixe délibéré par la commune. Si > 0, remplace le taux ; 0 ou vide = pénalité au taux.',
         'Règle financière',
       ),
       field(
@@ -1316,7 +1347,19 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
             type: 'textarea',
             placeholder: 'Suivi interne (visible back-office uniquement).',
           },
-          { key: 'assigned_to', label: 'Affecter à', type: 'relation', relation: userRelation },
+          {
+            key: 'assigned_to',
+            label: 'Affecter à',
+            type: 'relation',
+            relation: userRelation,
+            // Restreint l'affectation aux profils actifs de la commune du
+            // signalement + superviseurs globaux (NASLA / MINISTÈRE).
+            rowQuery: (row) => ({
+              commune_id: String(row['commune_id'] ?? ''),
+              include_global: true,
+              active: true,
+            }),
+          },
         ],
         roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
       }),
@@ -1331,10 +1374,11 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     title: 'Fourrières',
     description: 'Mises en fourrière (véhicules et autres objets), gardiennage et restitution.',
     endpoint: '/api/v1/fourrieres',
-    columns: ['fourriere_number', 'item_type', 'designation', 'vehicle_plate', 'status', 'entered_at'],
+    columns: ['fourriere_number', 'pv_number', 'item_type', 'designation', 'vehicle_plate', 'status', 'entered_at'],
     secondaryColumns: ['motif'],
     detailFields: [
       'fourriere_number',
+      'pv_number',
       'item_type',
       'designation',
       'vehicle_plate',
@@ -1365,6 +1409,14 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     ],
     createFields: [
       ...communeCascadeFields(true),
+      {
+        ...relationField('pv_id', 'PV existant (optionnel)', pvRelation, false, undefined, 'commune_id'),
+        help: "PV déjà dressé pour cette infraction. Laisser vide pour générer automatiquement le PV de mise en fourrière.",
+      },
+      {
+        ...relationField('agent_id', 'Agent ayant procédé', activeAgentRelation, false, undefined, 'commune_id'),
+        help: "Requis si aucun PV existant n'est lié : le PV de mise en fourrière est généré au nom de cet agent.",
+      },
       {
         ...selectField(
           'item_type',

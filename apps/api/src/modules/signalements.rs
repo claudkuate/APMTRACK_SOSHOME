@@ -387,6 +387,10 @@ async fn patch_signalement_status(
         )));
     }
 
+    if let Some(assigned_to) = payload.assigned_to {
+        validate_assignee(&state.db, assigned_to, existing.commune_id).await?;
+    }
+
     sqlx::query(
         r#"
         UPDATE signalements
@@ -410,7 +414,7 @@ async fn patch_signalement_status(
         "signalements",
         Some(id),
         Some(json!({ "status": existing.status })),
-        Some(json!({ "status": payload.status })),
+        Some(json!({ "status": payload.status, "assigned_to": payload.assigned_to })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
@@ -514,6 +518,50 @@ fn row_to_signalement(row: sqlx::postgres::PgRow) -> SignalementResponse {
         gps_longitude: row.get("gps_longitude"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+/// Règle métier : l'utilisateur affecté à un signalement doit être actif,
+/// non supprimé et (a) rattaché à la commune du signalement, ou (b) superviseur
+/// global (SUPER_ADMIN / SUPERVISEUR sans commune — profils NASLA/MINISTÈRE).
+async fn validate_assignee(
+    pool: &PgPool,
+    user_id: Uuid,
+    signalement_commune_id: Uuid,
+) -> Result<(), ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT u.active, u.commune_id,
+               EXISTS (
+                   SELECT 1 FROM user_roles ur
+                   JOIN roles r ON r.id = ur.role_id
+                   WHERE ur.user_id = u.id
+                     AND r.code IN ('SUPER_ADMIN', 'SUPERVISEUR')
+               ) AS has_global_role
+        FROM users u
+        WHERE u.id = $1 AND u.deleted_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::bad_request("Utilisateur affecté introuvable"))?;
+
+    if !row.get::<bool, _>("active") {
+        return Err(ApiError::bad_request(
+            "Impossible d'affecter un utilisateur inactif",
+        ));
+    }
+    match row.get::<Option<Uuid>, _>("commune_id") {
+        Some(commune_id) if commune_id != signalement_commune_id => {
+            Err(ApiError::bad_request(
+                "L'utilisateur affecté n'appartient pas à la commune du signalement",
+            ))
+        }
+        None if !row.get::<bool, _>("has_global_role") => Err(ApiError::bad_request(
+            "Seul un superviseur global (SUPER_ADMIN ou SUPERVISEUR) peut être affecté hors commune",
+        )),
+        _ => Ok(()),
     }
 }
 

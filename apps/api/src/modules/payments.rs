@@ -265,7 +265,7 @@ async fn validate_payment(
     let pv_row = sqlx::query(
         r#"
         SELECT
-            id, commune_id, status, pv_number, created_at
+            id, commune_id, status, pv_number, amount_initial_fcfa, created_at
         FROM pvs
         WHERE id = $1 AND deleted_at IS NULL
         FOR UPDATE
@@ -303,7 +303,9 @@ async fn validate_payment(
     }
 
     let created_at: DateTime<Utc> = pv_row.get("created_at");
-    let computed = payment_computation_tx(&mut tx, pv_id, created_at).await?;
+    let amount_initial_fcfa: i64 = pv_row.try_get("amount_initial_fcfa").unwrap_or(0);
+    let computed =
+        payment_computation_tx_lenient(&mut tx, pv_id, created_at, amount_initial_fcfa).await?;
     let amount_due_fcfa = computed.amount_due_fcfa;
     let amount_penalty_fcfa = computed.amount_penalty_fcfa;
     let amount_total_fcfa = computed.amount_total_fcfa;
@@ -475,60 +477,60 @@ fn row_to_payment(row: sqlx::postgres::PgRow) -> PaymentResponse {
     }
 }
 
-/// Variante tolérante réservée à l'affichage de la liste des PV à encaisser.
-///
-/// Certains PV hérités/seed n'ont aucune ligne `pv_interventions` avec
-/// `sujet_paiement = TRUE`. `payment_computation_from_rows` renvoie alors une erreur,
-/// ce qui faisait échouer toute la réponse `list_pending` (un seul PV « pollué » masquait
-/// tous les autres). Ici, on retombe sur `amount_initial_fcfa` du PV, pénalité 0,
-/// échéance à +30 jours, au lieu de propager l'erreur. La validation d'un paiement
-/// (`validate_payment` / `payment_computation_tx`) reste stricte.
+/// Requête commune aux calculs d'encaissement : les lignes payantes du PV avec
+/// toutes les règles financières snapshotées (montant, délai, taux, forfait).
+const PAYING_INTERVENTIONS_SQL: &str = r#"
+    SELECT montant_fcfa, delai_paiement_jours,
+           taux_penalite::DOUBLE PRECISION AS taux_penalite,
+           taux_penalite_basis_points,
+           penalite_fcfa
+    FROM pv_interventions
+    WHERE pv_id = $1 AND sujet_paiement = TRUE
+    ORDER BY order_index ASC
+"#;
+
+/// Repli quand un PV n'a aucune ligne `pv_interventions` payante (PV hérités/seed) :
+/// dû = `amount_initial_fcfa` du PV (montant serveur copié du référentiel à la création),
+/// pénalité 0, échéance à +30 jours. Utilisé par `list_pending` ET `validate_payment`
+/// pour que le total affiché au receveur soit exactement celui exigé à la validation.
+fn lenient_fallback(created_at: DateTime<Utc>, fallback_amount_fcfa: i64) -> PaymentComputation {
+    PaymentComputation {
+        amount_due_fcfa: fallback_amount_fcfa,
+        amount_penalty_fcfa: 0,
+        amount_total_fcfa: fallback_amount_fcfa,
+        due_date: created_at + Duration::days(30),
+    }
+}
+
 async fn payment_computation_pool_lenient(
     pool: &PgPool,
     pv_id: Uuid,
     created_at: DateTime<Utc>,
     fallback_amount_fcfa: i64,
 ) -> Result<PaymentComputation, ApiError> {
-    let rows = sqlx::query(
-        r#"
-        SELECT montant_fcfa, delai_paiement_jours,
-               taux_penalite::DOUBLE PRECISION AS taux_penalite
-        FROM pv_interventions
-        WHERE pv_id = $1 AND sujet_paiement = TRUE
-        ORDER BY order_index ASC
-        "#,
-    )
-    .bind(pv_id)
-    .fetch_all(pool)
-    .await?;
+    let rows = sqlx::query(PAYING_INTERVENTIONS_SQL)
+        .bind(pv_id)
+        .fetch_all(pool)
+        .await?;
     if rows.is_empty() {
-        return Ok(PaymentComputation {
-            amount_due_fcfa: fallback_amount_fcfa,
-            amount_penalty_fcfa: 0,
-            amount_total_fcfa: fallback_amount_fcfa,
-            due_date: created_at + Duration::days(30),
-        });
+        return Ok(lenient_fallback(created_at, fallback_amount_fcfa));
     }
     payment_computation_from_rows(rows, created_at)
 }
 
-async fn payment_computation_tx(
+async fn payment_computation_tx_lenient(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     pv_id: Uuid,
     created_at: DateTime<Utc>,
+    fallback_amount_fcfa: i64,
 ) -> Result<PaymentComputation, ApiError> {
-    let rows = sqlx::query(
-        r#"
-        SELECT montant_fcfa, delai_paiement_jours,
-               taux_penalite::DOUBLE PRECISION AS taux_penalite
-        FROM pv_interventions
-        WHERE pv_id = $1 AND sujet_paiement = TRUE
-        ORDER BY order_index ASC
-        "#,
-    )
-    .bind(pv_id)
-    .fetch_all(&mut **tx)
-    .await?;
+    let rows = sqlx::query(PAYING_INTERVENTIONS_SQL)
+        .bind(pv_id)
+        .fetch_all(&mut **tx)
+        .await?;
+    if rows.is_empty() {
+        return Ok(lenient_fallback(created_at, fallback_amount_fcfa));
+    }
     payment_computation_from_rows(rows, created_at)
 }
 
@@ -549,12 +551,22 @@ fn payment_computation_from_rows(
         let delay = row
             .get::<Option<i32>, _>("delai_paiement_jours")
             .unwrap_or(30);
+        // Fiscalité communale : forfait (penalite_fcfa > 0) prioritaire sur le taux ;
+        // pour le taux, basis points (édités dans Paramètres) prioritaires sur la
+        // colonne héritée taux_penalite.
+        let flat_penalty_fcfa = row.get::<Option<i64>, _>("penalite_fcfa").unwrap_or(0);
         let rate = row
-            .get::<Option<f64>, _>("taux_penalite")
+            .get::<Option<i32>, _>("taux_penalite_basis_points")
+            .map(|bp| bp as f64 / 100.0)
+            .or_else(|| row.get::<Option<f64>, _>("taux_penalite"))
             .unwrap_or(0.0);
         let due_date = created_at + Duration::days(delay as i64);
         amount_due_fcfa += amount;
-        amount_penalty_fcfa += calculate_penalty_fcfa(amount, rate, due_date, now);
+        amount_penalty_fcfa += if now > due_date && flat_penalty_fcfa > 0 {
+            flat_penalty_fcfa
+        } else {
+            calculate_penalty_fcfa(amount, rate, due_date, now)
+        };
         earliest_due_date = Some(match earliest_due_date {
             Some(existing) if existing <= due_date => existing,
             _ => due_date,

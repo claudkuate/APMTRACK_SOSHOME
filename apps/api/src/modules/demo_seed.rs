@@ -14,6 +14,8 @@ use uuid::Uuid;
 use crate::errors::ApiError;
 use crate::modules::auth::{assign_roles, hash_password};
 use crate::modules::rbac::Role;
+use crate::modules::referentiel;
+use crate::storage::ObjectStorage;
 
 /// Espace de noms fixe pour dériver des UUID stables à partir de clés textuelles.
 const SEED_NS: Uuid = Uuid::from_u128(0x1000_0000_0000_0000_0000_0000_0000_0000);
@@ -24,6 +26,11 @@ fn det_id(key: &str) -> Uuid {
 }
 
 const SUPER_ADMIN_KEY: &str = "user:superadmin";
+const DEMO_AGENT_PHOTO_CONTENT_TYPE: &str = "image/jpeg";
+const DEMO_AGENT_PHOTOS: [&[u8]; 2] = [
+    include_bytes!("../../assets/demo-agents/agent-1.jpg"),
+    include_bytes!("../../assets/demo-agents/agent-2.jpg"),
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Catalogues
@@ -476,7 +483,11 @@ fn zone_centre(commune_centre: (f64, f64), index: usize) -> (f64, f64) {
 // Point d'entrée
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn seed_demo(pool: &sqlx::PgPool, app_env: &str) -> anyhow::Result<()> {
+pub async fn seed_demo(
+    pool: &sqlx::PgPool,
+    app_env: &str,
+    storage: Option<&ObjectStorage>,
+) -> anyhow::Result<()> {
     if !matches!(app_env, "development" | "test") {
         anyhow::bail!("seed-demo is only allowed in development or test environments");
     }
@@ -488,16 +499,23 @@ pub async fn seed_demo(pool: &sqlx::PgPool, app_env: &str) -> anyhow::Result<()>
     }
     let password_hash = hash_password(&password).map_err(|error| anyhow::anyhow!("{error}"))?;
 
+    if storage.is_none() {
+        tracing::warn!(
+            "demo agent photos skipped because object storage is not configured"
+        );
+    }
+
     seed_super_admin_user(pool, &password_hash).await?;
 
     for commune in COMMUNES {
         seed_commune(pool, commune).await?;
-        seed_users_and_agents(pool, commune, &password_hash).await?;
+        seed_users_and_agents(pool, commune, &password_hash, storage).await?;
         seed_zones(pool, commune).await?;
         seed_referentiel(pool, commune).await?;
+        let fourriere_interv_id = seed_fourriere_referentiel(pool, commune).await?;
         seed_pvs_payments(pool, commune).await?;
         seed_signalements(pool, commune).await?;
-        seed_fourrieres(pool, commune).await?;
+        seed_fourrieres(pool, commune, fourriere_interv_id).await?;
         seed_patrouille(pool, commune).await?;
         seed_document_sequences(pool, commune).await?;
     }
@@ -584,7 +602,8 @@ async fn seed_users_and_agents(
     pool: &sqlx::PgPool,
     c: &CommuneSeed,
     password_hash: &str,
-) -> Result<(), ApiError> {
+    storage: Option<&ObjectStorage>,
+) -> anyhow::Result<()> {
     let commune_id = det_id(&format!("commune:{}", c.code));
     let upper = c.code;
 
@@ -651,21 +670,23 @@ async fn seed_users_and_agents(
         let (prenom, nom) = PERSONNES[(num as usize) % PERSONNES.len()];
         let full_name = format!("{prenom} {nom}");
         let email = format!("agent{num}.{}@apmtrack.local", c.slug);
+        let photo_url = seed_agent_photo(storage, id, num).await?;
         sqlx::query(
             r#"
             INSERT INTO agents (
                 id, matricule, full_name, commune_id, status,
-                date_prise_fonction, telephone, email, user_id
+                date_prise_fonction, photo_url, telephone, email, user_id
             )
             VALUES (
                 $1, $2, $3, $4, 'ACTIF', '2024-01-15',
-                '+237 699 000 001', $5, $6
+                $5, '+237 699 000 001', $6, $7
             )
             ON CONFLICT (id) DO UPDATE SET
                 matricule = EXCLUDED.matricule,
                 full_name = EXCLUDED.full_name,
                 commune_id = EXCLUDED.commune_id,
                 status = 'ACTIF',
+                photo_url = EXCLUDED.photo_url,
                 user_id = EXCLUDED.user_id,
                 updated_at = now()
             "#,
@@ -674,6 +695,7 @@ async fn seed_users_and_agents(
         .bind(matricule)
         .bind(full_name)
         .bind(commune_id)
+        .bind(photo_url)
         .bind(email)
         .bind(user_id)
         .execute(pool)
@@ -681,6 +703,27 @@ async fn seed_users_and_agents(
     }
 
     Ok(())
+}
+
+async fn seed_agent_photo(
+    storage: Option<&ObjectStorage>,
+    agent_id: Uuid,
+    agent_number: u32,
+) -> anyhow::Result<Option<String>> {
+    let Some(storage) = storage else {
+        return Ok(None);
+    };
+
+    let object_key = format!("avatars/agents/{agent_id}.jpg");
+    let photo = DEMO_AGENT_PHOTOS[((agent_number - 1) as usize) % DEMO_AGENT_PHOTOS.len()];
+    storage
+        .put(&object_key, photo, DEMO_AGENT_PHOTO_CONTENT_TYPE)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to seed demo agent photo {object_key}: {error}")
+        })?;
+
+    Ok(Some(object_key))
 }
 
 async fn seed_zones(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
@@ -952,22 +995,82 @@ async fn seed_signalements(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
     Ok(())
 }
 
-async fn seed_fourrieres(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
+/// Provisionne (ou retrouve) l'intervention système « Mise en fourrière » de la
+/// commune. La migration 20260603000024 ou la création lazy à la première
+/// fourrière peuvent déjà l'avoir posée — le helper du référentiel fait
+/// find-or-create par `system_code` puis par noms.
+async fn seed_fourriere_referentiel(
+    pool: &sqlx::PgPool,
+    c: &CommuneSeed,
+) -> Result<Uuid, ApiError> {
+    let commune_id = det_id(&format!("commune:{}", c.code));
+    let mut tx = pool.begin().await?;
+    let intervention_id =
+        referentiel::get_or_create_fourriere_intervention_tx(&mut tx, commune_id).await?;
+    tx.commit().await?;
+    Ok(intervention_id)
+}
+
+async fn seed_fourrieres(
+    pool: &sqlx::PgPool,
+    c: &CommuneSeed,
+    intervention_id: Uuid,
+) -> Result<(), ApiError> {
     let commune_id = det_id(&format!("commune:{}", c.code));
     let admin_user_id = det_id(&format!("user:admin:{}", c.code));
+    let agent_id = det_id(&format!("agent:{}:1", c.code));
     let id = det_id(&format!("fourriere:{}:1", c.code));
     let numero = format!("FOUR-{}-2026-000001", c.code);
     let plate = format!("{}-1234", c.code);
 
+    // PV lié — un PV est généré par tout type d'intervention, y compris la mise
+    // en fourrière. PV_SPECS occupe les séquences 1..=3, celui-ci prend la
+    // suivante (alignée dans `seed_document_sequences`).
+    let pv_id = det_id(&format!("pv:fourriere:{}:1", c.code));
+    let pv_seq = PV_SPECS.len() as u32 + 1;
+    let pv_number = format!("PV-{}-2026-{pv_seq:06}", c.code);
+
+    sqlx::query(
+        r#"
+        INSERT INTO pvs (
+            id, commune_id, agent_id, pv_number, intervention_id, subject_type,
+            vehicle_plate, location_description, amount_initial, amount_initial_fcfa,
+            status, qr_code_svg, notes_internes, created_by
+        )
+        VALUES ($1, $2, $3, $4, $5, 'VEHICLE_ONLY', $6, $7, $8, $8,
+                'EN_ATTENTE_PAIEMENT', $9, $10, $11)
+        ON CONFLICT (id) DO UPDATE SET
+            intervention_id = EXCLUDED.intervention_id,
+            vehicle_plate = EXCLUDED.vehicle_plate,
+            amount_initial = EXCLUDED.amount_initial,
+            amount_initial_fcfa = EXCLUDED.amount_initial_fcfa,
+            updated_at = now()
+        "#,
+    )
+    .bind(pv_id)
+    .bind(commune_id)
+    .bind(agent_id)
+    .bind(pv_number)
+    .bind(intervention_id)
+    .bind(&plate)
+    .bind(c.siege)
+    .bind(referentiel::FOURRIERE_DEFAULT_MONTANT_FCFA)
+    .bind(QR_PLACEHOLDER)
+    .bind(format!("Mise en fourrière {numero} — Stationnement gênant"))
+    .bind(admin_user_id)
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         r#"
         INSERT INTO fourrieres (
-            id, commune_id, fourriere_number, vehicle_plate, vehicle_type,
+            id, commune_id, pv_id, fourriere_number, vehicle_plate, vehicle_type,
             motif, lieu_enlevement, status, daily_fee_fcfa, created_by
         )
-        VALUES ($1, $2, $3, $4, 'Berline', 'Stationnement gênant - enlèvement',
-                $5, 'EN_FOURRIERE', 2000, $6)
+        VALUES ($1, $2, $3, $4, $5, 'Berline', 'Stationnement gênant - enlèvement',
+                $6, 'EN_FOURRIERE', 2000, $7)
         ON CONFLICT (id) DO UPDATE SET
+            pv_id = EXCLUDED.pv_id,
             vehicle_plate = EXCLUDED.vehicle_plate,
             motif = EXCLUDED.motif,
             status = EXCLUDED.status,
@@ -976,6 +1079,7 @@ async fn seed_fourrieres(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), Api
     )
     .bind(id)
     .bind(commune_id)
+    .bind(pv_id)
     .bind(numero)
     .bind(plate)
     .bind(c.siege)
@@ -1035,11 +1139,20 @@ async fn seed_patrouille(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), Api
 /// génération serveur des prochains PV / reçus / signalements ne crée pas de collision.
 async fn seed_document_sequences(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
     let commune_id = det_id(&format!("commune:{}", c.code));
-    let paid_count = PV_SPECS.iter().filter(|spec| spec.2 == "PAYE").count() as i64;
+    // Les reçus semés reprennent le numéro de séquence du PV payé (REC-...-{seq}),
+    // pas un compteur propre : le prochain reçu doit donc dépasser le plus grand
+    // seq payé, sinon le premier encaissement réel entre en collision (23505).
+    let max_paid_seq = PV_SPECS
+        .iter()
+        .filter(|spec| spec.2 == "PAYE")
+        .map(|spec| spec.0 as i64)
+        .max()
+        .unwrap_or(0);
 
     let sequences: [(&str, i64); 4] = [
-        ("PV", PV_SPECS.len() as i64 + 1),
-        ("RECEIPT", paid_count + 1),
+        // PV_SPECS + le PV de la fourrière semée (seq suivante).
+        ("PV", PV_SPECS.len() as i64 + 2),
+        ("RECEIPT", max_paid_seq + 1),
         ("SIGNALEMENT", SIGNALEMENT_SPECS.len() as i64 + 1),
         // 1 fourrière semée par commune (FOUR-...-000001).
         ("FOURRIERE", 2),

@@ -27,6 +27,18 @@ export class LookupService {
     this.state.set({});
   }
 
+  /** Vide les options de certaines clés avant un rechargement contextuel
+   *  (évite d'afficher les options non filtrées pendant le chargement). */
+  clear(keys: string[]): void {
+    this.state.update((current) => {
+      const next = { ...current };
+      for (const key of keys) {
+        next[key] = [];
+      }
+      return next;
+    });
+  }
+
   optionsFor(key: string): LookupOption[] {
     return this.state()[key] ?? [];
   }

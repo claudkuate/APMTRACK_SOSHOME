@@ -101,6 +101,7 @@ pub struct PvInterventionResponse {
     pub delai_paiement_jours: Option<i32>,
     pub taux_penalite: Option<f64>,
     pub taux_penalite_basis_points: Option<i32>,
+    pub penalite_fcfa: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -536,6 +537,95 @@ async fn create_pv(
     tx.commit().await?;
 
     Ok((StatusCode::CREATED, Json(load_pv(&state.db, id).await?)))
+}
+
+/// Entrées d'un PV généré par le système (mise en fourrière).
+pub(crate) struct SystemPvInput<'a> {
+    pub commune_id: Uuid,
+    pub commune_code: &'a str,
+    pub agent_id: Uuid,
+    pub intervention_id: Uuid,
+    pub vehicle_plate: Option<&'a str>,
+    /// Désignation de l'objet pour les non-véhicules (stockée en identifiant verbalisé).
+    pub verbalized_identifier: Option<&'a str>,
+    pub location_description: Option<&'a str>,
+    pub notes_internes: Option<&'a str>,
+    pub created_by: Uuid,
+}
+
+/// Crée un PV « système » dans la transaction de l'appelant — utilisé par la
+/// mise en fourrière. Le contrevenant n'est pas identifié sur place : pas de
+/// `validate_subject_fields` (qui exige nom + téléphone), et pas de
+/// `check_double_verbalisation` (la mise en fourrière est un fait accompli à
+/// enregistrer). Retourne (pv_id, pv_number, statut initial).
+pub(crate) async fn create_system_pv_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    public_api_url: &str,
+    input: SystemPvInput<'_>,
+) -> Result<(Uuid, String, &'static str), ApiError> {
+    let interventions =
+        load_intervention_snapshots_tx(tx, input.commune_id, &[input.intervention_id]).await?;
+
+    let (year, seq) = next_document_sequence(tx, input.commune_id, SEQUENCE_PV).await?;
+    let pv_number = format!(
+        "PV-{}-{}-{:06}",
+        input.commune_code.to_uppercase().replace(' ', "-"),
+        year,
+        seq
+    );
+    let public_url = format!("{public_api_url}/api/v1/public/pvs/{pv_number}");
+    let qr_svg = generate_qr_svg(&public_url)?;
+
+    let amount_initial_fcfa = total_amount_fcfa(&interventions);
+    let amount_initial = amount_initial_fcfa.map(|amount| amount as f64);
+    let initial_status = if amount_initial_fcfa.unwrap_or(0) > 0 {
+        "EN_ATTENTE_PAIEMENT"
+    } else {
+        "NON_PAYANT"
+    };
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO pvs (
+            id, commune_id, agent_id, pv_number, intervention_id, subject_type,
+            verbalized_identifier, vehicle_plate, location_description,
+            amount_initial, amount_initial_fcfa, status, qr_code_svg,
+            notes_internes, created_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        "#,
+    )
+    .bind(id)
+    .bind(input.commune_id)
+    .bind(input.agent_id)
+    .bind(&pv_number)
+    .bind(input.intervention_id)
+    .bind("VEHICLE_ONLY")
+    .bind(input.verbalized_identifier)
+    .bind(input.vehicle_plate)
+    .bind(input.location_description)
+    .bind(amount_initial)
+    .bind(amount_initial_fcfa)
+    .bind(initial_status)
+    .bind(&qr_svg)
+    .bind(input.notes_internes)
+    .bind(input.created_by)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_database_error)?;
+
+    replace_pv_interventions_tx(tx, id, &interventions).await?;
+    record_status_change_tx(
+        tx,
+        id,
+        None,
+        initial_status,
+        input.created_by,
+        Some("PV généré automatiquement — mise en fourrière"),
+    )
+    .await;
+
+    Ok((id, pv_number, initial_status))
 }
 
 async fn patch_pv(
@@ -1132,6 +1222,7 @@ struct InterventionSnapshot {
     delai_paiement_jours: Option<i32>,
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
+    penalite_fcfa: Option<i64>,
 }
 
 async fn load_pv_for_update_tx(
@@ -1179,7 +1270,8 @@ async fn load_pv_interventions(
             id, intervention_id, order_index, nom, sujet_paiement, montant_fcfa,
             delai_paiement_jours,
             taux_penalite::DOUBLE PRECISION AS taux_penalite,
-            taux_penalite_basis_points
+            taux_penalite_basis_points,
+            penalite_fcfa
         FROM pv_interventions
         WHERE pv_id = $1
         ORDER BY order_index ASC
@@ -1201,7 +1293,8 @@ async fn load_pv_interventions_tx(
             id, intervention_id, order_index, nom, sujet_paiement, montant_fcfa,
             delai_paiement_jours,
             taux_penalite::DOUBLE PRECISION AS taux_penalite,
-            taux_penalite_basis_points
+            taux_penalite_basis_points,
+            penalite_fcfa
         FROM pv_interventions
         WHERE pv_id = $1
         ORDER BY order_index ASC
@@ -1224,6 +1317,7 @@ fn row_to_pv_intervention(row: sqlx::postgres::PgRow) -> PvInterventionResponse 
         delai_paiement_jours: row.get("delai_paiement_jours"),
         taux_penalite: row.get("taux_penalite"),
         taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+        penalite_fcfa: row.get("penalite_fcfa"),
     }
 }
 
@@ -1241,6 +1335,7 @@ async fn load_intervention_snapshots_tx(
                 delai_paiement_jours,
                 taux_penalite::DOUBLE PRECISION AS taux_penalite,
                 taux_penalite_basis_points,
+                penalite_fcfa,
                 active
             FROM interventions
             WHERE id = $1 AND deleted_at IS NULL
@@ -1273,6 +1368,7 @@ async fn load_intervention_snapshots_tx(
             delai_paiement_jours: row.get("delai_paiement_jours"),
             taux_penalite: row.get("taux_penalite"),
             taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+            penalite_fcfa: row.get("penalite_fcfa"),
         });
     }
     Ok(snapshots)
@@ -1294,9 +1390,9 @@ async fn replace_pv_interventions_tx(
             INSERT INTO pv_interventions (
                 pv_id, intervention_id, order_index, nom, sujet_paiement,
                 montant_fcfa, delai_paiement_jours, taux_penalite,
-                taux_penalite_basis_points
+                taux_penalite_basis_points, penalite_fcfa
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             "#,
         )
         .bind(pv_id)
@@ -1308,6 +1404,7 @@ async fn replace_pv_interventions_tx(
         .bind(item.delai_paiement_jours)
         .bind(item.taux_penalite)
         .bind(item.taux_penalite_basis_points)
+        .bind(item.penalite_fcfa)
         .execute(&mut **tx)
         .await
         .map_err(map_database_error)?;

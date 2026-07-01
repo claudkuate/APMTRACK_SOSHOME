@@ -601,6 +601,7 @@ struct CreateInterventionRequest {
     delai_paiement_jours: Option<i32>,
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
+    penalite_fcfa: Option<i64>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -617,6 +618,7 @@ struct PatchInterventionRequest {
     delai_paiement_jours: Option<i32>,
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
+    penalite_fcfa: Option<i64>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -637,6 +639,7 @@ pub struct InterventionResponse {
     pub delai_paiement_jours: Option<i32>,
     pub taux_penalite: Option<f64>,
     pub taux_penalite_basis_points: Option<i32>,
+    pub penalite_fcfa: Option<i64>,
     pub reference_deliberation: Option<String>,
     pub piece_justificative: Option<String>,
     pub active: bool,
@@ -683,6 +686,7 @@ async fn list_interventions(
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
             i.taux_penalite_basis_points,
+            i.penalite_fcfa,
             i.reference_deliberation, i.piece_justificative, i.active,
             i.created_at, i.updated_at
         FROM interventions i
@@ -752,6 +756,7 @@ async fn create_intervention(
     let montant_fcfa = normalize_fcfa(payload.montant_fcfa, payload.montant)?;
     let taux_penalite_basis_points =
         normalize_basis_points(payload.taux_penalite_basis_points, payload.taux_penalite)?;
+    validate_penalite_fcfa(payload.penalite_fcfa)?;
     validate_paiement_rules(
         payload.sujet_paiement,
         payload.montant,
@@ -767,10 +772,10 @@ async fn create_intervention(
         INSERT INTO interventions (
             id, commune_id, type_id, nom, description,
             requires_vehicle, sujet_paiement, montant, montant_fcfa, delai_paiement_jours,
-            taux_penalite, taux_penalite_basis_points,
+            taux_penalite, taux_penalite_basis_points, penalite_fcfa,
             reference_deliberation, piece_justificative, active
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         "#,
     )
     .bind(id)
@@ -785,6 +790,7 @@ async fn create_intervention(
     .bind(payload.delai_paiement_jours)
     .bind(payload.taux_penalite)
     .bind(taux_penalite_basis_points)
+    .bind(payload.penalite_fcfa)
     .bind(clean_optional(payload.reference_deliberation))
     .bind(clean_optional(payload.piece_justificative))
     .bind(payload.active.unwrap_or(true))
@@ -845,6 +851,10 @@ async fn patch_intervention(
     )?
     .or(existing.taux_penalite_basis_points);
 
+    validate_penalite_fcfa(payload.penalite_fcfa)?;
+    // penalite_fcfa = 0 désactive le forfait (retour au taux) — voir migration 23.
+    let penalite_fcfa = payload.penalite_fcfa.or(existing.penalite_fcfa);
+
     validate_paiement_rules(
         sujet_paiement,
         montant,
@@ -864,9 +874,10 @@ async fn patch_intervention(
             delai_paiement_jours = $8,
             taux_penalite = $9,
             taux_penalite_basis_points = $10,
-            reference_deliberation = $11,
-            piece_justificative = $12,
-            active = $13,
+            penalite_fcfa = $11,
+            reference_deliberation = $12,
+            piece_justificative = $13,
+            active = $14,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -885,6 +896,7 @@ async fn patch_intervention(
     )
     .bind(payload.taux_penalite.or(existing.taux_penalite))
     .bind(taux_penalite_basis_points)
+    .bind(penalite_fcfa)
     .bind(reference_deliberation)
     .bind(
         payload
@@ -954,6 +966,7 @@ pub async fn load_intervention(pool: &PgPool, id: Uuid) -> Result<InterventionRe
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
             i.taux_penalite_basis_points,
+            i.penalite_fcfa,
             i.reference_deliberation, i.piece_justificative, i.active,
             i.created_at, i.updated_at
         FROM interventions i
@@ -983,6 +996,7 @@ fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
         delai_paiement_jours: row.get("delai_paiement_jours"),
         taux_penalite: row.get("taux_penalite"),
         taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+        penalite_fcfa: row.get("penalite_fcfa"),
         reference_deliberation: row.get("reference_deliberation"),
         piece_justificative: row.get("piece_justificative"),
         active: row.get("active"),
@@ -1053,6 +1067,13 @@ fn normalize_fcfa(value: Option<i64>, legacy: Option<f64>) -> Result<Option<i64>
     Ok(amount)
 }
 
+fn validate_penalite_fcfa(value: Option<i64>) -> Result<(), ApiError> {
+    if value.map(|v| v < 0).unwrap_or(false) {
+        return Err(ApiError::bad_request("penalite_fcfa doit etre positif"));
+    }
+    Ok(())
+}
+
 fn normalize_basis_points(value: Option<i32>, legacy: Option<f64>) -> Result<Option<i32>, ApiError> {
     let rate = value.or_else(|| legacy.map(|rate| (rate * 100.0).round() as i32));
     if rate.map(|rate| rate < 0).unwrap_or(false) {
@@ -1088,4 +1109,153 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Intervention système « Mise en fourrière »
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Identifiant stable de l'intervention système « Mise en fourrière »
+/// (robuste au renommage par l'admin commune).
+pub(crate) const FOURRIERE_SYSTEM_CODE: &str = "FOURRIERE";
+pub(crate) const FOURRIERE_CATEGORY_NAME: &str = "Fourrière";
+pub(crate) const FOURRIERE_INTERVENTION_NAME: &str = "Mise en fourrière";
+pub(crate) const FOURRIERE_DEFAULT_MONTANT_FCFA: i64 = 25_000;
+pub(crate) const FOURRIERE_DEFAULT_DELAI_JOURS: i32 = 7;
+pub(crate) const FOURRIERE_DEFAULT_TAUX_BASIS_POINTS: i32 = 1_000;
+
+/// Cherche l'intervention système de la commune. Une intervention désactivée
+/// est un conflit explicite : la commune doit la réactiver dans le référentiel
+/// (le montant vient du référentiel, on ne le contourne pas).
+async fn find_fourriere_intervention_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+) -> Result<Option<Uuid>, ApiError> {
+    let row = sqlx::query(
+        "SELECT id, active FROM interventions \
+         WHERE commune_id = $1 AND system_code = $2 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(commune_id)
+    .bind(FOURRIERE_SYSTEM_CODE)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match row {
+        None => Ok(None),
+        Some(row) => {
+            if !row.get::<bool, _>("active") {
+                return Err(ApiError::conflict(
+                    "L'intervention « Mise en fourrière » est désactivée pour cette commune — réactivez-la dans le référentiel",
+                ));
+            }
+            Ok(Some(row.get("id")))
+        }
+    }
+}
+
+/// Retourne l'intervention système « Mise en fourrière » de la commune, en la
+/// provisionnant (catégorie + type + intervention) si absente — couvre les
+/// communes créées après la migration 20260603000024 et la re-création après
+/// soft-delete. Doit être appelée dans la transaction de l'appelant.
+pub(crate) async fn get_or_create_fourriere_intervention_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+) -> Result<Uuid, ApiError> {
+    if let Some(id) = find_fourriere_intervention_tx(tx, commune_id).await? {
+        return Ok(id);
+    }
+
+    // Sérialise le provisionnement par commune : deux mises en fourrière
+    // simultanées sur une commune fraîche ne doivent créer qu'un référentiel.
+    let key = format!("fourriere-referentiel:{commune_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(key)
+        .execute(&mut **tx)
+        .await?;
+    if let Some(id) = find_fourriere_intervention_tx(tx, commune_id).await? {
+        return Ok(id);
+    }
+
+    let category_id: Uuid = match sqlx::query_scalar(
+        "SELECT id FROM intervention_categories \
+         WHERE commune_id = $1 AND lower(nom) = lower($2) AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(commune_id)
+    .bind(FOURRIERE_CATEGORY_NAME)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        Some(id) => id,
+        None => {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO intervention_categories (id, commune_id, nom, description, active) \
+                 VALUES ($1, $2, $3, $4, TRUE)",
+            )
+            .bind(id)
+            .bind(commune_id)
+            .bind(FOURRIERE_CATEGORY_NAME)
+            .bind("Mises en fourrière (référentiel système)")
+            .execute(&mut **tx)
+            .await
+            .map_err(map_database_error)?;
+            id
+        }
+    };
+
+    let type_id: Uuid = match sqlx::query_scalar(
+        "SELECT id FROM intervention_types \
+         WHERE category_id = $1 AND lower(nom) = lower($2) AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(category_id)
+    .bind(FOURRIERE_INTERVENTION_NAME)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        Some(id) => id,
+        None => {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO intervention_types (id, commune_id, category_id, nom, description, active) \
+                 VALUES ($1, $2, $3, $4, $5, TRUE)",
+            )
+            .bind(id)
+            .bind(commune_id)
+            .bind(category_id)
+            .bind(FOURRIERE_INTERVENTION_NAME)
+            .bind("Enlèvement et mise en fourrière (véhicules et autres objets)")
+            .execute(&mut **tx)
+            .await
+            .map_err(map_database_error)?;
+            id
+        }
+    };
+
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO interventions (
+            id, commune_id, type_id, nom, description, sujet_paiement,
+            montant, montant_fcfa, delai_paiement_jours,
+            taux_penalite, taux_penalite_basis_points,
+            reference_deliberation, requires_vehicle, active, system_code
+        ) VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, $8, $9, $10, $11, FALSE, TRUE, $12)
+        "#,
+    )
+    .bind(id)
+    .bind(commune_id)
+    .bind(type_id)
+    .bind(FOURRIERE_INTERVENTION_NAME)
+    .bind("Frais forfaitaires de mise en fourrière (montant à ajuster par la commune)")
+    .bind(FOURRIERE_DEFAULT_MONTANT_FCFA as f64)
+    .bind(FOURRIERE_DEFAULT_MONTANT_FCFA)
+    .bind(FOURRIERE_DEFAULT_DELAI_JOURS)
+    .bind((FOURRIERE_DEFAULT_TAUX_BASIS_POINTS as f64) / 100.0)
+    .bind(FOURRIERE_DEFAULT_TAUX_BASIS_POINTS)
+    .bind("A_COMPLETER")
+    .bind(FOURRIERE_SYSTEM_CODE)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_database_error)?;
+
+    Ok(id)
 }

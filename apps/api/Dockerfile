@@ -5,6 +5,7 @@ WORKDIR /workspace
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 COPY apps/api/Cargo.toml apps/api/Cargo.toml
+COPY apps/api/assets apps/api/assets
 COPY apps/api/src apps/api/src
 COPY apps/api/tests apps/api/tests
 COPY apps/api/migrations apps/api/migrations

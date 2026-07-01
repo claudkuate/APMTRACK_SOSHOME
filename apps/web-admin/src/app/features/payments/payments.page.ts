@@ -49,7 +49,19 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
       </div>
 
       @if (message()) {
-        <div class="panel p-3 text-sm font-semibold text-[var(--text-body)]">{{ message() }}</div>
+        <div
+          id="payments-message"
+          [class]="
+            messageKind() === 'error'
+              ? 'panel flex flex-wrap items-center justify-between gap-2 bg-[var(--tint-red)] p-3 text-sm font-semibold text-[var(--red-ink)]'
+              : 'panel flex flex-wrap items-center justify-between gap-2 p-3 text-sm font-semibold text-[var(--cameroon-green-strong)]'
+          "
+        >
+          <span>{{ message() }}</span>
+          @if (messageKind() === 'success' && lastPayment(); as payment) {
+            <button type="button" class="btn-secondary" (click)="receipt(payment)">Télécharger le reçu</button>
+          }
+        </div>
       }
 
       <!-- Search -->
@@ -113,13 +125,27 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
               <div class="grid gap-4 sm:grid-cols-2">
                 <div class="field">
                   <label for="payment-amount">Montant encaissé</label>
-                  <input id="payment-amount" type="number" [ngModel]="confirmAmount()" (ngModelChange)="setConfirmAmount($event)" />
+                  <input
+                    id="payment-amount"
+                    type="number"
+                    readonly
+                    class="cursor-default bg-[var(--surface-muted)]"
+                    [ngModel]="confirmAmount()"
+                  />
                 </div>
                 <div>
                   <p class="text-[0.78rem] font-bold text-[var(--text-muted)]">Mode de règlement</p>
                   <div class="mt-1 flex flex-wrap gap-2">
                     @for (mode of payModes; track mode.value) {
-                      <button type="button" class="chip" [class.is-active]="payMode() === mode.value" (click)="payMode.set(mode.value)">
+                      <button
+                        type="button"
+                        class="chip"
+                        [class.is-active]="payMode() === mode.value"
+                        [class.opacity-50]="!mode.enabled"
+                        [disabled]="!mode.enabled"
+                        [title]="mode.enabled ? '' : 'Bientôt disponible'"
+                        (click)="mode.enabled && payMode.set(mode.value)"
+                      >
                         {{ mode.label }}
                       </button>
                     }
@@ -128,14 +154,20 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
               </div>
 
               <div class="mt-5 flex flex-wrap gap-2">
-                <button type="button" class="btn-primary flex-1" (click)="confirmValidate()">
+                <button type="button" class="btn-primary flex-1" [disabled]="isValidating()" (click)="confirmValidate()">
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M20 6 9 17l-5-5" />
                   </svg>
-                  Valider le paiement
+                  {{ isValidating() ? 'Validation en cours…' : 'Valider le paiement' }}
                 </button>
-                <button type="button" class="btn-secondary" (click)="clearSelection()">Annuler</button>
+                <button type="button" class="btn-secondary" [disabled]="isValidating()" (click)="clearSelection()">Annuler</button>
               </div>
+
+              @if (messageKind() === 'error' && message(); as errorMessage) {
+                <p class="mt-3 rounded-lg bg-[var(--tint-red)] p-3 text-sm font-semibold text-[var(--red-ink)]">
+                  {{ errorMessage }}
+                </p>
+              }
 
               <p class="mt-3 flex items-center gap-2 text-xs text-[var(--text-muted)]">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -237,15 +269,20 @@ export class PaymentsPage implements OnInit {
   protected readonly pending = signal<PendingPv[]>([]);
   protected readonly payments = signal<Payment[]>([]);
   protected readonly message = signal<string | null>(null);
+  protected readonly messageKind = signal<'success' | 'error'>('success');
   protected readonly selected = signal<PendingPv | null>(null);
   protected readonly confirmAmount = signal(0);
   protected readonly payMode = signal<PayMode>('ESPECES');
+  protected readonly isValidating = signal(false);
+  protected readonly lastPayment = signal<Payment | null>(null);
   protected pendingSearch = '';
 
-  protected readonly payModes: { value: PayMode; label: string }[] = [
-    { value: 'ESPECES', label: 'Espèces' },
-    { value: 'MOMO', label: 'MTN MoMo' },
-    { value: 'OM', label: 'Orange Money' },
+  // Phase pilote : encaissement en espèces uniquement — Mobile Money viendra
+  // avec l'intégration des API de paiement, commune par commune.
+  protected readonly payModes: { value: PayMode; label: string; enabled: boolean }[] = [
+    { value: 'ESPECES', label: 'Espèces', enabled: true },
+    { value: 'MOMO', label: 'MTN MoMo', enabled: false },
+    { value: 'OM', label: 'Orange Money', enabled: false },
   ];
 
   protected readonly totalToday = computed(() =>
@@ -267,12 +304,24 @@ export class PaymentsPage implements OnInit {
     const communeId = this.commune.communeId();
     const scope = communeId ? { commune_id: communeId } : {};
     this.api.page<PendingPv>('/api/v1/payments/pending', { page_size: 50, ...scope }).subscribe({
-      next: (response: Paginated<PendingPv>) => this.pending.set(response.items),
-      error: (err: unknown) => this.message.set(describeHttpError(err, 'Chargement des PV en attente')),
+      next: (response: Paginated<PendingPv>) => {
+        this.pending.set(response.items);
+        // Resynchronise la fiche ouverte : montants/pénalités recalculés par le
+        // serveur, ou fermeture si le PV n'est plus en attente.
+        const current = this.selected();
+        if (current) {
+          const refreshed = response.items.find((pv) => pv.pv_id === current.pv_id) ?? null;
+          this.selected.set(refreshed);
+          if (refreshed) {
+            this.confirmAmount.set(Number(refreshed.amount_total_fcfa ?? 0));
+          }
+        }
+      },
+      error: (err: unknown) => this.notify('error', describeHttpError(err, 'Chargement des PV en attente')),
     });
     this.api.page<Payment>('/api/v1/payments', { page_size: 50, ...scope }).subscribe({
       next: (response: Paginated<Payment>) => this.payments.set(response.items),
-      error: (err: unknown) => this.message.set(describeHttpError(err, "Chargement de l'historique")),
+      error: (err: unknown) => this.notify('error', describeHttpError(err, "Chargement de l'historique")),
     });
   }
 
@@ -286,31 +335,49 @@ export class PaymentsPage implements OnInit {
     this.selected.set(null);
   }
 
-  protected setConfirmAmount(value: number): void {
-    this.confirmAmount.set(Number(value));
-  }
-
   protected isLate(pv: PendingPv): boolean {
     return Number(pv.amount_penalty_fcfa ?? 0) > 0;
   }
 
   protected confirmValidate(): void {
     const pv = this.selected();
-    if (!pv) {
+    if (!pv || this.isValidating()) {
       return;
     }
+    this.isValidating.set(true);
+    this.message.set(null);
+    this.lastPayment.set(null);
     const amount = this.confirmAmount();
     this.api
       .post<Payment>(`/api/v1/payments/${pv.pv_id}/validate`, { amount_paid_fcfa: amount })
       .subscribe({
         next: (payment) => {
-          this.message.set(`Paiement validé : ${payment.receipt_number ?? payment.id}`);
+          this.isValidating.set(false);
+          this.lastPayment.set(payment);
+          this.notify('success', `Paiement validé — reçu ${payment.receipt_number ?? payment.id}.`);
           this.clearSelection();
           this.load();
           this.commune.refreshCounters();
+          this.scrollMessageIntoView();
         },
-        error: () => this.message.set('Paiement refusé. Vérifie le montant et les droits receveur.'),
+        error: (err: unknown) => {
+          this.isValidating.set(false);
+          this.notify('error', describeHttpError(err, 'Validation du paiement'));
+          // Recharge les montants : une pénalité a pu apparaître depuis l'affichage.
+          this.load();
+        },
       });
+  }
+
+  private notify(kind: 'success' | 'error', text: string): void {
+    this.messageKind.set(kind);
+    this.message.set(text);
+  }
+
+  private scrollMessageIntoView(): void {
+    setTimeout(() => {
+      document.getElementById('payments-message')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
   }
 
   protected filteredPending(): PendingPv[] {
@@ -343,7 +410,7 @@ export class PaymentsPage implements OnInit {
       date: this.date(payment.paid_at),
     }));
     if (!rows.length) {
-      this.message.set('Aucun paiement à exporter.');
+      this.notify('error', 'Aucun paiement à exporter.');
       return;
     }
     this.downloadCsv('journal-du-jour.csv', rows);

@@ -11,22 +11,35 @@ import { HttpErrorResponse } from '@angular/common/http';
  */
 export function describeHttpError(error: unknown, subject = 'Chargement'): string {
   if (error instanceof HttpErrorResponse) {
+    const apiMessage = extractApiErrorMessage(error);
     switch (error.status) {
       case 0:
         return 'API injoignable. Vérifie ta connexion puis réessaie.';
       case 401:
         return 'Session expirée. Reconnecte-toi pour continuer.';
       case 403:
-        return "Droits insuffisants pour accéder à cette ressource.";
+        return apiMessage ?? "Droits insuffisants pour accéder à cette ressource.";
       case 404:
-        return 'Ressource introuvable.';
+        return apiMessage ?? 'Ressource introuvable.';
       case 429:
         return 'Trop de requêtes. Patiente un instant avant de réessayer.';
       default:
         if (error.status >= 500) {
           return 'API momentanément indisponible. Réessaie dans un instant.';
         }
+        // 400/409/422 : le message métier du serveur (ex. « Montant insuffisant :
+        // 27500 FCFA requis… ») dit exactement quoi corriger — le montrer tel quel.
+        if (apiMessage) {
+          return apiMessage;
+        }
     }
   }
   return `${subject} impossible. Réessaie dans un instant.`;
+}
+
+/** Extrait `error.message` du corps d'erreur normalisé de l'API ({ error: { code, message } }). */
+function extractApiErrorMessage(error: HttpErrorResponse): string | null {
+  const body = error.error as { error?: { message?: unknown } } | null | undefined;
+  const message = body?.error?.message;
+  return typeof message === 'string' && message.trim() ? message : null;
 }

@@ -1,9 +1,13 @@
-//! Module Fourrières — mise en fourrière de véhicules.
+//! Module Fourrières — mise en fourrière de véhicules et autres objets.
 //!
 //! Conforme à la vision G-APM : la « gestion des fourrières » sécurise une niche
 //! de recettes communales. Multi-tenant (isolation par commune), soft-delete,
 //! traçabilité via `audit_logs`. Le numéro est généré côté serveur au format
 //! `FOUR-{COMMUNE_CODE}-{YEAR}-{SEQ:06}`.
+//!
+//! Un PV est le document généré par tout type d'intervention, y compris la mise
+//! en fourrière : toute création sans `pv_id` existant génère automatiquement un
+//! PV lié (intervention système « Mise en fourrière » du référentiel communal).
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -20,6 +24,7 @@ use crate::helpers::{clean_optional, is_agent_only, required_text, resolve_commu
 use crate::modules::audit;
 use crate::modules::auth::AuthUser;
 use crate::modules::rbac::Role;
+use crate::modules::{pvs, referentiel};
 use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::sequences::{next_document_sequence, SEQUENCE_FOURRIERE};
 use crate::state::AppState;
@@ -53,6 +58,7 @@ pub struct FourriereResponse {
     pub id: Uuid,
     pub commune_id: Uuid,
     pub pv_id: Option<Uuid>,
+    pub pv_number: Option<String>,
     pub fourriere_number: String,
     pub item_type: String,
     pub designation: Option<String>,
@@ -72,9 +78,12 @@ pub struct FourriereResponse {
     pub updated_at: DateTime<Utc>,
 }
 
-const FOURRIERE_COLUMNS: &str = "id, commune_id, pv_id, fourriere_number, item_type, \
-    designation, vehicle_plate, vehicle_type, vehicle_details, motif, lieu_enlevement, \
-    status, daily_fee_fcfa, entered_at, released_at, released_to, created_at, updated_at";
+// Colonnes préfixées `f.` : les listes/détails joignent `pvs p` pour exposer
+// le numéro du PV lié (`id`, `status`, `created_at`… existent dans les deux tables).
+const FOURRIERE_COLUMNS: &str = "f.id, f.commune_id, f.pv_id, p.pv_number, \
+    f.fourriere_number, f.item_type, f.designation, f.vehicle_plate, f.vehicle_type, \
+    f.vehicle_details, f.motif, f.lieu_enlevement, f.status, f.daily_fee_fcfa, \
+    f.entered_at, f.released_at, f.released_to, f.created_at, f.updated_at";
 
 #[derive(Debug, Deserialize)]
 pub struct FourriereFilterQuery {
@@ -89,6 +98,10 @@ pub struct FourriereFilterQuery {
 pub struct CreateFourriereRequest {
     pub commune_id: Option<Uuid>,
     pub pv_id: Option<Uuid>,
+    /// Agent au nom duquel le PV de mise en fourrière est généré.
+    /// Requis pour un admin quand aucun `pv_id` existant n'est fourni ;
+    /// ignoré pour un agent terrain (son propre dossier agent fait foi).
+    pub agent_id: Option<Uuid>,
     pub item_type: Option<String>,
     pub designation: Option<String>,
     pub vehicle_plate: Option<String>,
@@ -130,16 +143,18 @@ async fn list_fourrieres(
     let plate = clean_optional(query.vehicle_plate).map(|p| p.to_ascii_uppercase());
 
     let mut count_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT COUNT(*) AS total FROM fourrieres WHERE deleted_at IS NULL",
+        "SELECT COUNT(*) AS total FROM fourrieres f WHERE f.deleted_at IS NULL",
     );
     apply_filters(&mut count_qb, commune_filter, query.status.as_deref(), plate.as_deref());
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
-        "SELECT {FOURRIERE_COLUMNS} FROM fourrieres WHERE deleted_at IS NULL"
+        "SELECT {FOURRIERE_COLUMNS} FROM fourrieres f \
+         LEFT JOIN pvs p ON p.id = f.pv_id \
+         WHERE f.deleted_at IS NULL"
     ));
     apply_filters(&mut qb, commune_filter, query.status.as_deref(), plate.as_deref());
-    qb.push(" ORDER BY entered_at DESC LIMIT ")
+    qb.push(" ORDER BY f.entered_at DESC LIMIT ")
         .push_bind(pagination.limit)
         .push(" OFFSET ")
         .push_bind(pagination.offset);
@@ -205,29 +220,47 @@ async fn create_fourriere(
 
     let mut tx = state.db.begin().await?;
 
-    // Seul un agent actif peut enregistrer une mise en fourrière sur le terrain.
-    if is_agent_only(&auth_user) {
-        let agent_status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM agents WHERE user_id = $1 AND commune_id = $2 AND deleted_at IS NULL LIMIT 1",
+    // Résout l'agent au nom duquel le PV de mise en fourrière est généré.
+    // Un agent terrain agit en son nom (et doit être actif) ; un admin doit
+    // désigner l'agent ayant procédé, sauf si un PV existant est lié.
+    let resolved_agent_id: Option<Uuid> = if is_agent_only(&auth_user) {
+        let agent_row = sqlx::query(
+            "SELECT id, status FROM agents WHERE user_id = $1 AND commune_id = $2 AND deleted_at IS NULL LIMIT 1",
         )
         .bind(auth_user.id)
         .bind(commune_id)
         .fetch_optional(&mut *tx)
-        .await?;
-        match agent_status.as_deref() {
-            Some("ACTIF") => {}
-            Some(_) => {
-                return Err(ApiError::forbidden(
-                    "Seul un agent actif peut enregistrer une mise en fourrière",
-                ))
-            }
-            None => {
-                return Err(ApiError::forbidden(
-                    "Agent introuvable pour cet utilisateur et cette commune",
-                ))
-            }
+        .await?
+        .ok_or_else(|| {
+            ApiError::forbidden("Agent introuvable pour cet utilisateur et cette commune")
+        })?;
+        let agent_status: String = agent_row.get("status");
+        if agent_status != "ACTIF" {
+            return Err(ApiError::forbidden(
+                "Seul un agent actif peut enregistrer une mise en fourrière",
+            ));
         }
-    }
+        Some(agent_row.get("id"))
+    } else if payload.pv_id.is_none() {
+        let agent_id = payload.agent_id.ok_or_else(|| {
+            ApiError::bad_request("agent_id est requis pour générer le PV de mise en fourrière")
+        })?;
+        let agent_status: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM agents WHERE id = $1 AND commune_id = $2 AND deleted_at IS NULL",
+        )
+        .bind(agent_id)
+        .bind(commune_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if agent_status.as_deref() != Some("ACTIF") {
+            return Err(ApiError::bad_request(
+                "Agent invalide ou inactif pour cette commune",
+            ));
+        }
+        Some(agent_id)
+    } else {
+        None
+    };
 
     if let Some(pv_id) = payload.pv_id {
         let exists: Option<Uuid> = sqlx::query_scalar(
@@ -239,6 +272,24 @@ async fn create_fourriere(
         .await?;
         if exists.is_none() {
             return Err(ApiError::bad_request("pv_id invalide pour cette commune"));
+        }
+    }
+
+    // Doublon métier : le véhicule est déjà en fourrière dans cette commune.
+    if let Some(plate) = vehicle_plate.as_deref() {
+        let already: Option<String> = sqlx::query_scalar(
+            "SELECT fourriere_number FROM fourrieres \
+             WHERE commune_id = $1 AND vehicle_plate = $2 AND status = 'EN_FOURRIERE' \
+               AND deleted_at IS NULL LIMIT 1",
+        )
+        .bind(commune_id)
+        .bind(plate)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(numero) = already {
+            return Err(ApiError::conflict(format!(
+                "Ce véhicule est déjà en fourrière ({numero})"
+            )));
         }
     }
 
@@ -254,6 +305,38 @@ async fn create_fourriere(
         seq
     );
 
+    // « Un PV est généré par tout type d'intervention, y compris la mise en
+    // fourrière » : sans PV existant fourni, le PV système est créé dans la
+    // même transaction et lié à la fourrière.
+    let mut pv_id = payload.pv_id;
+    let mut generated_pv: Option<(Uuid, String, &'static str)> = None;
+    if pv_id.is_none() {
+        let agent_id = resolved_agent_id.ok_or_else(|| {
+            ApiError::bad_request("agent_id est requis pour générer le PV de mise en fourrière")
+        })?;
+        let intervention_id =
+            referentiel::get_or_create_fourriere_intervention_tx(&mut tx, commune_id).await?;
+        let notes = format!("Mise en fourrière {number} — {motif}");
+        let (new_pv_id, pv_number, pv_status) = pvs::create_system_pv_tx(
+            &mut tx,
+            &state.config.public_api_url,
+            pvs::SystemPvInput {
+                commune_id,
+                commune_code: &commune_code,
+                agent_id,
+                intervention_id,
+                vehicle_plate: vehicle_plate.as_deref(),
+                verbalized_identifier: designation.as_deref(),
+                location_description: lieu_enlevement.as_deref(),
+                notes_internes: Some(&notes),
+                created_by: auth_user.id,
+            },
+        )
+        .await?;
+        pv_id = Some(new_pv_id);
+        generated_pv = Some((new_pv_id, pv_number, pv_status));
+    }
+
     let id = Uuid::new_v4();
     sqlx::query(
         r#"
@@ -265,7 +348,7 @@ async fn create_fourriere(
     )
     .bind(id)
     .bind(commune_id)
-    .bind(payload.pv_id)
+    .bind(pv_id)
     .bind(&number)
     .bind(&item_type)
     .bind(designation.as_deref())
@@ -297,11 +380,36 @@ async fn create_fourriere(
             "item_type": item_type,
             "designation": designation,
             "vehicle_plate": vehicle_plate,
+            "pv_id": pv_id,
+            "pv_number": created.pv_number,
         })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
     .await;
+
+    if let Some((generated_pv_id, pv_number, pv_status)) = &generated_pv {
+        audit::record_for_commune(
+            &state.db,
+            Some(commune_id),
+            Some(auth_user.id),
+            "PV_CREATED",
+            "pvs",
+            Some(*generated_pv_id),
+            None,
+            Some(json!({
+                "pv_number": pv_number,
+                "commune_id": commune_id,
+                "agent_id": resolved_agent_id,
+                "status": pv_status,
+                "source": "FOURRIERE",
+                "fourriere_number": number,
+            })),
+            auth_user.ip_address.clone(),
+            auth_user.user_agent.clone(),
+        )
+        .await;
+    }
 
     Ok((StatusCode::CREATED, Json(created)))
 }
@@ -381,7 +489,9 @@ fn normalize_item_type(requested: Option<&str>) -> Result<String, ApiError> {
 
 async fn load_fourriere(pool: &PgPool, id: Uuid) -> Result<FourriereResponse, ApiError> {
     let row = sqlx::query(&format!(
-        "SELECT {FOURRIERE_COLUMNS} FROM fourrieres WHERE id = $1 AND deleted_at IS NULL"
+        "SELECT {FOURRIERE_COLUMNS} FROM fourrieres f \
+         LEFT JOIN pvs p ON p.id = f.pv_id \
+         WHERE f.id = $1 AND f.deleted_at IS NULL"
     ))
     .bind(id)
     .fetch_optional(pool)
@@ -400,6 +510,7 @@ fn row_to_fourriere(row: sqlx::postgres::PgRow) -> FourriereResponse {
         id: row.get("id"),
         commune_id: row.get("commune_id"),
         pv_id: row.get("pv_id"),
+        pv_number: row.get("pv_number"),
         fourriere_number: row.get("fourriere_number"),
         item_type: row.get("item_type"),
         designation: row.get("designation"),
@@ -434,12 +545,12 @@ fn apply_filters(
     vehicle_plate: Option<&str>,
 ) {
     if let Some(id) = commune_filter {
-        qb.push(" AND commune_id = ").push_bind(id);
+        qb.push(" AND f.commune_id = ").push_bind(id);
     }
     if let Some(s) = status {
-        qb.push(" AND status = ").push_bind(s.to_string());
+        qb.push(" AND f.status = ").push_bind(s.to_string());
     }
     if let Some(plate) = vehicle_plate {
-        qb.push(" AND vehicle_plate = ").push_bind(plate.to_string());
+        qb.push(" AND f.vehicle_plate = ").push_bind(plate.to_string());
     }
 }
