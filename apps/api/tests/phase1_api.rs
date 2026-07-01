@@ -488,12 +488,17 @@ fn test_state() -> AppState {
         jwt_refresh_token_ttl_days: 7,
         cors_allowed_origins: vec!["http://localhost:4200".to_string()],
         public_api_url: "http://localhost:8080".to_string(),
+        public_web_url: "http://localhost:8080".to_string(),
         run_migrations_on_startup: false,
         rate_limit_enabled: false,
         rate_limit_window_seconds: 60,
         rate_limit_login_max: 10,
         rate_limit_public_max: 60,
         s3: None,
+        smtp: None,
+        whatsapp: None,
+        daily_report_enabled: false,
+        daily_report_hour_utc: 5,
     };
 
     AppState::try_new(config).expect("state")
