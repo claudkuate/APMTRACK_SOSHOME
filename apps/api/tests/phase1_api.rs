@@ -246,13 +246,15 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
     assert_eq!(agent.status, StatusCode::OK);
     let agent_id = agent.body["id"].as_str().expect("agent id");
 
+    // Lie le compte utilisateur existant (même email) à l'agent : la connexion
+    // mobile plus bas doit résoudre l'agent via agents.user_id.
     let link_account = request_json(
         app.clone(),
         Method::POST,
         &format!("/api/v1/agents/{agent_id}/account"),
         json!({
-            "email": "agent.mobile@example.com",
-            "password": "agentpass123",
+            "email": "agent.mobile@example.test",
+            "password": "agent-mobile-password",
             "active": true
         }),
         Some(admin_token),
@@ -314,18 +316,46 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
     );
     let intervention_id = intervention.body["id"].as_str().expect("intervention id");
 
+    // Zone requise pour créer une patrouille.
+    let zone = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/zones",
+        json!({
+            "commune_id": commune_id,
+            "nom": "Quartier Centre",
+            "type_zone": "QUARTIER"
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(
+        zone.status,
+        StatusCode::OK,
+        "create zone response: {:?}",
+        zone.body
+    );
+    let zone_id = zone.body["id"].as_str().expect("zone id");
+
     let patrouille = request_json(
         app.clone(),
         Method::POST,
         "/api/v1/patrouilles",
         json!({
             "commune_id": commune_id,
-            "nom": "Patrouille mobile test"
+            "zone_id": zone_id,
+            "nom": "Patrouille mobile test",
+            "agent_ids": [agent_id]
         }),
         Some(admin_token),
     )
     .await;
-    assert_eq!(patrouille.status, StatusCode::CREATED);
+    assert_eq!(
+        patrouille.status,
+        StatusCode::CREATED,
+        "create patrouille response: {:?}",
+        patrouille.body
+    );
     let patrouille_id = patrouille.body["id"].as_str().expect("patrouille id");
 
     let assigned = request_json(
@@ -339,7 +369,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(admin_token),
     )
     .await;
-    assert_eq!(assigned.status, StatusCode::CREATED);
+    assert_eq!(
+        assigned.status,
+        StatusCode::CREATED,
+        "assign agent response: {:?}",
+        assigned.body
+    );
 
     let started = request_empty(
         app.clone(),
@@ -348,7 +383,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(admin_token),
     )
     .await;
-    assert_eq!(started.status, StatusCode::OK);
+    assert_eq!(
+        started.status,
+        StatusCode::OK,
+        "start patrouille response: {:?}",
+        started.body
+    );
 
     let agent_login = request_json(
         app.clone(),
@@ -361,7 +401,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         None,
     )
     .await;
-    assert_eq!(agent_login.status, StatusCode::OK);
+    assert_eq!(
+        agent_login.status,
+        StatusCode::OK,
+        "agent login response: {:?}",
+        agent_login.body
+    );
     let agent_token = agent_login.body["access_token"]
         .as_str()
         .expect("agent token");
@@ -373,7 +418,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(agent_token),
     )
     .await;
-    assert_eq!(mobile_me.status, StatusCode::OK);
+    assert_eq!(
+        mobile_me.status,
+        StatusCode::OK,
+        "mobile me response: {:?}",
+        mobile_me.body
+    );
     assert_eq!(mobile_me.body["agent"]["id"], agent_id);
 
     let mobile_interventions = request_empty(
@@ -400,7 +450,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(agent_token),
     )
     .await;
-    assert_eq!(mobile_patrouille.status, StatusCode::OK);
+    assert_eq!(
+        mobile_patrouille.status,
+        StatusCode::OK,
+        "mobile patrouille response: {:?}",
+        mobile_patrouille.body
+    );
     assert_eq!(mobile_patrouille.body["patrouille"]["id"], patrouille_id);
 
     let position = request_json(
@@ -415,7 +470,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(agent_token),
     )
     .await;
-    assert_eq!(position.status, StatusCode::CREATED);
+    assert_eq!(
+        position.status,
+        StatusCode::CREATED,
+        "record position response: {:?}",
+        position.body
+    );
 
     let pv = request_json(
         app.clone(),
@@ -423,6 +483,8 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         "/api/v1/pvs",
         json!({
             "intervention_id": intervention_id,
+            "verbalized_name": "Contrevenant Mobile",
+            "verbalized_phone": "+237699000010",
             "vehicle_plate": "CE123AB",
             "location_description": "Carrefour test",
             "gps_latitude": 3.8667,
@@ -431,7 +493,12 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         Some(agent_token),
     )
     .await;
-    assert_eq!(pv.status, StatusCode::CREATED);
+    assert_eq!(
+        pv.status,
+        StatusCode::CREATED,
+        "create pv response: {:?}",
+        pv.body
+    );
     assert_eq!(pv.body["amount_initial_fcfa"], 10000);
 
     let agent_pvs = request_empty(app.clone(), Method::GET, "/api/v1/pvs", Some(agent_token)).await;
@@ -453,6 +520,8 @@ async fn mobile_agent_mvp_flow_is_scoped_to_authenticated_agent() {
         "/api/v1/pvs",
         json!({
             "intervention_id": intervention_id,
+            "verbalized_name": "Contrevenant Suspendu",
+            "verbalized_phone": "+237699000011",
             "vehicle_plate": "CE999AB",
             "location_description": "Carrefour test"
         }),
@@ -488,12 +557,17 @@ fn test_state() -> AppState {
         jwt_refresh_token_ttl_days: 7,
         cors_allowed_origins: vec!["http://localhost:4200".to_string()],
         public_api_url: "http://localhost:8080".to_string(),
+        public_web_url: "http://localhost:8080".to_string(),
         run_migrations_on_startup: false,
         rate_limit_enabled: false,
         rate_limit_window_seconds: 60,
         rate_limit_login_max: 10,
         rate_limit_public_max: 60,
         s3: None,
+        smtp: None,
+        whatsapp: None,
+        daily_report_enabled: false,
+        daily_report_hour_utc: 6,
     };
 
     AppState::try_new(config).expect("state")
