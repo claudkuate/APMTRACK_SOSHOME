@@ -602,11 +602,23 @@ async fn generate_receipt_number(
         .bind(commune_id)
         .fetch_one(&mut **tx)
         .await?;
-    let (year, seq) = next_document_sequence(tx, commune_id, SEQUENCE_RECEIPT).await?;
-    Ok(format!(
-        "REC-{}-{}-{:06}",
-        commune_code.to_uppercase(),
-        year,
-        seq
+    // Le compteur RECEIPT peut être en retard sur des reçus déjà en base
+    // (données semées / reprises) : sauter les numéros pris plutôt que de
+    // laisser l'INSERT violer l'unicité — le rollback annulerait aussi
+    // l'incrément et chaque nouvel essai régénérerait le même numéro.
+    for _ in 0..100 {
+        let (year, seq) = next_document_sequence(tx, commune_id, SEQUENCE_RECEIPT).await?;
+        let candidate = format!("REC-{}-{}-{:06}", commune_code.to_uppercase(), year, seq);
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM payments WHERE receipt_number = $1)")
+                .bind(&candidate)
+                .fetch_one(&mut **tx)
+                .await?;
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+    Err(ApiError::internal(
+        "Impossible de generer un numero de recu unique",
     ))
 }

@@ -5,6 +5,7 @@ use apmtrack_api::modules::rbac::Role;
 use apmtrack_api::state::AppState;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
+use chrono::Datelike;
 use serde_json::{Value, json};
 use sqlx::Row;
 use tower::ServiceExt;
@@ -760,6 +761,57 @@ async fn receveur_payment_flow_lenient_totals_and_flat_penalty() {
         .await
         .expect("backdate pv");
 
+    // Désynchronisation héritée : un reçu déjà en base (données semées/reprises)
+    // occupe le numéro que le compteur RECEIPT — vierge, donc 000001 — va émettre.
+    // La validation doit sauter les numéros pris ; avant ce correctif elle bouclait
+    // sur un 409 (violation UNIQUE dont le rollback annulait aussi l'incrément).
+    let pv_seeded = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_id": intervention_id,
+            "verbalized_name": "Contrevenant Seme",
+            "verbalized_phone": "+237699000003",
+            "vehicle_plate": "CE300CC",
+            "location_description": "Carrefour test",
+            "gps_latitude": 3.8667,
+            "gps_longitude": 11.5167
+        }),
+        Some(agent_token),
+    )
+    .await;
+    assert_eq!(pv_seeded.status, StatusCode::CREATED);
+    let pv_seeded_uuid =
+        Uuid::parse_str(pv_seeded.body["id"].as_str().expect("pv seeded id")).expect("pv seeded");
+    let receveur_uuid =
+        Uuid::parse_str(receveur.body["id"].as_str().expect("receveur id")).expect("receveur");
+    let year = chrono::Utc::now().year();
+    let seeded_receipt = format!("REC-YDE1-{year}-000001");
+    sqlx::query(
+        r#"
+        INSERT INTO payments (
+            id, pv_id, commune_id, amount_due, amount_penalty, amount_total,
+            amount_paid, amount_due_fcfa, amount_penalty_fcfa, amount_total_fcfa,
+            amount_paid_fcfa, receiver_user_id, paid_at, status, receipt_number
+        )
+        VALUES ($1, $2, $3, 10000, 0, 10000, 10000, 10000, 0, 10000, 10000, $4, now(), 'PAYE', $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(pv_seeded_uuid)
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .bind(receveur_uuid)
+    .bind(&seeded_receipt)
+    .execute(&state.db)
+    .await
+    .expect("seed legacy payment");
+    sqlx::query("UPDATE pvs SET status = 'PAYE' WHERE id = $1")
+        .bind(pv_seeded_uuid)
+        .execute(&state.db)
+        .await
+        .expect("mark seeded pv paid");
+
     // La liste des PV à encaisser doit afficher exactement ce que la validation exigera.
     let pending = request_empty(
         app.clone(),
@@ -805,7 +857,11 @@ async fn receveur_payment_flow_lenient_totals_and_flat_penalty() {
     let receipt_number = paid_legacy.body["receipt_number"]
         .as_str()
         .expect("receipt number");
-    assert!(receipt_number.starts_with("REC-YDE1-"));
+    assert_eq!(
+        receipt_number,
+        format!("REC-YDE1-{year}-000002"),
+        "le numero deja pris (000001) doit etre saute, pas reemis"
+    );
 
     let legacy_status: String = sqlx::query("SELECT status FROM pvs WHERE id = $1")
         .bind(pv_legacy_uuid)
@@ -855,6 +911,12 @@ async fn receveur_payment_flow_lenient_totals_and_flat_penalty() {
     );
     assert_eq!(paid_late.body["amount_penalty_fcfa"], 4000);
     assert_eq!(paid_late.body["amount_total_fcfa"], 14000);
+    assert_eq!(
+        paid_late.body["receipt_number"]
+            .as_str()
+            .expect("late receipt number"),
+        format!("REC-YDE1-{year}-000003")
+    );
 
     // Un PV payé ne peut pas être encaissé deux fois.
     let replay = request_json(
