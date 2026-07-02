@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../../core/services/api.service';
@@ -263,7 +263,7 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
     </section>
   `,
 })
-export class PaymentsPage implements OnInit {
+export class PaymentsPage {
   private readonly api = inject(ApiService);
   private readonly commune = inject(CommuneContextService);
 
@@ -297,8 +297,12 @@ export class PaymentsPage implements OnInit {
     () => this.pending().filter((pv) => Number(pv.amount_penalty_fcfa ?? 0) > 0).length,
   );
 
-  ngOnInit(): void {
-    this.load();
+  constructor() {
+    // Recharge quand la commune active change (cf. carte-map.page.ts).
+    effect(() => {
+      this.commune.communeId();
+      untracked(() => this.load());
+    });
   }
 
   protected load(): void {

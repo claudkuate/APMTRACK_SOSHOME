@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
 import { ApiService } from '../../core/services/api.service';
@@ -56,6 +56,12 @@ interface StatusBar {
           </p>
         </div>
         <div class="flex flex-wrap gap-2">
+          <button type="button" class="btn-secondary" (click)="load()" [disabled]="loading()">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
+            </svg>
+            Actualiser
+          </button>
           <a routerLink="/exports" class="btn-secondary">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5" /><path d="M12 15V3" />
@@ -71,7 +77,7 @@ interface StatusBar {
         </div>
       </div>
 
-      @if (loading()) {
+      @if (loading() && !summary()) {
         <div class="panel p-6 text-[var(--text-muted)]">Chargement des indicateurs...</div>
       } @else if (summary()) {
         <!-- KPI cards -->
@@ -96,8 +102,8 @@ interface StatusBar {
               </svg>
             </span>
             <p class="kpi-label mt-3">Encaissé (validé)</p>
-            <strong class="kpi-value mt-1 block">{{ fcfaShort(payments()['total_collected_fcfa']) }}</strong>
-            <p class="mt-2 text-xs text-[var(--text-muted)]">{{ fcfaShort(payments()['pending_fcfa']) }} en attente</p>
+            <strong class="kpi-value mt-1 block" [title]="fcfa(payments()['total_collected_fcfa'])">{{ fcfaShort(payments()['total_collected_fcfa']) }}</strong>
+            <p class="mt-2 text-xs text-[var(--text-muted)]" [title]="fcfa(payments()['pending_fcfa'])">{{ fcfaShort(payments()['pending_fcfa']) }} en attente</p>
           </article>
 
           <article class="kpi-card">
@@ -250,7 +256,7 @@ interface StatusBar {
     </section>
   `,
 })
-export class DashboardPage implements OnInit {
+export class DashboardPage {
   private readonly api = inject(ApiService);
   private readonly commune = inject(CommuneContextService);
 
@@ -301,8 +307,12 @@ export class DashboardPage implements OnInit {
     return bars.map((bar) => ({ ...bar, peak: bar.value === max }));
   });
 
-  ngOnInit(): void {
-    this.load();
+  constructor() {
+    // Recharge quand la commune active change (cf. carte-map.page.ts).
+    effect(() => {
+      this.commune.communeId();
+      untracked(() => this.load());
+    });
   }
 
   protected load(): void {
