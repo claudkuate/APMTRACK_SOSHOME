@@ -1,6 +1,7 @@
 use apmtrack_api::config::AppConfig;
 use apmtrack_api::database;
 use apmtrack_api::modules::auth::{assign_roles, hash_password};
+use apmtrack_api::modules::demo_seed;
 use apmtrack_api::modules::rbac::Role;
 use apmtrack_api::state::AppState;
 use axum::body::{Body, to_bytes};
@@ -1418,6 +1419,186 @@ async fn fourriere_creation_auto_generates_linked_pv() {
         .expect("count")
         .get("total");
     assert_eq!(pv_count_before, pv_count_after, "aucun PV dupliqué");
+}
+
+#[tokio::test]
+async fn demo_seed_replay_survives_sequences_consumed_by_real_documents() {
+    if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
+        return;
+    }
+
+    let _db_guard = DB_TEST_LOCK.lock().await;
+    let state = test_state();
+    database::run_migrations(&state.db)
+        .await
+        .expect("migrations");
+    reset_database(&state).await;
+
+    // Premier seed sur base vierge : la fourrière de démo et son PV lié existent.
+    demo_seed::seed_demo(&state.db, "test", None)
+        .await
+        .expect("premier seed");
+
+    let commune_id: Uuid = sqlx::query("SELECT id FROM communes WHERE code = 'YDE1'")
+        .fetch_one(&state.db)
+        .await
+        .expect("commune YDE1")
+        .get("id");
+    let seeded = sqlx::query(
+        "SELECT f.id, f.pv_id, p.pv_number FROM fourrieres f \
+         JOIN pvs p ON p.id = f.pv_id WHERE f.commune_id = $1",
+    )
+    .bind(commune_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("fourriere semee");
+    let seeded_fourriere_id: Uuid = seeded.get("id");
+    let seeded_pv_id: Uuid = seeded.get("pv_id");
+    let taken_pv_number: String = seeded.get("pv_number");
+
+    // Simule une base héritée : la fourrière semée et son PV n'existent pas
+    // encore (ancien seed sans fourrières), mais de vrais documents ont
+    // consommé la séquence — dont le numéro que l'ancien seed codait en dur.
+    sqlx::query("DELETE FROM fourrieres WHERE id = $1")
+        .bind(seeded_fourriere_id)
+        .execute(&state.db)
+        .await
+        .expect("suppression fourriere semee");
+    sqlx::query("DELETE FROM pvs WHERE id = $1")
+        .bind(seeded_pv_id)
+        .execute(&state.db)
+        .await
+        .expect("suppression pv seme");
+
+    let agent_id: Uuid =
+        sqlx::query("SELECT id FROM agents WHERE commune_id = $1 ORDER BY matricule LIMIT 1")
+            .bind(commune_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("agent seme")
+            .get("id");
+    let intervention_id: Uuid =
+        sqlx::query("SELECT id FROM interventions WHERE commune_id = $1 ORDER BY nom LIMIT 1")
+            .bind(commune_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("intervention semee")
+            .get("id");
+    let user_id: Uuid =
+        sqlx::query("SELECT id FROM users WHERE commune_id = $1 ORDER BY email LIMIT 1")
+            .bind(commune_id)
+            .fetch_one(&state.db)
+            .await
+            .expect("user seme")
+            .get("id");
+    let year = chrono::Utc::now().year();
+    let next_pv_seq: i64 = sqlx::query(
+        "SELECT next_value FROM document_sequences \
+         WHERE commune_id = $1 AND kind = 'PV' AND year = $2",
+    )
+    .bind(commune_id)
+    .bind(year)
+    .fetch_one(&state.db)
+    .await
+    .expect("compteur PV")
+    .get("next_value");
+    let next_four_seq: i64 = sqlx::query(
+        "SELECT next_value FROM document_sequences \
+         WHERE commune_id = $1 AND kind = 'FOURRIERE' AND year = $2",
+    )
+    .bind(commune_id)
+    .bind(year)
+    .fetch_one(&state.db)
+    .await
+    .expect("compteur FOURRIERE")
+    .get("next_value");
+
+    // Deux vrais PV : l'un reprend le numéro que le seed attribuait à la
+    // fourrière (l'insert échouait en 23505 avant ce correctif), l'autre
+    // occupe le prochain numéro du compteur (il doit être sauté).
+    let real_pv_id = Uuid::new_v4();
+    let counter_pv_number = format!("PV-YDE1-{year}-{next_pv_seq:06}");
+    for (id, number) in [
+        (real_pv_id, taken_pv_number.clone()),
+        (Uuid::new_v4(), counter_pv_number.clone()),
+    ] {
+        sqlx::query(
+            r#"
+            INSERT INTO pvs (id, commune_id, agent_id, pv_number, intervention_id,
+                             status, created_by)
+            VALUES ($1, $2, $3, $4, $5, 'EN_ATTENTE_PAIEMENT', $6)
+            "#,
+        )
+        .bind(id)
+        .bind(commune_id)
+        .bind(agent_id)
+        .bind(number)
+        .bind(intervention_id)
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        .expect("vrai pv occupant un numero");
+    }
+    // Une vraie fourrière occupe le prochain numéro FOURRIERE du compteur.
+    let counter_four_number = format!("FOUR-YDE1-{year}-{next_four_seq:06}");
+    sqlx::query(
+        r#"
+        INSERT INTO fourrieres (id, commune_id, pv_id, fourriere_number,
+                                vehicle_plate, motif, status, daily_fee_fcfa)
+        VALUES ($1, $2, $3, $4, 'CE999ZZ', 'Stationnement gênant', 'EN_FOURRIERE', 2000)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(commune_id)
+    .bind(real_pv_id)
+    .bind(&counter_four_number)
+    .execute(&state.db)
+    .await
+    .expect("vraie fourriere occupant un numero");
+
+    // Rejeu : le seed doit sauter les numéros pris au lieu d'échouer en 23505.
+    demo_seed::seed_demo(&state.db, "test", None)
+        .await
+        .expect("rejeu du seed sur base avec documents reels");
+
+    let replayed = sqlx::query(
+        "SELECT f.fourriere_number, p.pv_number FROM fourrieres f \
+         JOIN pvs p ON p.id = f.pv_id \
+         WHERE f.commune_id = $1 AND f.vehicle_plate = 'YDE1-1234'",
+    )
+    .bind(commune_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("fourriere resemee");
+    let new_pv_number: String = replayed.get("pv_number");
+    let new_four_number: String = replayed.get("fourriere_number");
+    assert_eq!(
+        new_pv_number,
+        format!("PV-YDE1-{year}-{:06}", next_pv_seq + 1),
+        "les numeros de PV pris ({taken_pv_number}, {counter_pv_number}) doivent etre sautes"
+    );
+    assert_eq!(
+        new_four_number,
+        format!("FOUR-YDE1-{year}-{:06}", next_four_seq + 1),
+        "le numero de fourriere pris ({counter_four_number}) doit etre saute"
+    );
+
+    // Nouveau rejeu : les lignes existent, leurs numéros sont conservés.
+    demo_seed::seed_demo(&state.db, "test", None)
+        .await
+        .expect("second rejeu du seed");
+    let stable = sqlx::query(
+        "SELECT f.fourriere_number, p.pv_number FROM fourrieres f \
+         JOIN pvs p ON p.id = f.pv_id \
+         WHERE f.commune_id = $1 AND f.vehicle_plate = 'YDE1-1234'",
+    )
+    .bind(commune_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("fourriere stable au rejeu");
+    assert_eq!(stable.get::<String, _>("pv_number"), new_pv_number);
+    assert_eq!(stable.get::<String, _>("fourriere_number"), new_four_number);
 }
 
 struct TestUser {

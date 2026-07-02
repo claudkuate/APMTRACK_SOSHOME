@@ -15,6 +15,7 @@ use crate::errors::ApiError;
 use crate::modules::auth::{assign_roles, hash_password};
 use crate::modules::rbac::Role;
 use crate::modules::referentiel;
+use crate::sequences::{next_document_sequence, SEQUENCE_FOURRIERE, SEQUENCE_PV};
 use crate::storage::ObjectStorage;
 
 /// Espace de noms fixe pour dériver des UUID stables à partir de clés textuelles.
@@ -1011,6 +1012,35 @@ async fn seed_fourriere_referentiel(
     Ok(intervention_id)
 }
 
+/// Prochain numéro libre pour un document semé, tiré du compteur
+/// `document_sequences` en sautant les numéros déjà pris. Un numéro codé en dur
+/// entrerait en collision (violation UNIQUE, 23505) avec de vrais documents
+/// ayant consommé la séquence avant la première insertion de la ligne semée —
+/// même famille de bug que les reçus (cf. `payments::generate_receipt_number`).
+async fn next_free_document_number(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Uuid,
+    kind: &str,
+    prefix: &str,
+    commune_code: &str,
+    exists_query: &str,
+) -> Result<String, ApiError> {
+    for _ in 0..100 {
+        let (year, seq) = next_document_sequence(tx, commune_id, kind).await?;
+        let candidate = format!("{prefix}-{commune_code}-{year}-{seq:06}");
+        let exists: bool = sqlx::query_scalar(exists_query)
+            .bind(&candidate)
+            .fetch_one(&mut **tx)
+            .await?;
+        if !exists {
+            return Ok(candidate);
+        }
+    }
+    Err(ApiError::internal(
+        "Impossible de generer un numero de document unique",
+    ))
+}
+
 async fn seed_fourrieres(
     pool: &sqlx::PgPool,
     c: &CommuneSeed,
@@ -1020,15 +1050,56 @@ async fn seed_fourrieres(
     let admin_user_id = det_id(&format!("user:admin:{}", c.code));
     let agent_id = det_id(&format!("agent:{}:1", c.code));
     let id = det_id(&format!("fourriere:{}:1", c.code));
-    let numero = format!("FOUR-{}-2026-000001", c.code);
     let plate = format!("{}-1234", c.code);
+    let pv_id = det_id(&format!("pv:fourriere:{}:1", c.code));
+
+    // Sur rejeu, les lignes existent (id déterministes) et gardent leur numéro.
+    // À la première insertion, le numéro est tiré du compteur : l'ON CONFLICT
+    // (id) ne protège pas d'un 23505 sur le numéro UNIQUE si de vrais documents
+    // ont déjà consommé la séquence.
+    let mut tx = pool.begin().await?;
 
     // PV lié — un PV est généré par tout type d'intervention, y compris la mise
-    // en fourrière. PV_SPECS occupe les séquences 1..=3, celui-ci prend la
-    // suivante (alignée dans `seed_document_sequences`).
-    let pv_id = det_id(&format!("pv:fourriere:{}:1", c.code));
-    let pv_seq = PV_SPECS.len() as u32 + 1;
-    let pv_number = format!("PV-{}-2026-{pv_seq:06}", c.code);
+    // en fourrière.
+    let existing_pv_number: Option<String> =
+        sqlx::query_scalar("SELECT pv_number FROM pvs WHERE id = $1")
+            .bind(pv_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let pv_number = match existing_pv_number {
+        Some(number) => number,
+        None => {
+            next_free_document_number(
+                &mut tx,
+                commune_id,
+                SEQUENCE_PV,
+                "PV",
+                c.code,
+                "SELECT EXISTS(SELECT 1 FROM pvs WHERE pv_number = $1)",
+            )
+            .await?
+        }
+    };
+
+    let existing_numero: Option<String> =
+        sqlx::query_scalar("SELECT fourriere_number FROM fourrieres WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let numero = match existing_numero {
+        Some(number) => number,
+        None => {
+            next_free_document_number(
+                &mut tx,
+                commune_id,
+                SEQUENCE_FOURRIERE,
+                "FOUR",
+                c.code,
+                "SELECT EXISTS(SELECT 1 FROM fourrieres WHERE fourriere_number = $1)",
+            )
+            .await?
+        }
+    };
 
     sqlx::query(
         r#"
@@ -1058,7 +1129,7 @@ async fn seed_fourrieres(
     .bind(QR_PLACEHOLDER)
     .bind(format!("Mise en fourrière {numero} — Stationnement gênant"))
     .bind(admin_user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -1084,8 +1155,10 @@ async fn seed_fourrieres(
     .bind(plate)
     .bind(c.siege)
     .bind(admin_user_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
@@ -1150,11 +1223,12 @@ async fn seed_document_sequences(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result
         .unwrap_or(0);
 
     let sequences: [(&str, i64); 4] = [
-        // PV_SPECS + le PV de la fourrière semée (seq suivante).
-        ("PV", PV_SPECS.len() as i64 + 2),
+        // Plancher des PV codés en dur (PV_SPECS, seq 1..=3) — le PV de la
+        // fourrière semée tire déjà son numéro du compteur (seed_fourrieres).
+        ("PV", PV_SPECS.len() as i64 + 1),
         ("RECEIPT", max_paid_seq + 1),
         ("SIGNALEMENT", SIGNALEMENT_SPECS.len() as i64 + 1),
-        // 1 fourrière semée par commune (FOUR-...-000001).
+        // La fourrière semée tire aussi son numéro du compteur.
         ("FOURRIERE", 2),
     ];
 
