@@ -110,9 +110,8 @@ class _CreatePvPageState extends State<CreatePvPage> {
     super.initState();
     final pv = widget.initialPv;
     if (pv == null) {
-      if (widget.controller.interventions.isNotEmpty) {
-        _selectedInterventionIds.add(widget.controller.interventions.first.id);
-      }
+      // Aucune infraction pré-cochée : l'agent choisit explicitement (retour
+      // terrain : une pré-sélection invisible gonflait le montant indicatif).
       return;
     }
     _subjectKind = pv.subjectKind ?? 'PHYSIQUE';
@@ -668,12 +667,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
   Future<void> _retryReferentiel() async {
     await widget.controller.refreshData();
     if (!mounted) return;
-    setState(() {
-      if (_selectedInterventionIds.isEmpty &&
-          widget.controller.interventions.isNotEmpty) {
-        _selectedInterventionIds.add(widget.controller.interventions.first.id);
-      }
-    });
+    setState(() {});
   }
 
   Widget _buildInfractionsStep() {
@@ -731,6 +725,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
                 children: [
                   DropdownButtonFormField<String?>(
                     initialValue: _selectedCategoryId,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Categorie',
                       prefixIcon: Icon(Icons.account_tree_outlined),
@@ -740,7 +735,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
                       ..._categoryOptions.map(
                         (item) => DropdownMenuItem(
                           value: item.categoryId,
-                          child: Text(item.categoryNom),
+                          child: Text(
+                            item.categoryNom,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ],
@@ -754,6 +752,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
                   const SizedBox(height: 10),
                   DropdownButtonFormField<String?>(
                     initialValue: _selectedTypeId,
+                    isExpanded: true,
                     decoration: const InputDecoration(
                       labelText: 'Type',
                       prefixIcon: Icon(Icons.rule_folder_outlined),
@@ -763,7 +762,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
                       ..._typeOptions.map(
                         (item) => DropdownMenuItem(
                           value: item.typeId,
-                          child: Text(item.typeNom),
+                          child: Text(
+                            item.typeNom,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
                       ),
                     ],
@@ -842,11 +844,54 @@ class _CreatePvPageState extends State<CreatePvPage> {
                   ),
                 ),
           ],
+          // Récapitulatif de TOUTES les infractions cochées, y compris celles
+          // masquées par le filtre Categorie/Type/recherche : sans lui, une
+          // sélection hors filtre reste comptée dans le montant sans être
+          // visible ni décochable.
+          if (_selectedInterventions.isNotEmpty) ...[
+            const Divider(height: 1),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Selection (${_selectedInterventions.length})',
+                    style: const TextStyle(fontWeight: FontWeight.w900),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final item in _selectedInterventions)
+                        InputChip(
+                          key: Key('selected-infraction-chip-${item.id}'),
+                          label: Text(
+                            '${item.nom} · ${formatFcfa(item.montantFcfa)}',
+                          ),
+                          deleteIcon: const Icon(Icons.cancel, size: 18),
+                          onDeleted: () => setState(
+                            () => _selectedInterventionIds.remove(item.id),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
           const Divider(height: 1),
           ListTile(
-            title: const Text('Montant indicatif'),
+            title: Text(
+              _selectedInterventions.isEmpty
+                  ? 'Montant indicatif'
+                  : 'Montant indicatif (${_selectedInterventions.length} infraction${_selectedInterventions.length > 1 ? 's' : ''})',
+            ),
             trailing: Text(
-              formatFcfa(_totalFcfa),
+              // '-' tant que rien n'est coché : formatFcfa(null) rendrait
+              // 'Non payant', trompeur pour une sélection vide.
+              _selectedInterventions.isEmpty ? '-' : formatFcfa(_totalFcfa),
               style: const TextStyle(fontWeight: FontWeight.w900),
             ),
           ),

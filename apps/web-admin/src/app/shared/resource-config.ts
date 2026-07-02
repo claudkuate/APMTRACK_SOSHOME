@@ -891,6 +891,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     columns: [
       'pv_number',
       'status',
+      'agent_id',
       'subject_type',
       'interventions',
       'amount_initial_fcfa',
@@ -906,6 +907,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     detailFields: [
       'pv_number',
       'status',
+      'agent_id',
       'subject_type',
       'subject_kind',
       'raison_sociale',
@@ -1830,6 +1832,7 @@ function commonLabels(): Record<string, string> {
     intervention_id: 'Intervention',
     intervention_ids: 'Infractions',
     interventions: 'Infractions',
+    agent_id: 'Agent',
     subject_type: 'Type PV',
     subject_kind: 'Type de personne',
     raison_sociale: 'Raison sociale',

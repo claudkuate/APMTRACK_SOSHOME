@@ -46,7 +46,10 @@ void main() {
 
     expect(find.text(_defautNom), findsOneWidget);
     expect(find.text(_stationnementNom), findsNothing);
-    expect(find.text(formatFcfa(35000)), findsOneWidget);
+    // La sélection masquée par le filtre reste visible en chip et comptée.
+    expect(find.byKey(_stationnementChipKey), findsOneWidget);
+    expect(find.text('Selection (1)'), findsOneWidget);
+    expect(find.text(formatFcfa(10000)), findsOneWidget);
 
     await tester.tap(find.byTooltip('Effacer la recherche'));
     await tester.pumpAndSettle();
@@ -80,6 +83,41 @@ void main() {
       find.text('Aucune infraction ne correspond a cette recherche.'),
       findsOneWidget,
     );
+
+    // Le chip permet de decocher une infraction hors du filtre courant.
+    expect(find.byKey(_stationnementChipKey), findsOneWidget);
+    await tester.ensureVisible(find.byKey(_stationnementChipKey));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(_stationnementChipKey),
+        matching: find.byIcon(Icons.cancel),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(_stationnementChipKey), findsNothing);
+    expect(find.text('Selection (1)'), findsNothing);
+    expect(find.text('Montant indicatif'), findsOneWidget);
+  });
+
+  testWidgets('does not preselect any infraction on new PV', (tester) async {
+    final controller = _buildController();
+    addTearDown(controller.dispose);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildApmtrackTheme(),
+        home: CreatePvPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(_checkboxValue(tester, _defautNom), isFalse);
+    expect(_checkboxValue(tester, _stationnementNom), isFalse);
+    expect(_checkboxValue(tester, _depotNom), isFalse);
+    expect(_checkboxValue(tester, _constructionNom), isFalse);
+    expect(find.text('Montant indicatif'), findsOneWidget);
+    expect(find.textContaining('Selection ('), findsNothing);
   });
 
   testWidgets('renders selected infractions as a review list', (tester) async {
@@ -126,15 +164,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Etape 5/5 - Revue'), findsOneWidget);
-    expect(find.text(_defautNom), findsOneWidget);
+    // Seules les infractions explicitement cochées apparaissent : aucune
+    // pré-sélection implicite de la première du référentiel.
+    expect(find.text(_defautNom), findsNothing);
     expect(find.text(_stationnementNom), findsOneWidget);
     expect(find.text(_depotNom), findsOneWidget);
-    expect(
-      find.text('$_defautNom / $_stationnementNom / $_depotNom'),
-      findsNothing,
-    );
+    expect(find.text('$_stationnementNom / $_depotNom'), findsNothing);
     expect(find.text('Montant indicatif'), findsOneWidget);
-    expect(find.text(formatFcfa(55000)), findsOneWidget);
+    expect(find.text(formatFcfa(30000)), findsOneWidget);
   });
 
   testWidgets('offers retry when referentiel is empty and offline', (
@@ -212,6 +249,10 @@ const _defautNom = 'D\u00e9faut de patente ou de d\u00e9claration';
 const _stationnementNom = 'Stationnement interdit';
 const _depotNom = 'D\u00e9p\u00f4t sauvage d ordure';
 const _constructionNom = 'Construction sans autorisation';
+
+const _stationnementChipKey = Key(
+  'selected-infraction-chip-intervention-stationnement',
+);
 
 const _interventions = [
   Intervention(

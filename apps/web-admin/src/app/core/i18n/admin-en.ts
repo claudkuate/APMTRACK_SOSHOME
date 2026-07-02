@@ -118,6 +118,7 @@ export const ADMIN_EN: Record<string, string> = {
   Catégorie: 'Category',
   Intervention: 'Intervention',
   Infractions: 'Offences',
+  Agent: 'Officer',
   'Type PV': 'Notice type',
   Payant: 'Chargeable',
   'Montant FCFA': 'Amount FCFA',
