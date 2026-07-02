@@ -13,6 +13,7 @@ export type FieldType =
   | 'array'
   | 'datetime'
   | 'select'
+  | 'select_multi'
   | 'relation'
   | 'relation_multi'
   | 'status'
@@ -413,7 +414,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       field('password', 'Mot de passe initial', 'password', true),
       field('full_name', 'Nom complet', 'text', true),
       ...communeCascadeFields(true),
-      selectField(
+      selectMultiField(
         'roles',
         'Rôles',
         true,
@@ -424,7 +425,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('SUPERVISEUR', 'Superviseur'),
           option('RECEVEUR', 'Receveur'),
         ],
-        'Un seul rôle principal dans ce formulaire; les rôles multiples restent possibles via API.',
+        'Un utilisateur peut cumuler plusieurs rôles (Ctrl/Cmd + clic pour la sélection multiple).',
       ),
       field('active', 'Compte actif', 'checkbox'),
     ],
@@ -440,7 +441,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       ),
       field('full_name', 'Nom complet', 'text', true),
       ...communeCascadeFields(false),
-      selectField(
+      selectMultiField(
         'roles',
         'Rôles',
         true,
@@ -451,7 +452,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('SUPERVISEUR', 'Superviseur'),
           option('RECEVEUR', 'Receveur'),
         ],
-        'Un seul rôle principal dans ce formulaire; les rôles multiples restent possibles via API.',
+        'Un utilisateur peut cumuler plusieurs rôles (Ctrl/Cmd + clic pour la sélection multiple).',
       ),
       field('active', 'Compte actif', 'checkbox'),
     ],
@@ -1633,6 +1634,17 @@ function selectField(
   section?: string,
 ): ResourceField {
   return { key, label, type: 'select', required, options, help, section };
+}
+
+function selectMultiField(
+  key: string,
+  label: string,
+  required: boolean,
+  options: SelectOption[],
+  help?: string,
+  section?: string,
+): ResourceField {
+  return { key, label, type: 'select_multi', required, options, help, section };
 }
 
 /** Sélecteur de position : un champ carte pilotant deux clés lat/lon du formulaire. */

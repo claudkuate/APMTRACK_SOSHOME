@@ -10,7 +10,13 @@ use crate::errors::ApiError;
 #[derive(Clone)]
 pub struct RateLimiter {
     enabled: bool,
-    inner: Arc<Mutex<HashMap<String, Bucket>>>,
+    inner: Arc<Mutex<Buckets>>,
+}
+
+struct Buckets {
+    map: HashMap<String, Bucket>,
+    /// Dernier balayage d'éviction des buckets expirés.
+    last_sweep: Instant,
 }
 
 #[derive(Clone)]
@@ -23,7 +29,10 @@ impl RateLimiter {
     pub fn new(config: &AppConfig) -> Self {
         Self {
             enabled: config.rate_limit_enabled,
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            inner: Arc::new(Mutex::new(Buckets {
+                map: HashMap::new(),
+                last_sweep: Instant::now(),
+            })),
         }
     }
 
@@ -46,7 +55,18 @@ impl RateLimiter {
             .lock()
             .map_err(|_| ApiError::internal("Rate limiter indisponible"))?;
 
-        let bucket = buckets.entry(key).or_insert(Bucket { count: 0, reset_at });
+        // Éviction paresseuse : au plus une fois par fenêtre, on purge les
+        // buckets expirés pour éviter une croissance non bornée de la map
+        // (une entrée par couple (scope, IP) sinon conservée indéfiniment).
+        if now.duration_since(buckets.last_sweep) >= Duration::from_secs(window_seconds) {
+            buckets.map.retain(|_, bucket| bucket.reset_at > now);
+            buckets.last_sweep = now;
+        }
+
+        let bucket = buckets
+            .map
+            .entry(key)
+            .or_insert(Bucket { count: 0, reset_at });
         if now >= bucket.reset_at {
             bucket.count = 0;
             bucket.reset_at = reset_at;

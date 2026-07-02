@@ -3,6 +3,7 @@ import { FormsModule } from '@angular/forms';
 
 import { ApiService } from '../../core/services/api.service';
 import { LookupOption, Paginated } from '../../shared/api-types';
+import { describeHttpError } from '../../shared/http-error';
 
 type Row = Record<string, unknown>;
 
@@ -53,6 +54,12 @@ type Row = Record<string, unknown>;
         {{ exportSummary() }}
       </div>
 
+      @if (error()) {
+        <div class="panel border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+          {{ error() }}
+        </div>
+      }
+
       <section class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         @for (exportItem of exports; track exportItem.path) {
           <article class="panel p-4">
@@ -71,6 +78,7 @@ export class ExportsPage implements OnInit {
   private readonly api = inject(ApiService);
 
   protected readonly communes = signal<LookupOption[]>([]);
+  protected readonly error = signal<string | null>(null);
   protected communeId = '';
   protected status = '';
   protected from = '';
@@ -109,12 +117,18 @@ export class ExportsPage implements OnInit {
   }
 
   protected download(path: string, filename: string): void {
-    this.api.openDownload(path, filename, {
-      commune_id: this.communeId.trim(),
-      status: this.status.trim(),
-      from: this.from,
-      to: this.to,
-    });
+    this.error.set(null);
+    this.api.openDownload(
+      path,
+      filename,
+      {
+        commune_id: this.communeId.trim(),
+        status: this.status.trim(),
+        from: this.from,
+        to: this.to,
+      },
+      (err) => this.error.set(describeHttpError(err, 'Export')),
+    );
   }
 
   protected optionLabel(option: LookupOption): string {

@@ -581,19 +581,6 @@ fn payment_computation_from_rows(
     })
 }
 
-pub fn calculate_penalty(
-    amount_due: f64,
-    penalty_rate: f64,
-    due_date: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> f64 {
-    if now <= due_date || penalty_rate <= 0.0 {
-        0.0
-    } else {
-        (amount_due * penalty_rate / 100.0 * 100.0).round() / 100.0
-    }
-}
-
 fn calculate_penalty_fcfa(
     amount_due_fcfa: i64,
     penalty_rate: f64,

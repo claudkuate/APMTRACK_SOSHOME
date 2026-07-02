@@ -15,6 +15,7 @@ import { I18nService } from '../../core/i18n/i18n.service';
 import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { LookupService } from '../../core/services/lookup.service';
 import { LookupOption, Paginated, RoleCode } from '../../shared/api-types';
+import { downloadCsv as saveCsv } from '../../shared/csv';
 import { describeHttpError } from '../../shared/http-error';
 import {
   RelationConfig,
@@ -184,6 +185,12 @@ interface AgentsDialogContext {
                               <option value="">{{ 'Choisir...' | auto }}</option>
                               @for (option of optionsForField(field); track option.id) {
                                 <option [value]="option.id">{{ optionLabel(option) }}</option>
+                              }
+                            </select>
+                          } @else if (field.type === 'select_multi') {
+                            <select [id]="field.key" [formControlName]="field.key" multiple>
+                              @for (option of field.options ?? []; track option.value) {
+                                <option [value]="option.value">{{ option.label | auto }}</option>
                               }
                             </select>
                           } @else if (field.type === 'select' || field.type === 'status') {
@@ -875,9 +882,9 @@ export class ResourcePage implements OnInit, OnDestroy {
         this.buildForm(cfg.createFields ?? []);
         this.load();
       },
-      error: () => {
+      error: (err: unknown) => {
         this.saving.set(false);
-        this.error.set('Enregistrement refuse par le backend. Controle les champs et les droits.');
+        this.error.set(describeHttpError(err, 'Enregistrement'));
       },
     });
   }
@@ -901,7 +908,7 @@ export class ResourcePage implements OnInit, OnDestroy {
           );
           this.load();
         },
-        error: () => this.importResult.set("Import refuse. Verifie le CSV et les droits d'acces."),
+        error: (err: unknown) => this.importResult.set(describeHttpError(err, 'Import')),
       });
   }
 
@@ -909,7 +916,9 @@ export class ResourcePage implements OnInit, OnDestroy {
     event?.stopPropagation();
     this.rowMenuKey.set(null);
     if (action.kind === 'download') {
-      this.api.openDownload(action.path(row), action.filename?.(row) ?? 'document');
+      this.api.openDownload(action.path(row), action.filename?.(row) ?? 'document', undefined, (err) =>
+        this.error.set(describeHttpError(err, 'Telechargement')),
+      );
       return;
     }
     if (action.kind === 'share') {
@@ -1045,12 +1054,10 @@ export class ResourcePage implements OnInit, OnDestroy {
         this.message.set(successMessage);
         this.load();
       },
-      error: () => {
+      error: (err: unknown) => {
         this.saving.set(false);
         this.statusContext.set(null);
-        this.error.set(
-          "Changement de statut refuse par l'API (transition non autorisee ou droits insuffisants).",
-        );
+        this.error.set(describeHttpError(err, 'Changement de statut'));
       },
     });
   }
@@ -1412,22 +1419,9 @@ export class ResourcePage implements OnInit, OnDestroy {
   }
 
   private downloadCsv(filename: string, cfg: ResourceConfig, rows: Row[], columns: string[]): void {
-    const header = columns.map((column) => this.csvCell(this.label(cfg, column))).join(',');
-    const lines = rows.map((row) =>
-      columns.map((column) => this.csvCell(this.display(column, row[column]))).join(','),
-    );
-    const csv = [header, ...lines].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename.replace(/[^a-z0-9._-]+/gi, '-').toLowerCase();
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  private csvCell(value: string): string {
-    return `"${value.replace(/"/g, '""')}"`;
+    const header = columns.map((column) => this.label(cfg, column));
+    const lines = rows.map((row) => columns.map((column) => this.display(column, row[column])));
+    saveCsv(filename, [header, ...lines]);
   }
 
   private executeAction(action: ResourceAction, row: Row): void {
@@ -1440,7 +1434,7 @@ export class ResourcePage implements OnInit, OnDestroy {
         this.message.set('Action appliquee.');
         this.load();
       },
-      error: () => this.error.set("Action refusee par l'API."),
+      error: (err: unknown) => this.error.set(describeHttpError(err, 'Action')),
     });
   }
 
@@ -1456,7 +1450,7 @@ export class ResourcePage implements OnInit, OnDestroy {
         controls[field.key] = new FormControl(null);
         continue;
       }
-      if (field.type === 'relation_multi') {
+      if (field.type === 'relation_multi' || field.type === 'select_multi') {
         controls[field.key] = new FormControl([], field.required ? [Validators.required] : []);
         continue;
       }
@@ -1529,8 +1523,10 @@ export class ResourcePage implements OnInit, OnDestroy {
         control.setValue(Boolean(raw));
       } else if (field.type === 'relation_multi') {
         control.setValue(this.relationMultiValue(field.key, row));
-      } else if (field.key === 'roles') {
-        control.setValue(Array.isArray(raw) ? String(raw[0] ?? '') : String(raw ?? ''));
+      } else if (field.type === 'select_multi') {
+        control.setValue(
+          Array.isArray(raw) ? raw.map((item) => String(item)) : raw ? [String(raw)] : [],
+        );
       } else if (raw === null || raw === undefined) {
         control.setValue('');
       } else if (field.type === 'relation') {
@@ -1668,7 +1664,7 @@ export class ResourcePage implements OnInit, OnDestroy {
         }
       } else if (field.type === 'number' || field.type === 'money') {
         payload[field.key] = value === '' || value === null ? null : Number(value);
-      } else if (field.type === 'relation_multi') {
+      } else if (field.type === 'relation_multi' || field.type === 'select_multi') {
         const values = Array.isArray(value)
           ? value.map((item) => String(item)).filter(Boolean)
           : String(value ?? '')
@@ -1689,8 +1685,6 @@ export class ResourcePage implements OnInit, OnDestroy {
         if (values.length) {
           payload[field.key] = values;
         }
-      } else if (field.key === 'roles') {
-        payload[field.key] = value ? [String(value)] : [];
       } else if (value !== '' && value !== null && value !== undefined) {
         payload[field.key] = value;
       }

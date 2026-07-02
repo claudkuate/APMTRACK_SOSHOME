@@ -89,6 +89,7 @@ class PvDraft {
     required this.localId,
     required this.payload,
     required this.createdAt,
+    this.ownerUserId,
     this.photos = const [],
     this.interventionName,
     this.amountFcfa,
@@ -100,6 +101,12 @@ class PvDraft {
   final String localId;
   final CreatePvPayload payload;
   final DateTime createdAt;
+
+  /// User account that captured the draft. The queue survives logout on a
+  /// shared device, so a draft must only be synced (the server derives the
+  /// agent from the token) or shown under its author's session. Null on
+  /// drafts persisted before this field existed (treated as current user's).
+  final String? ownerUserId;
   final List<PvDraftPhoto> photos;
   final String? interventionName;
   final int? amountFcfa;
@@ -111,6 +118,7 @@ class PvDraft {
     'local_id': localId,
     'payload': payload.toJson(),
     'created_at': createdAt.toIso8601String(),
+    'owner_user_id': ownerUserId,
     'photos': photos.map((photo) => photo.toJson()).toList(),
     'intervention_name': interventionName,
     'amount_fcfa': amountFcfa,
@@ -124,6 +132,7 @@ class PvDraft {
       localId: readString(json, 'local_id'),
       payload: _payloadFromJson(json['payload'] as JsonMap? ?? const {}),
       createdAt: readDate(json, 'created_at') ?? DateTime.now(),
+      ownerUserId: readOptionalString(json, 'owner_user_id'),
       photos: (json['photos'] as List? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(PvDraftPhoto.fromJson)

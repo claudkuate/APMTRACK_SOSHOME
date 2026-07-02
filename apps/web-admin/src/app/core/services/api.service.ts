@@ -45,14 +45,24 @@ export class ApiService {
     });
   }
 
-  openDownload(path: string, filename: string, query?: Record<string, QueryValue>) {
-    this.download(path, query).subscribe((blob) => {
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      link.click();
-      URL.revokeObjectURL(url);
+  openDownload(
+    path: string,
+    filename: string,
+    query?: Record<string, QueryValue>,
+    onError?: (error: unknown) => void,
+  ) {
+    this.download(path, query).subscribe({
+      next: (blob) => {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        link.click();
+        URL.revokeObjectURL(url);
+      },
+      // Sans handler, un téléchargement en échec (403/500/hors-ligne) était
+      // totalement silencieux : ni fichier, ni message.
+      error: (error: unknown) => onError?.(error),
     });
   }
 

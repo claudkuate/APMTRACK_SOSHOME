@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-admin",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start", "--prefix", "apps/web-admin"],
+      "port": 4200
+    }
+  ]
+}

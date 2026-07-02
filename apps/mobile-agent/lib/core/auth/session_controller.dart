@@ -32,7 +32,9 @@ class SessionController extends ChangeNotifier {
   List<Pv> pvs = const [];
   PatrouilleActive activePatrouille = const PatrouilleActive(agents: []);
   List<Patrouille> patrouilles = const [];
-  List<PvDraft> drafts = const [];
+
+  /// Full persisted draft queue, all users of the device included.
+  List<PvDraft> _allDrafts = const [];
   String? message;
   bool loadingData = false;
 
@@ -43,8 +45,24 @@ class SessionController extends ChangeNotifier {
 
   String? get token => session?.accessToken;
   bool get isAuthenticated => status == SessionStatus.authenticated;
+
+  /// Drafts of the signed-in user only. The queue survives logout on a shared
+  /// device, so another user's drafts must neither be shown nor synced (the
+  /// server derives the agent from the session token) — they stay persisted
+  /// until their author signs back in. Legacy drafts without owner tag are
+  /// attributed to the current user.
+  List<PvDraft> get drafts =>
+      _allDrafts.where(_ownsDraft).toList(growable: false);
+
+  /// Replaces the whole persisted queue (all owners) — test seeding seam.
+  @visibleForTesting
+  set drafts(List<PvDraft> value) => _allDrafts = value;
+
   bool get hasPendingDrafts =>
       drafts.any((draft) => draft.status == PvDraftStatus.pending);
+
+  bool _ownsDraft(PvDraft draft) =>
+      draft.ownerUserId == null || draft.ownerUserId == session?.user.id;
 
   Future<void> bootstrap() async {
     status = SessionStatus.booting;
@@ -73,6 +91,9 @@ class SessionController extends ChangeNotifier {
     final nextSession = await api.login(email, password);
     session = nextSession;
     await store.write(nextSession);
+    // Reload the persisted queue so the returning author's pending drafts
+    // resync in this session (signOut cleared the in-memory list).
+    _allDrafts = decodeDrafts(await _cache.read(_draftsKey));
     await refreshData();
     status = session == null
         ? SessionStatus.unauthenticated
@@ -260,11 +281,12 @@ class SessionController extends ChangeNotifier {
     syncing = true;
     notifyListeners();
 
-    // Iterate over a frozen snapshot; mutate a separate working list so we
+    // Iterate over a frozen snapshot of the current user's drafts; mutate a
+    // separate working list (full queue, other users' drafts included) so we
     // never modify the collection being iterated. Draft instances are shared,
     // so status changes are reflected in `remaining`.
     final pending = List<PvDraft>.from(drafts);
-    final remaining = List<PvDraft>.from(drafts);
+    final remaining = List<PvDraft>.from(_allDrafts);
     var draftsChanged = false;
     var pvsChanged = false;
     for (final draft in pending) {
@@ -304,7 +326,7 @@ class SessionController extends ChangeNotifier {
       }
     }
 
-    drafts = remaining;
+    _allDrafts = remaining;
     syncing = false;
     if (draftsChanged) {
       await _saveDrafts();
@@ -317,7 +339,7 @@ class SessionController extends ChangeNotifier {
 
   /// Re-queues a failed draft for the next sync attempt.
   Future<void> retryDraft(String localId) async {
-    drafts = drafts.map((draft) {
+    _allDrafts = _allDrafts.map((draft) {
       if (draft.localId == localId) {
         draft.status = PvDraftStatus.pending;
         draft.error = null;
@@ -330,7 +352,9 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<void> deleteDraft(String localId) async {
-    drafts = drafts.where((draft) => draft.localId != localId).toList();
+    _allDrafts = _allDrafts
+        .where((draft) => draft.localId != localId)
+        .toList();
     await _saveDrafts();
     notifyListeners();
   }
@@ -351,12 +375,13 @@ class SessionController extends ChangeNotifier {
       localId: _newLocalId(),
       payload: payload,
       createdAt: DateTime.now(),
+      ownerUserId: session?.user.id,
       photos: photos,
       serverPvId: serverPvId,
       interventionName: intervention?.nom,
       amountFcfa: intervention?.montantFcfa,
     );
-    drafts = [...drafts, draft];
+    _allDrafts = [..._allDrafts, draft];
     offline = true;
     await _saveDrafts();
     notifyListeners();
@@ -378,7 +403,7 @@ class SessionController extends ChangeNotifier {
       }
       patrouilles = snapshot.patrouilles;
     }
-    drafts = decodeDrafts(await _cache.read(_draftsKey));
+    _allDrafts = decodeDrafts(await _cache.read(_draftsKey));
     notifyListeners();
   }
 
@@ -394,7 +419,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<void> _saveDrafts() async {
-    await _cache.write(_draftsKey, encodeDrafts(drafts));
+    await _cache.write(_draftsKey, encodeDrafts(_allDrafts));
   }
 
   bool _isNetworkError(Object error) {
@@ -508,7 +533,7 @@ class SessionController extends ChangeNotifier {
     pvs = const [];
     activePatrouille = const PatrouilleActive(agents: []);
     patrouilles = const [];
-    drafts = const [];
+    _allDrafts = const [];
     offline = false;
     status = SessionStatus.unauthenticated;
     await store.clear();

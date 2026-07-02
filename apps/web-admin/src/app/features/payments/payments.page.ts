@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { ApiService } from '../../core/services/api.service';
 import { CommuneContextService } from '../../core/services/commune-context.service';
 import { Paginated } from '../../shared/api-types';
+import { downloadCsv } from '../../shared/csv';
 import { describeHttpError } from '../../shared/http-error';
 
 interface PendingPv {
@@ -397,11 +398,13 @@ export class PaymentsPage implements OnInit {
     this.api.openDownload(
       `/api/v1/payments/${payment.id}/receipt`,
       `${payment.receipt_number ?? payment.id}.pdf`,
+      undefined,
+      (err) => this.notify('error', describeHttpError(err, 'Téléchargement du reçu')),
     );
   }
 
   protected exportPayments(): void {
-    const rows = this.payments().map((payment) => ({
+    const rows: Record<string, string>[] = this.payments().map((payment) => ({
       recu: payment.receipt_number ?? payment.id,
       pv: payment.pv_id,
       montant: this.fcfa(payment.amount_paid_fcfa),
@@ -413,7 +416,11 @@ export class PaymentsPage implements OnInit {
       this.notify('error', 'Aucun paiement à exporter.');
       return;
     }
-    this.downloadCsv('journal-du-jour.csv', rows);
+    const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
+    downloadCsv('journal-du-jour.csv', [
+      columns,
+      ...rows.map((row) => columns.map((column) => row[column] ?? '')),
+    ]);
   }
 
   protected fcfa(value: number | null | undefined): string {
@@ -443,20 +450,4 @@ export class PaymentsPage implements OnInit {
     return new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' });
   }
 
-  private downloadCsv(filename: string, rows: Record<string, string>[]): void {
-    const columns = Array.from(new Set(rows.flatMap((row) => Object.keys(row))));
-    const header = columns.map((column) => this.csvCell(column)).join(',');
-    const lines = rows.map((row) => columns.map((column) => this.csvCell(row[column] ?? '')).join(','));
-    const blob = new Blob([[header, ...lines].join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  private csvCell(value: string): string {
-    return `"${value.replace(/"/g, '""')}"`;
-  }
 }

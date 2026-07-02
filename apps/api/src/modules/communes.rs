@@ -455,7 +455,8 @@ async fn patch_commune(
     Path(commune_id): Path<Uuid>,
     ApiJson(payload): ApiJson<PatchCommuneRequest>,
 ) -> Result<Json<CommuneResponse>, ApiError> {
-    if !auth_user.has_role(Role::SuperAdmin) {
+    let is_super_admin = auth_user.has_role(Role::SuperAdmin);
+    if !is_super_admin {
         auth_user.require_any_role(&[Role::AdminCommune])?;
         auth_user.require_commune_access(commune_id)?;
     }
@@ -481,9 +482,32 @@ async fn patch_commune(
         None if payload.departement_id.is_some() => None,
         None => Some(existing.departement.clone()),
     };
-    let subscription_status = match payload.subscription_status.as_deref() {
-        Some(value) => validate_subscription_status(value)?,
-        None => existing.subscription_status.clone(),
+    // Les champs d'abonnement et l'activation de la commune conditionnent la
+    // facturation, la visibilité publique et l'accès mobile : ils sont réservés
+    // au SUPER_ADMIN. Un ADMIN_COMMUNE ne peut pas se réabonner lui-même — les
+    // valeurs du payload sont ignorées et l'existant est conservé.
+    let subscription_status = match (is_super_admin, payload.subscription_status.as_deref()) {
+        (true, Some(value)) => validate_subscription_status(value)?,
+        _ => existing.subscription_status.clone(),
+    };
+    let subscription_started_at = if is_super_admin {
+        payload
+            .subscription_started_at
+            .or(existing.subscription_started_at)
+    } else {
+        existing.subscription_started_at
+    };
+    let subscription_expires_at = if is_super_admin {
+        payload
+            .subscription_expires_at
+            .or(existing.subscription_expires_at)
+    } else {
+        existing.subscription_expires_at
+    };
+    let active = if is_super_admin {
+        payload.active.unwrap_or(existing.active)
+    } else {
+        existing.active
     };
     let boundary_json = prepare_boundary(payload.boundary)?;
 
@@ -526,10 +550,10 @@ async fn patch_commune(
     .bind(payload.site_web.or(existing.site_web.clone()))
     .bind(payload.logo_url.or(existing.logo_url.clone()))
     .bind(payload.theme_color.or(existing.theme_color.clone()))
-    .bind(payload.active.unwrap_or(existing.active))
+    .bind(active)
     .bind(&subscription_status)
-    .bind(payload.subscription_started_at.or(existing.subscription_started_at))
-    .bind(payload.subscription_expires_at.or(existing.subscription_expires_at))
+    .bind(subscription_started_at)
+    .bind(subscription_expires_at)
     .bind(&boundary_json)
     .execute(&state.db)
     .await

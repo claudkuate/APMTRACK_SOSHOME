@@ -334,10 +334,22 @@ class _CreatePvPageState extends State<CreatePvPage> {
           widget.initialPv!.id,
           payload,
         );
-        await _uploadLocalPhotos(pv.id);
+        // Le PV est déjà mis à jour côté serveur : un échec d'upload photo ne
+        // doit pas être présenté comme un échec de la mise à jour elle-même.
+        var photosMessage = '';
+        try {
+          await _uploadLocalPhotos(pv.id);
+        } catch (_) {
+          photosMessage =
+              ' (photos non envoyees : reessayez depuis la fiche PV)';
+        }
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PV officiel mis a jour : ${pv.pvNumber}')),
+          SnackBar(
+            content: Text(
+              'PV officiel mis a jour : ${pv.pvNumber}$photosMessage',
+            ),
+          ),
         );
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(
@@ -481,7 +493,11 @@ class _CreatePvPageState extends State<CreatePvPage> {
       _setError('Type d identite requis avec le numero');
       return 1;
     }
-    if (_selectedRequiresVehicle && !hasVehicle) {
+    // Miroir de `has_vehicle_any` côté serveur : dès qu'un champ véhicule est
+    // rempli (ou que l'infraction l'exige), la plaque ou la carte grise est
+    // obligatoire — sinon le serveur rejettera le PV (erreur tardive en ligne,
+    // brouillon voué à échouer hors-ligne).
+    if (_vehicleInvolved && !hasVehicle) {
       _setError('Plaque ou carte grise requise');
       return 1;
     }

@@ -143,6 +143,60 @@ void main() {
       expect(controller.drafts.single.status, PvDraftStatus.pending);
     });
 
+    test(
+      "another user's drafts are neither shown nor synced on a shared device",
+      () async {
+        final api = _OfflineFakeApi()..createBehavior = _CreateBehavior.network;
+        final cache = MemoryOfflineCacheStore();
+
+        // Agent A queues a PV offline, then signs out (queue stays persisted).
+        final storeA = MemorySessionStore();
+        await storeA.write(_session);
+        final controllerA = SessionController(
+          api: api,
+          store: storeA,
+          cache: cache,
+        )..session = _session;
+        controllerA.interventions = [_intervention];
+        await controllerA.createPv(_payload);
+        expect(controllerA.drafts, hasLength(1));
+        expect(controllerA.drafts.single.ownerUserId, _user.id);
+        await controllerA.signOut(localOnly: true);
+
+        // Agent B signs in on the same device while the network is back: A's
+        // draft must not appear nor be pushed under B's identity (the server
+        // derives the agent from B's token).
+        api.createBehavior = _CreateBehavior.success;
+        final storeB = MemorySessionStore();
+        await storeB.write(_otherSession);
+        final controllerB = SessionController(
+          api: api,
+          store: storeB,
+          cache: cache,
+        );
+        await controllerB.bootstrap();
+
+        expect(controllerB.status, SessionStatus.authenticated);
+        expect(controllerB.drafts, isEmpty);
+        final persisted = decodeDrafts(await cache.read('offline.drafts'));
+        expect(persisted, hasLength(1));
+        expect(persisted.single.ownerUserId, _user.id);
+        expect(persisted.single.status, PvDraftStatus.pending);
+
+        // Agent A signs back in: the draft resyncs under A's own session.
+        await storeA.write(_session);
+        final controllerA2 = SessionController(
+          api: api,
+          store: storeA,
+          cache: cache,
+        );
+        await controllerA2.bootstrap();
+
+        expect(controllerA2.drafts, isEmpty);
+        expect(decodeDrafts(await cache.read('offline.drafts')), isEmpty);
+      },
+    );
+
     test('syncs queued draft photos after creating the server PV', () async {
       final api = _OfflineFakeApi()..createBehavior = _CreateBehavior.network;
       final controller = build(api)..interventions = [_intervention];
@@ -226,6 +280,21 @@ const _session = AuthSession(
   accessToken: 'access-token',
   refreshToken: 'refresh-token',
   user: _user,
+);
+
+const _otherUser = UserAccount(
+  id: 'user-2',
+  email: 'agent2@test.local',
+  fullName: 'Agent Deux',
+  communeId: 'commune-1',
+  roles: ['APM_AGENT'],
+  active: true,
+);
+
+const _otherSession = AuthSession(
+  accessToken: 'access-token-2',
+  refreshToken: 'refresh-token-2',
+  user: _otherUser,
 );
 
 const _payload = CreatePvPayload(

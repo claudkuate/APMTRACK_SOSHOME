@@ -2,7 +2,7 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::{Json, Router};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
@@ -273,11 +273,13 @@ async fn list_pvs(
         .push_bind(pagination.offset);
 
     let rows = qb.build().fetch_all(&state.db).await?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut pv = row_to_pv(row);
-        pv.interventions = load_pv_interventions(&state.db, pv.id).await?;
-        items.push(pv);
+    let mut items: Vec<PvResponse> = rows.into_iter().map(row_to_pv).collect();
+    // Charge les interventions de tous les PV de la page en une seule requête
+    // (évite le N+1 : une requête par PV sinon).
+    let pv_ids: Vec<Uuid> = items.iter().map(|pv| pv.id).collect();
+    let mut interventions_by_pv = load_pv_interventions_bulk(&state.db, &pv_ids).await?;
+    for pv in &mut items {
+        pv.interventions = interventions_by_pv.remove(&pv.id).unwrap_or_default();
     }
     Ok(Json(Paginated::new(items, &pagination, total)))
 }
@@ -1281,6 +1283,44 @@ async fn load_pv_interventions(
     Ok(rows.into_iter().map(row_to_pv_intervention).collect())
 }
 
+/// Charge les interventions de plusieurs PV en une seule requête, regroupées
+/// par `pv_id` — utilisé par `list_pvs` pour éviter le N+1.
+async fn load_pv_interventions_bulk(
+    pool: &PgPool,
+    pv_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<PvInterventionResponse>>, ApiError> {
+    use std::collections::HashMap;
+    if pv_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            pv_id,
+            id, intervention_id, order_index, nom, sujet_paiement, montant_fcfa,
+            delai_paiement_jours,
+            taux_penalite::DOUBLE PRECISION AS taux_penalite,
+            taux_penalite_basis_points,
+            penalite_fcfa
+        FROM pv_interventions
+        WHERE pv_id = ANY($1)
+        ORDER BY pv_id, order_index ASC
+        "#,
+    )
+    .bind(pv_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<Uuid, Vec<PvInterventionResponse>> = HashMap::new();
+    for row in rows {
+        let pv_id: Uuid = row.get("pv_id");
+        map.entry(pv_id)
+            .or_default()
+            .push(row_to_pv_intervention(row));
+    }
+    Ok(map)
+}
+
 async fn load_pv_interventions_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     pv_id: Uuid,
@@ -1907,11 +1947,6 @@ fn clean_optional(value: Option<String>) -> Option<String> {
     value
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-}
-
-// Ré-export pour payments
-pub fn pv_due_date(created_at: DateTime<Utc>, delai_jours: i32) -> DateTime<Utc> {
-    created_at + Duration::days(delai_jours as i64)
 }
 
 #[cfg(test)]

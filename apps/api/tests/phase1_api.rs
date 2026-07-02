@@ -1014,6 +1014,111 @@ async fn signalement_assignment_restricted_to_commune_or_global_supervisor() {
 }
 
 #[tokio::test]
+async fn commune_admin_cannot_modify_own_subscription() {
+    if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
+        return;
+    }
+
+    let _db_guard = DB_TEST_LOCK.lock().await;
+    let state = test_state();
+    database::run_migrations(&state.db)
+        .await
+        .expect("migrations");
+    reset_database(&state).await;
+    let super_admin = seed_test_super_admin(&state).await;
+    let app = apmtrack_api::build_app(state.clone());
+
+    let root_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({
+            "email": super_admin.email,
+            "password": super_admin.password
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(root_login.status, StatusCode::OK);
+    let root_token = root_login.body["access_token"].as_str().expect("token");
+
+    let commune = create_commune(&app, root_token, "YDE1", "Yaounde 1").await;
+    let commune_id = commune["id"].as_str().expect("commune id");
+
+    // Le SUPER_ADMIN suspend l'abonnement de la commune.
+    let suspended = request_json(
+        app.clone(),
+        Method::PATCH,
+        &format!("/api/v1/communes/{commune_id}"),
+        json!({ "subscription_status": "EXPIRED" }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::OK, "{:?}", suspended.body);
+    assert_eq!(suspended.body["subscription_status"], "EXPIRED");
+
+    let admin = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/users",
+        json!({
+            "email": "admin.yde1@example.test",
+            "password": "admin-commune-password",
+            "full_name": "Admin YDE1",
+            "commune_id": commune_id,
+            "roles": ["ADMIN_COMMUNE"]
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(admin.status, StatusCode::OK);
+
+    let admin_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "admin.yde1@example.test", "password": "admin-commune-password" }),
+        None,
+    )
+    .await;
+    assert_eq!(admin_login.status, StatusCode::OK);
+    let admin_token = admin_login.body["access_token"].as_str().expect("token");
+
+    // L'ADMIN_COMMUNE tente de se réabonner lui-même : la requête passe (il
+    // peut éditer sa commune) mais les champs d'abonnement sont ignorés.
+    let attempt = request_json(
+        app.clone(),
+        Method::PATCH,
+        &format!("/api/v1/communes/{commune_id}"),
+        json!({
+            "nom": "Yaounde 1er",
+            "subscription_status": "ACTIVE",
+            "subscription_expires_at": "2099-01-01T00:00:00Z",
+            "active": true
+        }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(attempt.status, StatusCode::OK, "{:?}", attempt.body);
+    assert_eq!(attempt.body["nom"], "Yaounde 1er");
+    assert_eq!(attempt.body["subscription_status"], "EXPIRED");
+    assert!(attempt.body["subscription_expires_at"].is_null());
+
+    // Le SUPER_ADMIN, lui, peut réactiver l'abonnement.
+    let reactivated = request_json(
+        app,
+        Method::PATCH,
+        &format!("/api/v1/communes/{commune_id}"),
+        json!({ "subscription_status": "ACTIVE" }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(reactivated.status, StatusCode::OK);
+    assert_eq!(reactivated.body["subscription_status"], "ACTIVE");
+}
+
+#[tokio::test]
 async fn fourriere_creation_auto_generates_linked_pv() {
     if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
         eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");

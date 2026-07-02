@@ -1,6 +1,6 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable, computed, inject, signal } from '@angular/core';
-import { tap } from 'rxjs';
+import { Observable, finalize, shareReplay, tap } from 'rxjs';
 
 import { apiBaseUrl } from '../config/runtime-config';
 import { CurrentUser, RoleCode, TokenResponse } from '../../shared/api-types';
@@ -12,6 +12,7 @@ export class AuthService {
   private readonly tokenState = signal<string | null>(null);
   private readonly userState = signal<CurrentUser | null>(null);
   private restoreAttempted = false;
+  private refreshInFlight$: Observable<TokenResponse> | null = null;
 
   readonly user = this.userState.asReadonly();
   readonly accessToken = this.tokenState.asReadonly();
@@ -23,10 +24,23 @@ export class AuthService {
       .pipe(tap((response) => this.applySession(response)));
   }
 
-  refreshCookie() {
-    return this.http
-      .post<TokenResponse>(`${this.baseUrl}/api/v1/auth/refresh-cookie`, {})
-      .pipe(tap((response) => this.applySession(response)));
+  /**
+   * Rafraîchit la session via le cookie HttpOnly. Single-flight : l'API fait
+   * tourner le refresh token à chaque usage, donc des refresh concurrents
+   * (plusieurs 401 simultanés au réveil d'un onglet) s'invalideraient entre
+   * eux — tous les appelants partagent ici la même requête en cours.
+   */
+  refreshCookie(): Observable<TokenResponse> {
+    if (!this.refreshInFlight$) {
+      this.refreshInFlight$ = this.http
+        .post<TokenResponse>(`${this.baseUrl}/api/v1/auth/refresh-cookie`, {})
+        .pipe(
+          tap((response) => this.applySession(response)),
+          finalize(() => (this.refreshInFlight$ = null)),
+          shareReplay({ bufferSize: 1, refCount: false }),
+        );
+    }
+    return this.refreshInFlight$;
   }
 
   me() {
