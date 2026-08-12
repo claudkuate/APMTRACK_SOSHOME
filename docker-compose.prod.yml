@@ -77,6 +77,9 @@ services:
       # (QR codes déjà imprimés + APK mobiles déployés pointent encore dessus).
       CORS_ALLOWED_ORIGINS: https://apmtrack.cm,https://www.apmtrack.cm,https://apmtrack.soshome-cameroun.net
       PUBLIC_API_URL: https://apmtrack-api.soshome-cameroun.net
+      # Front citoyen : sert à construire le lien de suivi envoyé par WhatsApp.
+      # Sans cette variable, il retombe sur PUBLIC_API_URL, qui ne sert pas la page.
+      PUBLIC_WEB_URL: https://apmtrack.cm
       RATE_LIMIT_ENABLED: "true"
       RATE_LIMIT_WINDOW_SECONDS: 60
       RATE_LIMIT_LOGIN_MAX: 10
