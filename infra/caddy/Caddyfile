@@ -2,6 +2,22 @@
 	email claudkuate@gmail.com
 }
 
+apmtrack.cm {
+	encode gzip
+	reverse_proxy web-admin:80
+}
+
+www.apmtrack.cm {
+	redir https://apmtrack.cm{uri} permanent
+}
+
+api.apmtrack.cm {
+	encode gzip
+	reverse_proxy api:8080
+}
+
+# Domaines de démo — conservés : les QR codes déjà imprimés sur les PV encodent
+# https://apmtrack-api.soshome-cameroun.net et les APK mobiles déployés aussi.
 apmtrack.soshome-cameroun.net {
 	encode gzip
 	reverse_proxy web-admin:80
