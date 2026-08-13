@@ -100,6 +100,7 @@ flutter run --dart-define=API_URL=http://10.0.2.2:8080 --dart-define=APP_ENV=dev
 | `DATABASE_URL` | ✅ | — | PostgreSQL connection string |
 | `JWT_SECRET` | ✅ | — | **Minimum 32 chars** — enforced at startup |
 | `APP_PORT` | ❌ | 8080 | |
+| `APP_TIMEZONE` | ❌ | `Africa/Douala` | Fuseau IANA bornant la « journée » de caisse (`paid_at` est en UTC) |
 | `CORS_ALLOWED_ORIGINS` | ❌ | `http://localhost:4200` | Comma-separated |
 | `PUBLIC_API_URL` | ❌ | `http://localhost:8080` | Used in QR code URLs |
 | `RUN_MIGRATIONS_ON_STARTUP` | ❌ | false | Set `true` in Docker |
@@ -149,6 +150,10 @@ See `apps/api/.env.example` for a full template.
   /signalements/...        ← modules::signalements::router()
   /patrouilles/...         ← modules::patrouilles::router()
   /dashboard/...           ← modules::dashboard::router()
+  /geography/...           ← modules::geography::router()
+    /geography/{regions,departements,arrondissements,quartiers}       ← CRUD, écriture SUPER_ADMIN
+    /geography/import-csv, /geography/import-template.csv             ← répertoire national
+  /fourrieres/...          ← modules::fourrieres::router()
   /audit-logs/...          ← modules::audit_logs::router()
   /exports/...             ← modules::exports::router()
   /public/
@@ -199,6 +204,8 @@ audit::record_for_commune(&state.db, commune_id, Some(auth_user.id), "ACTION_NAM
 audit::record_for_commune_tx(&mut tx, commune_id, Some(auth_user.id), ...).await;
 ```
 Use `record_for_commune` in all commune-scoped modules so audit logs are filterable per commune.
+Use plain `record` (commune_id NULL) for **global reference data** (`geography`): attributing national
+data to one arbitrary tenant would corrupt per-commune audit filtering.
 
 **Soft deletes** — all domain tables have `deleted_at TIMESTAMPTZ`. Always filter `WHERE deleted_at IS NULL`.
 
@@ -240,8 +247,33 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 20260603000003 — pvs, pv_status_history, payments, signalements
 20260603000004 — patrouilles, patrouille_agents
 20260603000005 — constraint fixes (cascade, FK rules, drop redundant category_id)
+20260603000006 — pilot hardening (integer FCFA columns, basis points)
 20260603000007 — geospatial PostGIS (geom on pvs/signalements, boundary on zones/communes, patrouille_positions)
+20260603000008 — fix intervention FCFA check
+20260603000009 — pv_photos
+20260603000010 — pv_interventions (multi-infractions) + backfill
+20260603000011 — pv subject/vehicle details
+20260603000012 — user photo
+20260603000013 — patrouille planning
+20260603000014 — v3 refonte (subscription_status, drop agents.grade/formation_nasla)
+20260603000015 — geography hierarchy (regions, departements, communes.region_id/departement_id + trigger)
+20260603000016 — signalement escalade
+20260603000017 — signalement plainte
+20260603000018 — commune maire_email
+20260603000019 — fourrieres
+20260603000020 — fourriere sequence kind
+20260603000021 — pv personne morale
+20260603000022 — fourriere item_type
+20260603000023 — pénalité forfaitaire (interventions/pv_interventions.penalite_fcfa)
+20260603000024 — intervention fourrière système
+20260603000025 — réalignement document_sequences
+20260603000026 — vue pv_amounts_due (base / pénalité / total — source unique des montants dus)
+20260603000027 — découpage administratif : arrondissements, quartiers, communes.arrondissement_id,
+                 zones.quartier_id, index uniques CI partiels (suppression/recréation possible)
+20260603000028 — users.must_change_password (provisionnement automatique du compte agent)
 ```
+
+**Next migration number: `20260603000029`.**
 
 **PostGIS** — the Postgres image is `postgis/postgis` (see `docker-compose.dev.yml`). Migration 7 runs
 `CREATE EXTENSION postgis`. Geometry columns use SRID 4326. Never decode `geometry` into Rust directly:
@@ -256,14 +288,64 @@ Point columns (`pvs.geom`, `signalements.geom`) are `GENERATED ALWAYS` from `gps
 
 - **Amounts come from the referentiel** — agents cannot set free amounts on a PV. `amount_initial_fcfa` (integer FCFA) is copied from `interventions.montant_fcfa` at creation time.
 - **PV number is server-generated** — format `PV-{COMMUNE_CODE}-{YEAR}-{SEQ:06}`.
-- **Penalty calculation is server-side** — `penalty = amount × rate%` if `now > created_at + delai_paiement_jours`.
+- **Amounts due come from the `pv_amounts_due` view** (migration 26) — **single source of truth** for
+  `amount_base_fcfa` / `amount_penalty_fcfa` / `amount_total_fcfa` / `due_date` / `is_late`.
+  `dashboard.rs`, `payments.rs`, `exports.rs` and the public QR lookup all read it, so the amount shown
+  to the receveur, the amount required at validation and the dashboard aggregate cannot diverge.
+  Never re-implement the penalty formula in Rust, and never sum `pvs.amount_initial_fcfa` as an
+  "amount due" — that column is the **base only** and structurally cannot carry a penalty.
+- **Penalty calculation** — flat `penalite_fcfa` wins over the rate; rate is
+  `taux_penalite_basis_points/100`, falling back to `taux_penalite`; applied once `now > due_date`.
+  A PV with no paying `pv_interventions` row still accrues its penalty, rebuilt from `interventions`
+  via `pvs.intervention_id`.
+- **Payment must be the exact total** — `amount_paid_fcfa != amount_total_fcfa` is rejected. There is
+  no partial payment (`payments.pv_id` is UNIQUE), so this keeps
+  « encaissé = somme des totaux dus » an invariant.
+- **"En retard" is derived from dates**, never from `pvs.status` (nothing transitions a PV to
+  `EN_RETARD` automatically). Read `is_late` / `pending_late_count`.
 - **Only `RECEVEUR` validates payments** — and only within their own commune.
+- **Un agent est d'office un utilisateur mobile** — `POST /agents` et `POST /agents/import-csv`
+  provisionnent son compte dans la **même transaction** que la fiche : rôle `APM_AGENT`, adresse
+  technique `{matricule}@agents.apmtrack.cm` (`users.email` est NOT NULL et unique, un agent de
+  terrain n'a pas toujours d'adresse), mot de passe temporaire tiré sur `OsRng` et
+  `must_change_password = TRUE`. Désactivable par `create_account: false` / `?create_accounts=false`.
+  Le mot de passe temporaire n'est **restitué qu'une fois**, dans la réponse de création
+  (`account`) ou d'import (`accounts`) — il n'est stocké nulle part en clair.
+  `provision_agent_account` est idempotent : elle ne touche jamais un agent déjà rattaché à un
+  compte, donc une réimportation ne réinitialise aucun mot de passe en service.
+- **Ne jamais dériver un mot de passe du matricule** — celui-ci est public
+  (`GET /public/agents/verify/{matricule}`), un secret qui en découlerait serait devinable.
+- **Connexion par matricule ou email** — `POST /auth/login` accepte les deux dans le champ
+  `email` (alias `identifier`, `matricule`) ; la résolution par matricule passe par
+  `agents.user_id`, donc un agent sans compte lié reste non connectable.
+  `POST /auth/change-password` est la sortie du provisionnement : elle lève le drapeau et
+  révoque tous les refresh tokens.
 - **Only active agents create PVs** — check `agents.status = 'ACTIF'` before insert.
 - **Double-verbalization** — blocked (or warned) when same `(commune_id, intervention_id, verbalized_identifier/vehicle_plate)` exists with a non-terminal status. Configured per commune via `double_verbalisation_bloquant`.
 - **Status history** — every PV status change inserts into `pv_status_history` via `pvs::record_status_change()`.
 - **QR codes** — generated server-side (no external service) using the `qrcode` crate. SVG stored in `pvs.qr_code_svg`, returned only via `GET /pvs/{id}/qr`, not in the main list response.
 
 ---
+
+## Découpage administratif (données globales, hors tenant)
+
+Hiérarchie nationale à 4 niveaux : `regions` → `departements` → `arrondissements` → `quartiers`.
+Ces tables **n'ont pas de `commune_id`** : `resolve_commune_filter` / `require_commune_access` ne
+s'y appliquent pas, donc **seul le `SUPER_ADMIN` écrit** (lecture ouverte aux 5 rôles).
+
+- `communes.arrondissement_id` relie une commune d'arrondissement à son arrondissement. Renseigner
+  ce seul champ suffit : le trigger `communes_link_geography()` remonte département puis région.
+  Toute nouvelle colonne géographique doit être **ajoutée à la liste `UPDATE OF` du trigger**, sinon
+  un PATCH ne le déclenche pas.
+- **`quartiers` (national) ≠ `zones` (communal)** : une `zone` est une aire opérationnelle d'une
+  commune (quartier, marché, axe routier, zone sensible) et reste le support de `pvs.zone_id`.
+  `zones.quartier_id` est un pont facultatif vers le quartier officiel.
+- Unicité par **index partiels insensibles à la casse** (`WHERE deleted_at IS NULL`) : indispensable
+  pour que « enlever puis rajouter » une entité avec le même code reste possible.
+- Chargement des données : `POST /api/v1/geography/import-csv` ou
+  `apmtrack-api seed-geography <fichier.csv>` (même fonction). Le gabarit est servi par
+  `GET /api/v1/geography/import-template.csv`. L'import **crée et met à jour, ne supprime jamais** ;
+  une région inconnue est une erreur de ligne, jamais une création.
 
 ## Shared Utilities (`src/helpers.rs`)
 

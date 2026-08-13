@@ -17,9 +17,30 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::try_new(config)?;
 
     if state.config.run_migrations_on_startup
-        || matches!(command.as_deref(), Some("seed-super-admin" | "seed-demo"))
+        || matches!(
+            command.as_deref(),
+            Some("seed-super-admin" | "seed-demo" | "seed-geography")
+        )
     {
         database::run_migrations(&state.db).await?;
+    }
+
+    // Chargement du découpage administratif national depuis un CSV.
+    // Utile au déploiement initial, quand aucun SUPER_ADMIN n'existe encore pour appeler
+    // `POST /api/v1/geography/import-csv` ; appelle exactement la même fonction.
+    if command.as_deref() == Some("seed-geography") {
+        let path = std::env::args().nth(2).ok_or_else(|| {
+            anyhow::anyhow!("usage: apmtrack-api seed-geography <fichier.csv>")
+        })?;
+        let bytes = std::fs::read(&path)
+            .map_err(|error| anyhow::anyhow!("lecture de {path} impossible: {error}"))?;
+        let report =
+            modules::geography::import_geography_hierarchy(&state.db, &bytes, false, None).await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report.has_errors() {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
 
     if command.as_deref() == Some("seed-super-admin") {

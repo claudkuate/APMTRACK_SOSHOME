@@ -164,6 +164,7 @@ async fn openapi_contract_is_served() {
 fn test_state() -> AppState {
     let config = AppConfig {
         app_env: "test".to_string(),
+        app_timezone: "Africa/Douala".to_string(),
         app_port: 8080,
         database_url: "postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack"
             .to_string(),

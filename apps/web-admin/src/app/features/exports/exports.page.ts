@@ -102,10 +102,10 @@ export class ExportsPage implements OnInit {
   ];
 
   ngOnInit(): void {
-    this.api.page<Row>('/api/v1/communes', { page_size: 100 }).subscribe({
-      next: (page: Paginated<Row>) => {
+    this.api.pageAll<Row>('/api/v1/communes').subscribe({
+      next: (items: Row[]) => {
         this.communes.set(
-          page.items.map((row) => ({
+          items.map((row) => ({
             id: String(row['id'] ?? ''),
             label: String(row['nom'] ?? row['id'] ?? ''),
             meta: String(row['code'] ?? ''),

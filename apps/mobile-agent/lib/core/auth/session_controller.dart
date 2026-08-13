@@ -8,7 +8,15 @@ import '../offline/offline_models.dart';
 import '../offline/offline_store.dart';
 import 'session_store.dart';
 
-enum SessionStatus { booting, unauthenticated, authenticated }
+enum SessionStatus {
+  booting,
+  unauthenticated,
+
+  /// Connecte, mais avec un mot de passe temporaire : rien d'autre n'est accessible
+  /// tant qu'il n'a pas ete remplace.
+  mustChangePassword,
+  authenticated,
+}
 
 class SessionController extends ChangeNotifier {
   SessionController({
@@ -79,9 +87,7 @@ class SessionController extends ChangeNotifier {
     // refreshData never throws: a transient network error keeps the session
     // (online-first read cache), only a definitive auth rejection clears it.
     await refreshData();
-    status = session == null
-        ? SessionStatus.unauthenticated
-        : SessionStatus.authenticated;
+    status = _resolveStatus();
     notifyListeners();
   }
 
@@ -95,9 +101,33 @@ class SessionController extends ChangeNotifier {
     // resync in this session (signOut cleared the in-memory list).
     _allDrafts = decodeDrafts(await _cache.read(_draftsKey));
     await refreshData();
-    status = session == null
-        ? SessionStatus.unauthenticated
+    status = _resolveStatus();
+    notifyListeners();
+  }
+
+  SessionStatus _resolveStatus() {
+    final current = session;
+    if (current == null) {
+      return SessionStatus.unauthenticated;
+    }
+    return current.user.mustChangePassword
+        ? SessionStatus.mustChangePassword
         : SessionStatus.authenticated;
+  }
+
+  /// Remplace le mot de passe temporaire d'un compte provisionne.
+  ///
+  /// Le serveur revoque tous les refresh tokens : la session courante ne peut plus etre
+  /// prolongee, l'agent est donc renvoye vers l'ecran de connexion pour repartir sur des
+  /// jetons coherents avec son nouveau mot de passe.
+  Future<void> changePassword(String currentPassword, String newPassword) async {
+    final accessToken = token;
+    if (accessToken == null) {
+      return;
+    }
+    await api.changePassword(accessToken, currentPassword, newPassword);
+    await signOut(localOnly: true);
+    message = 'Mot de passe enregistre. Reconnectez-vous.';
     notifyListeners();
   }
 

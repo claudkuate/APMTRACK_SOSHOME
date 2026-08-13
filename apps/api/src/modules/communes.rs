@@ -4,7 +4,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::errors::{map_database_error, ApiError};
@@ -198,6 +198,18 @@ async fn public_signalement_options(
     }))
 }
 
+/// Filtres de `GET /communes`. Les filtres géographiques alimentent les panneaux
+/// « Communes » des pages de détail Région / Département / Arrondissement.
+#[derive(Debug, Deserialize)]
+struct CommuneFilterQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+    region_id: Option<Uuid>,
+    departement_id: Option<Uuid>,
+    arrondissement_id: Option<Uuid>,
+    active: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateCommuneRequest {
     code: String,
@@ -210,6 +222,9 @@ struct CreateCommuneRequest {
     region_id: Option<Uuid>,
     /// Référence vers la table `departements` (cascade géographique).
     departement_id: Option<Uuid>,
+    /// Référence vers la table `arrondissements`. Renseigner ce seul champ suffit :
+    /// le trigger `communes_link_geography` remonte département puis région.
+    arrondissement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -232,6 +247,7 @@ struct PatchCommuneRequest {
     departement: Option<String>,
     region_id: Option<Uuid>,
     departement_id: Option<Uuid>,
+    arrondissement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -255,6 +271,7 @@ pub struct CommuneResponse {
     departement: String,
     region_id: Option<Uuid>,
     departement_id: Option<Uuid>,
+    arrondissement_id: Option<Uuid>,
     adresse: Option<String>,
     telephone: Option<String>,
     email: Option<String>,
@@ -277,6 +294,7 @@ pub struct CommuneResponse {
 
 /// Colonnes exposées par les SELECT (le contour est converti en GeoJSON texte).
 const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, region_id, departement_id, \
+    arrondissement_id, \
     adresse, telephone, email, \
     site_web, logo_url, theme_color, active, subscription_status, subscription_started_at, \
     subscription_expires_at, \
@@ -307,7 +325,7 @@ async fn get_commune(
 async fn list_communes(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Query(query): Query<PaginationQuery>,
+    Query(query): Query<CommuneFilterQuery>,
 ) -> Result<Json<Paginated<CommuneResponse>>, ApiError> {
     auth_user.require_any_role(&[
         Role::SuperAdmin,
@@ -316,28 +334,43 @@ async fn list_communes(
         Role::Superviseur,
         Role::Receveur,
     ])?;
-    let pagination = Pagination::from_query(query)?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
 
     let (rows, total) = if auth_user.has_role(Role::SuperAdmin)
         || (auth_user.has_role(Role::Superviseur) && auth_user.commune_id.is_none())
     {
-        let total = sqlx::query("SELECT COUNT(*) AS total FROM communes WHERE deleted_at IS NULL")
-            .fetch_one(&state.db)
-            .await?
-            .get("total");
-        let rows = sqlx::query(&format!(
-            r#"
-            SELECT {COMMUNE_COLUMNS}
-            FROM communes
-            WHERE deleted_at IS NULL
-            ORDER BY created_at DESC
-            LIMIT $1 OFFSET $2
-            "#
-        ))
-        .bind(pagination.limit)
-        .bind(pagination.offset)
-        .fetch_all(&state.db)
-        .await?;
+        // Filtres géographiques : la page de détail d'une région/département/
+        // arrondissement liste ses communes via `?<foreignKey>=<id>`. Sans filtrage
+        // serveur, elle recevrait les 100 premières communes du pays.
+        let mut count_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
+            "SELECT COUNT(*) AS total FROM communes WHERE deleted_at IS NULL",
+        );
+        let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(format!(
+            "SELECT {COMMUNE_COLUMNS} FROM communes WHERE deleted_at IS NULL"
+        ));
+        for builder in [&mut count_qb, &mut qb] {
+            if let Some(value) = query.region_id {
+                builder.push(" AND region_id = ").push_bind(value);
+            }
+            if let Some(value) = query.departement_id {
+                builder.push(" AND departement_id = ").push_bind(value);
+            }
+            if let Some(value) = query.arrondissement_id {
+                builder.push(" AND arrondissement_id = ").push_bind(value);
+            }
+            if let Some(value) = query.active {
+                builder.push(" AND active = ").push_bind(value);
+            }
+        }
+        let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
+        qb.push(" ORDER BY created_at DESC LIMIT ")
+            .push_bind(pagination.limit)
+            .push(" OFFSET ")
+            .push_bind(pagination.offset);
+        let rows = qb.build().fetch_all(&state.db).await?;
         (rows, total)
     } else {
         let commune_id = auth_user
@@ -399,14 +432,15 @@ async fn create_commune(
             id, code, nom, region, departement, region_id, departement_id,
             adresse, telephone, email, site_web, logo_url, theme_color, active,
             subscription_status, subscription_started_at, subscription_expires_at,
-            boundary, centre
+            boundary, centre, arrondissement_id
         )
         VALUES (
             $1, $2, $3, $4, $5, $6, $7,
             $8, $9, $10, $11, $12, $13, $14,
             $15, $16, $17,
             ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)),
-            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326))
+            ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)),
+            $19
         )
         "#,
     )
@@ -428,6 +462,7 @@ async fn create_commune(
     .bind(payload.subscription_started_at)
     .bind(payload.subscription_expires_at)
     .bind(&boundary_json)
+    .bind(payload.arrondissement_id)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -533,6 +568,7 @@ async fn patch_commune(
             subscription_expires_at = $17,
             boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), boundary),
             centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), centre),
+            arrondissement_id = COALESCE($19, arrondissement_id),
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -555,6 +591,7 @@ async fn patch_commune(
     .bind(subscription_started_at)
     .bind(subscription_expires_at)
     .bind(&boundary_json)
+    .bind(payload.arrondissement_id)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -601,6 +638,7 @@ fn row_to_commune(row: sqlx::postgres::PgRow) -> CommuneResponse {
         departement: row.get("departement"),
         region_id: row.get("region_id"),
         departement_id: row.get("departement_id"),
+        arrondissement_id: row.get("arrondissement_id"),
         adresse: row.get("adresse"),
         telephone: row.get("telephone"),
         email: row.get("email"),

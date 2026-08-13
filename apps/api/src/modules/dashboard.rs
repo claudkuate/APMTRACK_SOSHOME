@@ -59,7 +59,18 @@ pub struct PvSummary {
 pub struct PaymentSummary {
     pub total_payments: i64,
     pub total_collected_fcfa: i64,
+    pub total_collected_base_fcfa: i64,
+    pub total_collected_penalty_fcfa: i64,
+    /// Historique : vaut désormais le TOTAL dû (base + pénalité), pas la seule base.
     pub pending_fcfa: i64,
+    pub pending_total_fcfa: i64,
+    pub pending_base_fcfa: i64,
+    pub pending_penalty_fcfa: i64,
+    pub pending_count: i64,
+    /// « En retard » **dérivé des dates** via `pv_amounts_due`. La colonne `pvs.status`
+    /// n'est jamais passée à `EN_RETARD` automatiquement, d'où le « 0 en retard » du
+    /// tableau de bord face au « 1 PV en retard » de la caisse.
+    pub pending_late_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,9 +114,16 @@ pub struct StatusCount {
 pub struct PaymentStatsResponse {
     pub total_payments: i64,
     pub total_collected_fcfa: i64,
+    /// Pénalités **déjà encaissées** (cumul historique).
     pub total_penalties_fcfa: i64,
     pub pending_count: i64,
+    pub pending_late_count: i64,
+    /// Historique : vaut désormais le TOTAL dû (base + pénalité).
     pub pending_fcfa: i64,
+    pub pending_total_fcfa: i64,
+    pub pending_base_fcfa: i64,
+    /// Encours de pénalités **restant à recouvrer**.
+    pub pending_penalty_fcfa: i64,
     pub commune_id: Option<Uuid>,
 }
 
@@ -180,29 +198,18 @@ async fn summary(
         non_payants: pv_rows.get("non_payants"),
     };
 
-    // Payment stats
+    // Encaissé : les montants réellement snapshotés sur les paiements validés.
+    // Pas de filtre sur `pvs.deleted_at` — un PV archivé après paiement ne doit pas
+    // faire disparaître de l'argent réellement encaissé.
     let pay_row = sqlx::query(
         r#"
         SELECT
             COUNT(*) AS total_payments,
-            COALESCE(SUM(amount_paid_fcfa), 0)::BIGINT AS total_collected
-        FROM payments p
-        JOIN pvs pv ON p.pv_id = pv.id
-        WHERE ($1::uuid IS NULL OR p.commune_id = $1)
-          AND p.status = 'PAYE'
-        "#,
-    )
-    .bind(commune_filter)
-    .fetch_one(db)
-    .await?;
-
-    // Pending amount from pvs directly
-    let pending_row = sqlx::query(
-        r#"
-        SELECT COALESCE(SUM(amount_initial_fcfa), 0)::BIGINT AS pending_fcfa
-        FROM pvs
-        WHERE status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
-          AND deleted_at IS NULL
+            COALESCE(SUM(amount_paid_fcfa), 0)::BIGINT    AS total_collected,
+            COALESCE(SUM(amount_due_fcfa), 0)::BIGINT     AS total_collected_base,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS total_collected_penalty
+        FROM payments
+        WHERE status = 'PAYE'
           AND ($1::uuid IS NULL OR commune_id = $1)
         "#,
     )
@@ -210,10 +217,39 @@ async fn summary(
     .fetch_one(db)
     .await?;
 
+    // Encours : lu sur `pv_amounts_due` et non plus sur `SUM(pvs.amount_initial_fcfa)`,
+    // qui ne contenait que la base et ne pouvait donc jamais refléter une pénalité.
+    let pending_row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*)                                      AS pending_count,
+            COUNT(*) FILTER (WHERE is_late)               AS pending_late_count,
+            COALESCE(SUM(amount_base_fcfa), 0)::BIGINT    AS pending_base,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS pending_penalty,
+            COALESCE(SUM(amount_total_fcfa), 0)::BIGINT   AS pending_total
+        FROM pv_amounts_due
+        WHERE is_pending
+          AND ($1::uuid IS NULL OR commune_id = $1)
+        "#,
+    )
+    .bind(commune_filter)
+    .fetch_one(db)
+    .await?;
+
+    let pending_total: i64 = pending_row.get("pending_total");
     let payments = PaymentSummary {
         total_payments: pay_row.get("total_payments"),
         total_collected_fcfa: pay_row.get("total_collected"),
-        pending_fcfa: pending_row.get("pending_fcfa"),
+        total_collected_base_fcfa: pay_row.get("total_collected_base"),
+        total_collected_penalty_fcfa: pay_row.get("total_collected_penalty"),
+        // Nom conservé pour ne pas casser un bundle front en cache ; la valeur vaut
+        // désormais le TOTAL (base + pénalité), ce qui est la correction demandée.
+        pending_fcfa: pending_total,
+        pending_total_fcfa: pending_total,
+        pending_base_fcfa: pending_row.get("pending_base"),
+        pending_penalty_fcfa: pending_row.get("pending_penalty"),
+        pending_count: pending_row.get("pending_count"),
+        pending_late_count: pending_row.get("pending_late_count"),
     };
 
     // Agent stats — commune_filter always applies for agents
@@ -370,14 +406,18 @@ async fn payment_stats(
     .fetch_one(&state.db)
     .await?;
 
+    // Même correction que dans `summary` : l'encours vient de `pv_amounts_due`, sans quoi
+    // il ne peut pas contenir les pénalités.
     let pending_row = sqlx::query(
         r#"
         SELECT
-            COUNT(*) AS pending_count,
-            COALESCE(SUM(amount_initial_fcfa), 0)::BIGINT AS pending_fcfa
-        FROM pvs
-        WHERE status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
-          AND deleted_at IS NULL
+            COUNT(*)                                      AS pending_count,
+            COUNT(*) FILTER (WHERE is_late)               AS pending_late_count,
+            COALESCE(SUM(amount_base_fcfa), 0)::BIGINT    AS pending_base,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS pending_penalty,
+            COALESCE(SUM(amount_total_fcfa), 0)::BIGINT   AS pending_total
+        FROM pv_amounts_due
+        WHERE is_pending
           AND ($1::uuid IS NULL OR commune_id = $1)
         "#,
     )
@@ -385,12 +425,19 @@ async fn payment_stats(
     .fetch_one(&state.db)
     .await?;
 
+    let pending_total: i64 = pending_row.get("pending_total");
     Ok(Json(PaymentStatsResponse {
         total_payments: row.get("total_payments"),
         total_collected_fcfa: row.get("total_collected"),
+        // Pénalités DÉJÀ encaissées (à ne pas confondre avec `pending_penalty_fcfa`,
+        // qui est l'encours de pénalités restant à recouvrer).
         total_penalties_fcfa: row.get("total_penalties"),
         pending_count: pending_row.get("pending_count"),
-        pending_fcfa: pending_row.get("pending_fcfa"),
+        pending_late_count: pending_row.get("pending_late_count"),
+        pending_fcfa: pending_total,
+        pending_total_fcfa: pending_total,
+        pending_base_fcfa: pending_row.get("pending_base"),
+        pending_penalty_fcfa: pending_row.get("pending_penalty"),
         commune_id: commune_filter,
     }))
 }

@@ -59,17 +59,17 @@ export class LookupService {
 
   loadRelations(relations: Map<string, RelationConfig>): void {
     for (const [key, relation] of relations) {
-      this.api
-        .page<Row>(relation.endpoint, { page_size: 100, ...(relation.query ?? {}) })
-        .subscribe({
-          next: (response) => {
-            const options = response.items.map((row) => toOption(row, relation));
-            this.state.update((current) => ({ ...current, [key]: options }));
-          },
-          error: () => {
-            this.state.update((current) => ({ ...current, [key]: current[key] ?? [] }));
-          },
-        });
+      // `pageAll` : le serveur plafonne page_size à 100, donc une liste nationale
+      // (~360 communes) était silencieusement tronquée dans tous les sélecteurs.
+      this.api.pageAll<Row>(relation.endpoint, relation.query ?? {}).subscribe({
+        next: (items) => {
+          const options = items.map((row) => toOption(row, relation));
+          this.state.update((current) => ({ ...current, [key]: options }));
+        },
+        error: () => {
+          this.state.update((current) => ({ ...current, [key]: current[key] ?? [] }));
+        },
+      });
     }
   }
 }
@@ -111,15 +111,18 @@ function toOption(row: Row, relation: RelationConfig): LookupOption {
   return {
     id,
     label: String(row[relation.labelKey] ?? id),
-    meta:
-      row[relation.metaKey ?? ''] === undefined ? undefined : String(row[relation.metaKey ?? '']),
-    status:
-      row[relation.statusKey ?? ''] === undefined
-        ? undefined
-        : String(row[relation.statusKey ?? '']),
-    parentId:
-      row[relation.parentKey ?? ''] === undefined
-        ? undefined
-        : String(row[relation.parentKey ?? '']),
+    meta: optionalString(row[relation.metaKey ?? '']),
+    status: optionalString(row[relation.statusKey ?? '']),
+    parentId: optionalString(row[relation.parentKey ?? '']),
   };
+}
+
+/**
+ * L'API sérialise un rattachement absent en `null`, pas en `undefined` : un `String(...)`
+ * direct produisait la chaîne `"null"`. Sur `parentId` cela rendait l'option invisible dans
+ * tout sélecteur en cascade (`"null"` est truthy et n'égale aucun UUID), donc une commune ou
+ * un département antérieur au découpage administratif devenait insélectionnable.
+ */
+function optionalString(value: unknown): string | undefined {
+  return value === undefined || value === null ? undefined : String(value);
 }

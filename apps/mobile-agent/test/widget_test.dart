@@ -337,6 +337,13 @@ class _FakeApi implements ApmtrackApi {
   Future<void> logout(String token, String refreshToken) async {}
 
   @override
+  Future<void> changePassword(
+    String token,
+    String currentPassword,
+    String newPassword,
+  ) async {}
+
+  @override
   Future<MobileProfile> mobileMe(String token) async => _profile;
 
   @override

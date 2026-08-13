@@ -172,9 +172,9 @@ export class PatrouilleAgentsDialog implements OnChanges {
       return;
     }
     this.api
-      .page<AgentOption>('/api/v1/agents', { commune_id: this.communeId, status: 'ACTIF', page_size: 100 })
+      .pageAll<AgentOption>('/api/v1/agents', { commune_id: this.communeId, status: 'ACTIF' })
       .subscribe({
-        next: (response: Paginated<AgentOption>) => this.availableAgents.set(response.items),
+        next: (items: AgentOption[]) => this.availableAgents.set(items),
         error: () => this.availableAgents.set([]),
       });
   }

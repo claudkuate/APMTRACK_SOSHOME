@@ -383,6 +383,13 @@ class _OfflineFakeApi implements ApmtrackApi {
   Future<void> logout(String token, String refreshToken) async {}
 
   @override
+  Future<void> changePassword(
+    String token,
+    String currentPassword,
+    String newPassword,
+  ) async {}
+
+  @override
   Future<String> pvQrSvg(String token, String pvId) =>
       throw UnimplementedError();
 

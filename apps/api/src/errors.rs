@@ -28,6 +28,13 @@ struct ErrorDetail {
 }
 
 impl ApiError {
+    /// Message métier brut, sans le code ni l'enveloppe HTTP.
+    /// Utilisé par les imports CSV, qui rapportent une erreur *par ligne* dans le corps
+    /// d'une réponse 200 plutôt que de faire échouer tout le fichier.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "BAD_REQUEST", message, None)
     }

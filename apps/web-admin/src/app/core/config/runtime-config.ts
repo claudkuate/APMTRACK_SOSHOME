@@ -33,7 +33,7 @@ export function runtimeEnvironment(): string {
 
 export function contactConfig(): ContactConfig {
   const config = window.__APMTRACK_CONFIG__;
-  const infolinePhone = config?.infolinePhone ?? '+237 6 99 00 00 00';
+  const infolinePhone = config?.infolinePhone ?? '+237 650 19 47 74';
   const whatsappSource = config?.whatsappNumber ?? infolinePhone;
   return {
     infolinePhone,

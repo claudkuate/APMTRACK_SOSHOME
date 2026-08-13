@@ -2,7 +2,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::{Json, Router};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, QueryBuilder, Row};
@@ -27,6 +27,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/payments", axum::routing::get(list_payments))
         .route("/payments/pending", axum::routing::get(list_pending))
+        .route("/payments/summary", axum::routing::get(caisse_summary))
         .route(
             "/payments/{pv_id}/validate",
             axum::routing::post(validate_payment),
@@ -72,6 +73,13 @@ pub struct PendingPvResponse {
     pub amount_due_fcfa: Option<i64>,
     pub amount_penalty_fcfa: i64,
     pub amount_total_fcfa: Option<i64>,
+    /// Alias explicite de `amount_due_fcfa` — la « base » de l'amende, que le client
+    /// veut pouvoir lire séparément de la pénalité.
+    pub amount_base_fcfa: i64,
+    /// Retard **dérivé des dates**, et non du statut : un PV échu dont l'infraction a un
+    /// taux nul est en retard sans porter de pénalité, cas que l'ancienne heuristique
+    /// côté front (`amount_penalty_fcfa > 0`) manquait.
+    pub is_late: bool,
     pub due_date: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
@@ -90,11 +98,40 @@ pub struct ValidatePaymentRequest {
     pub amount_paid: Option<f64>,
 }
 
+/// Montants d'un PV tels que servis par la vue `pv_amounts_due`.
+/// `list_pending` lit la vue directement (projection complète) ; cette structure ne porte
+/// que ce dont l'encaissement a besoin.
 struct PaymentComputation {
     amount_due_fcfa: i64,
     amount_penalty_fcfa: i64,
     amount_total_fcfa: i64,
-    due_date: DateTime<Utc>,
+}
+
+/// Agrégats de la page « Caisse & paiements ».
+///
+/// Auparavant calculés dans le navigateur sur les 50 dernières lignes et **sans filtrer
+/// `payments.status`** : un paiement annulé entrait dans la recette du jour et le total
+/// divergeait de celui du tableau de bord. Tout est désormais agrégé en SQL.
+#[derive(Debug, Serialize)]
+pub struct CaisseSummaryResponse {
+    pub day: chrono::NaiveDate,
+    pub timezone: String,
+    pub receipts_today: i64,
+    pub collected_today_fcfa: i64,
+    pub collected_today_base_fcfa: i64,
+    pub collected_today_penalty_fcfa: i64,
+    pub pending_count: i64,
+    pub pending_late_count: i64,
+    pub pending_base_fcfa: i64,
+    pub pending_penalty_fcfa: i64,
+    pub pending_total_fcfa: i64,
+    pub commune_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaisseSummaryQuery {
+    commune_id: Option<Uuid>,
+    date: Option<chrono::NaiveDate>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,63 +212,146 @@ async fn list_pending(
 
     let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
 
-    let mut count_qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
-        "SELECT COUNT(*) AS total FROM pvs p WHERE p.status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD') AND p.deleted_at IS NULL",
-    );
+    // Comptage et page lisent le MÊME prédicat `is_pending` de la vue : `total` et
+    // `items` ne peuvent donc plus diverger. La boucle par PV (une requête chacun) a
+    // disparu — les montants sont calculés en une passe par la vue.
+    let mut count_qb: QueryBuilder<sqlx::Postgres> =
+        QueryBuilder::new("SELECT COUNT(*) AS total FROM pv_amounts_due WHERE is_pending");
     if let Some(id) = commune_filter {
-        count_qb.push(" AND p.commune_id = ").push_bind(id);
+        count_qb.push(" AND commune_id = ").push_bind(id);
     }
     let total: i64 = count_qb.build().fetch_one(&state.db).await?.get("total");
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
         SELECT
-            p.id AS pv_id,
-            p.pv_number,
-            p.commune_id,
-            p.amount_initial_fcfa,
-            p.created_at
-        FROM pvs p
-        WHERE p.status IN ('EN_ATTENTE_PAIEMENT', 'EN_RETARD')
-          AND p.deleted_at IS NULL
+            pv_id, pv_number, commune_id,
+            amount_base_fcfa, amount_penalty_fcfa, amount_total_fcfa,
+            due_date, is_late, created_at
+        FROM pv_amounts_due
+        WHERE is_pending
         "#,
     );
 
     if let Some(id) = commune_filter {
-        qb.push(" AND p.commune_id = ").push_bind(id);
+        qb.push(" AND commune_id = ").push_bind(id);
     }
-    qb.push(" ORDER BY p.created_at ASC LIMIT ")
+    qb.push(" ORDER BY created_at ASC LIMIT ")
         .push_bind(pagination.limit)
         .push(" OFFSET ")
         .push_bind(pagination.offset);
 
     let rows = qb.build().fetch_all(&state.db).await?;
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let pv_id: Uuid = row.get("pv_id");
-        let created_at: DateTime<Utc> = row.get("created_at");
-        let amount_initial_fcfa: i64 = row.try_get("amount_initial_fcfa").unwrap_or(0);
-        // Tolérant : un PV hérité sans infraction payante ne doit pas faire échouer
-        // toute la liste des encaissements (retombe sur amount_initial_fcfa).
-        let computed =
-            payment_computation_pool_lenient(&state.db, pv_id, created_at, amount_initial_fcfa)
-                .await?;
-        items.push(PendingPvResponse {
-            pv_id,
-            pv_number: row.get("pv_number"),
-            commune_id: row.get("commune_id"),
-            amount_due: computed.amount_due_fcfa as f64,
-            amount_penalty: computed.amount_penalty_fcfa as f64,
-            amount_total: computed.amount_total_fcfa as f64,
-            amount_due_fcfa: Some(computed.amount_due_fcfa),
-            amount_penalty_fcfa: computed.amount_penalty_fcfa,
-            amount_total_fcfa: Some(computed.amount_total_fcfa),
-            due_date: computed.due_date,
-            created_at,
-        });
-    }
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let base: i64 = row.get("amount_base_fcfa");
+            let penalty: i64 = row.get("amount_penalty_fcfa");
+            let total_fcfa: i64 = row.get("amount_total_fcfa");
+            PendingPvResponse {
+                pv_id: row.get("pv_id"),
+                pv_number: row.get("pv_number"),
+                commune_id: row.get("commune_id"),
+                amount_due: base as f64,
+                amount_penalty: penalty as f64,
+                amount_total: total_fcfa as f64,
+                amount_due_fcfa: Some(base),
+                amount_penalty_fcfa: penalty,
+                amount_total_fcfa: Some(total_fcfa),
+                amount_base_fcfa: base,
+                is_late: row.get("is_late"),
+                due_date: row.get("due_date"),
+                created_at: row.get("created_at"),
+            }
+        })
+        .collect();
 
     Ok(Json(Paginated::new(items, &pagination, total)))
+}
+
+/// Agrégats serveur de la caisse : recette du jour (statut `PAYE` uniquement) et
+/// encours base/pénalité/total, pour que la page Caisse et le tableau de bord comptent
+/// exactement la même chose.
+async fn caisse_summary(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<CaisseSummaryQuery>,
+) -> Result<Json<CaisseSummaryResponse>, ApiError> {
+    auth_user.require_any_role(&[
+        Role::SuperAdmin,
+        Role::AdminCommune,
+        Role::Superviseur,
+        Role::Receveur,
+    ])?;
+
+    let commune_filter = resolve_commune_filter(&auth_user, query.commune_id)?;
+    let timezone = state.config.app_timezone.clone();
+
+    // Le jour courant est déterminé côté SQL dans le fuseau de la commune : `paid_at`
+    // est en UTC (WAT = UTC+1) et le front utilisait l'heure locale du poste, si bien
+    // qu'un encaissement à 00h30 était compté la veille.
+    let day = match query.date {
+        Some(date) => date,
+        None => sqlx::query_scalar::<_, chrono::NaiveDate>("SELECT (now() AT TIME ZONE $1)::date")
+            .bind(&timezone)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|_| {
+                ApiError::bad_request(format!("Fuseau horaire invalide: {timezone}"))
+            })?,
+    };
+
+    let today_row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*)                                      AS receipts_today,
+            COALESCE(SUM(amount_paid_fcfa), 0)::BIGINT    AS collected_today,
+            COALESCE(SUM(amount_due_fcfa), 0)::BIGINT     AS collected_today_base,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS collected_today_penalty
+        FROM payments
+        WHERE status = 'PAYE'
+          AND paid_at >= ($3::date::timestamp AT TIME ZONE $2)
+          AND paid_at <  (($3::date + 1)::timestamp AT TIME ZONE $2)
+          AND ($1::uuid IS NULL OR commune_id = $1)
+        "#,
+    )
+    .bind(commune_filter)
+    .bind(&timezone)
+    .bind(day)
+    .fetch_one(&state.db)
+    .await?;
+
+    let pending_row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*)                                      AS pending_count,
+            COUNT(*) FILTER (WHERE is_late)               AS pending_late_count,
+            COALESCE(SUM(amount_base_fcfa), 0)::BIGINT    AS pending_base,
+            COALESCE(SUM(amount_penalty_fcfa), 0)::BIGINT AS pending_penalty,
+            COALESCE(SUM(amount_total_fcfa), 0)::BIGINT   AS pending_total
+        FROM pv_amounts_due
+        WHERE is_pending
+          AND ($1::uuid IS NULL OR commune_id = $1)
+        "#,
+    )
+    .bind(commune_filter)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(CaisseSummaryResponse {
+        day,
+        timezone,
+        receipts_today: today_row.get("receipts_today"),
+        collected_today_fcfa: today_row.get("collected_today"),
+        collected_today_base_fcfa: today_row.get("collected_today_base"),
+        collected_today_penalty_fcfa: today_row.get("collected_today_penalty"),
+        pending_count: pending_row.get("pending_count"),
+        pending_late_count: pending_row.get("pending_late_count"),
+        pending_base_fcfa: pending_row.get("pending_base"),
+        pending_penalty_fcfa: pending_row.get("pending_penalty"),
+        pending_total_fcfa: pending_row.get("pending_total"),
+        commune_id: commune_filter,
+    }))
 }
 
 async fn validate_payment(
@@ -302,10 +422,7 @@ async fn validate_payment(
         return Err(ApiError::conflict("Ce PV a deja un paiement valide"));
     }
 
-    let created_at: DateTime<Utc> = pv_row.get("created_at");
-    let amount_initial_fcfa: i64 = pv_row.try_get("amount_initial_fcfa").unwrap_or(0);
-    let computed =
-        payment_computation_tx_lenient(&mut tx, pv_id, created_at, amount_initial_fcfa).await?;
+    let computed = payment_computation_tx(&mut tx, pv_id).await?;
     let amount_due_fcfa = computed.amount_due_fcfa;
     let amount_penalty_fcfa = computed.amount_penalty_fcfa;
     let amount_total_fcfa = computed.amount_total_fcfa;
@@ -313,9 +430,19 @@ async fn validate_payment(
     let amount_penalty = amount_penalty_fcfa as f64;
     let amount_total = amount_total_fcfa as f64;
 
+    // Montant EXACT exigé. Il n'existe pas de paiement partiel (`payments.pv_id` est
+    // UNIQUE) ; accepter un versement supérieur l'enregistrait intégralement et gonflait
+    // la recette sans contrepartie comptable. Avec l'égalité stricte,
+    // « encaissé = somme des totaux dus » devient une invariante.
     if amount_paid_fcfa < amount_total_fcfa {
         return Err(ApiError::bad_request(format!(
             "Montant insuffisant: {} FCFA requis (dont {} FCFA de penalites), {} FCFA recu",
+            amount_total_fcfa, amount_penalty_fcfa, amount_paid_fcfa
+        )));
+    }
+    if amount_paid_fcfa > amount_total_fcfa {
+        return Err(ApiError::bad_request(format!(
+            "Montant excedentaire: {} FCFA requis (dont {} FCFA de penalites), {} FCFA recu",
             amount_total_fcfa, amount_penalty_fcfa, amount_paid_fcfa
         )));
     }
@@ -477,121 +604,39 @@ fn row_to_payment(row: sqlx::postgres::PgRow) -> PaymentResponse {
     }
 }
 
-/// Requête commune aux calculs d'encaissement : les lignes payantes du PV avec
-/// toutes les règles financières snapshotées (montant, délai, taux, forfait).
-const PAYING_INTERVENTIONS_SQL: &str = r#"
-    SELECT montant_fcfa, delai_paiement_jours,
-           taux_penalite::DOUBLE PRECISION AS taux_penalite,
-           taux_penalite_basis_points,
-           penalite_fcfa
-    FROM pv_interventions
-    WHERE pv_id = $1 AND sujet_paiement = TRUE
-    ORDER BY order_index ASC
+/// Lecture des montants dus depuis la vue `pv_amounts_due` (migration 26), **seule
+/// autorité** sur la règle base / pénalité / total.
+///
+/// La règle était auparavant dupliquée ici en Rust : le tableau de bord sommait de son
+/// côté `pvs.amount_initial_fcfa` et ne pouvait donc jamais refléter une pénalité. En
+/// lisant tous la vue, le montant affiché au receveur, celui exigé à la validation et
+/// l'agrégat du tableau de bord ne peuvent plus diverger.
+const PV_AMOUNTS_SQL: &str = r#"
+    SELECT amount_base_fcfa, amount_penalty_fcfa, amount_total_fcfa
+    FROM pv_amounts_due
+    WHERE pv_id = $1
 "#;
 
-/// Repli quand un PV n'a aucune ligne `pv_interventions` payante (PV hérités/seed) :
-/// dû = `amount_initial_fcfa` du PV (montant serveur copié du référentiel à la création),
-/// pénalité 0, échéance à +30 jours. Utilisé par `list_pending` ET `validate_payment`
-/// pour que le total affiché au receveur soit exactement celui exigé à la validation.
-fn lenient_fallback(created_at: DateTime<Utc>, fallback_amount_fcfa: i64) -> PaymentComputation {
+fn computation_from_row(row: &sqlx::postgres::PgRow) -> PaymentComputation {
     PaymentComputation {
-        amount_due_fcfa: fallback_amount_fcfa,
-        amount_penalty_fcfa: 0,
-        amount_total_fcfa: fallback_amount_fcfa,
-        due_date: created_at + Duration::days(30),
+        amount_due_fcfa: row.get("amount_base_fcfa"),
+        amount_penalty_fcfa: row.get("amount_penalty_fcfa"),
+        amount_total_fcfa: row.get("amount_total_fcfa"),
     }
 }
 
-async fn payment_computation_pool_lenient(
-    pool: &PgPool,
-    pv_id: Uuid,
-    created_at: DateTime<Utc>,
-    fallback_amount_fcfa: i64,
-) -> Result<PaymentComputation, ApiError> {
-    let rows = sqlx::query(PAYING_INTERVENTIONS_SQL)
-        .bind(pv_id)
-        .fetch_all(pool)
-        .await?;
-    if rows.is_empty() {
-        return Ok(lenient_fallback(created_at, fallback_amount_fcfa));
-    }
-    payment_computation_from_rows(rows, created_at)
-}
-
-async fn payment_computation_tx_lenient(
+async fn payment_computation_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     pv_id: Uuid,
-    created_at: DateTime<Utc>,
-    fallback_amount_fcfa: i64,
 ) -> Result<PaymentComputation, ApiError> {
-    let rows = sqlx::query(PAYING_INTERVENTIONS_SQL)
+    // `now()` vaut `transaction_timestamp()` : le montant reste stable entre le verrou
+    // `FOR UPDATE` posé plus haut et l'INSERT du paiement.
+    let row = sqlx::query(PV_AMOUNTS_SQL)
         .bind(pv_id)
-        .fetch_all(&mut **tx)
-        .await?;
-    if rows.is_empty() {
-        return Ok(lenient_fallback(created_at, fallback_amount_fcfa));
-    }
-    payment_computation_from_rows(rows, created_at)
-}
-
-fn payment_computation_from_rows(
-    rows: Vec<sqlx::postgres::PgRow>,
-    created_at: DateTime<Utc>,
-) -> Result<PaymentComputation, ApiError> {
-    if rows.is_empty() {
-        return Err(ApiError::conflict("Ce PV n'a aucune infraction payante"));
-    }
-
-    let now = Utc::now();
-    let mut amount_due_fcfa = 0_i64;
-    let mut amount_penalty_fcfa = 0_i64;
-    let mut earliest_due_date: Option<DateTime<Utc>> = None;
-    for row in rows {
-        let amount = row.get::<Option<i64>, _>("montant_fcfa").unwrap_or(0);
-        let delay = row
-            .get::<Option<i32>, _>("delai_paiement_jours")
-            .unwrap_or(30);
-        // Fiscalité communale : forfait (penalite_fcfa > 0) prioritaire sur le taux ;
-        // pour le taux, basis points (édités dans Paramètres) prioritaires sur la
-        // colonne héritée taux_penalite.
-        let flat_penalty_fcfa = row.get::<Option<i64>, _>("penalite_fcfa").unwrap_or(0);
-        let rate = row
-            .get::<Option<i32>, _>("taux_penalite_basis_points")
-            .map(|bp| bp as f64 / 100.0)
-            .or_else(|| row.get::<Option<f64>, _>("taux_penalite"))
-            .unwrap_or(0.0);
-        let due_date = created_at + Duration::days(delay as i64);
-        amount_due_fcfa += amount;
-        amount_penalty_fcfa += if now > due_date && flat_penalty_fcfa > 0 {
-            flat_penalty_fcfa
-        } else {
-            calculate_penalty_fcfa(amount, rate, due_date, now)
-        };
-        earliest_due_date = Some(match earliest_due_date {
-            Some(existing) if existing <= due_date => existing,
-            _ => due_date,
-        });
-    }
-
-    Ok(PaymentComputation {
-        amount_due_fcfa,
-        amount_penalty_fcfa,
-        amount_total_fcfa: amount_due_fcfa + amount_penalty_fcfa,
-        due_date: earliest_due_date.unwrap_or(created_at),
-    })
-}
-
-fn calculate_penalty_fcfa(
-    amount_due_fcfa: i64,
-    penalty_rate: f64,
-    due_date: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> i64 {
-    if now <= due_date || penalty_rate <= 0.0 {
-        0
-    } else {
-        ((amount_due_fcfa as f64) * penalty_rate / 100.0).round() as i64
-    }
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| ApiError::not_found("PV introuvable"))?;
+    Ok(computation_from_row(&row))
 }
 
 async fn generate_receipt_number(

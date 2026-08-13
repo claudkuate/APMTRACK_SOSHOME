@@ -30,6 +30,16 @@ pub struct Paginated<T> {
 
 impl Pagination {
     pub fn from_query(query: PaginationQuery) -> Result<Self, ApiError> {
+        Self::from_query_with_max(query, MAX_PAGE_SIZE)
+    }
+
+    /// Variante avec plafond spécifique, pour les référentiels nationaux que les
+    /// sélecteurs du back-office doivent pouvoir charger d'un seul coup (les ~360
+    /// arrondissements du Cameroun ne tiennent pas dans une page de 100).
+    pub fn from_query_with_max(
+        query: PaginationQuery,
+        max_page_size: i64,
+    ) -> Result<Self, ApiError> {
         let page = query.page.unwrap_or(DEFAULT_PAGE);
         let page_size = query.page_size.unwrap_or(DEFAULT_PAGE_SIZE);
 
@@ -39,9 +49,9 @@ impl Pagination {
             ));
         }
 
-        if !(1..=MAX_PAGE_SIZE).contains(&page_size) {
+        if !(1..=max_page_size).contains(&page_size) {
             return Err(ApiError::bad_request(format!(
-                "page_size doit etre entre 1 et {MAX_PAGE_SIZE}"
+                "page_size doit etre entre 1 et {max_page_size}"
             )));
         }
 

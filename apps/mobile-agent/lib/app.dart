@@ -5,6 +5,7 @@ import 'core/auth/session_controller.dart';
 import 'core/auth/session_store.dart';
 import 'core/offline/offline_store.dart';
 import 'core/theme.dart';
+import 'features/auth/change_password_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/home/agent_shell.dart';
 
@@ -51,6 +52,9 @@ class _ApmtrackAgentAppState extends State<ApmtrackAgentApp> {
           return switch (controller.status) {
             SessionStatus.booting => const _BootScreen(),
             SessionStatus.unauthenticated => LoginPage(controller: controller),
+            SessionStatus.mustChangePassword => ChangePasswordPage(
+              controller: controller,
+            ),
             SessionStatus.authenticated => AgentShell(controller: controller),
           };
         },

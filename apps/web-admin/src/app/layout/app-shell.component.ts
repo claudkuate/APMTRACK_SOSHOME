@@ -441,6 +441,9 @@ export class AppShellComponent implements OnDestroy {
       items: [
         { label: 'Référentiel', route: '/referentiel-interventions', icon: 'referentiel', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },
         { label: 'Communes', route: '/communes', icon: 'communes', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE', 'SUPERVISEUR'] },
+        // Une seule entrée : les niveaux inférieurs (départements, arrondissements,
+        // quartiers) s'atteignent par les panneaux liés de la fiche détail.
+        { label: 'Découpage administratif', route: '/regions', icon: 'zones', roles: ['SUPER_ADMIN'] },
         { label: 'Utilisateurs système', route: '/users', icon: 'users', roles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'] },
       ],
     },

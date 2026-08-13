@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{PgPool, Row};
@@ -34,6 +34,7 @@ pub fn router() -> Router<AppState> {
         .route("/refresh-cookie", axum::routing::post(refresh_cookie))
         .route("/logout", axum::routing::post(logout))
         .route("/me", axum::routing::get(me))
+        .route("/change-password", axum::routing::post(change_password))
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,8 @@ pub struct AuthUser {
     pub full_name: String,
     pub commune_id: Option<Uuid>,
     pub roles: Vec<Role>,
+    /// Compte provisionne automatiquement : le mot de passe temporaire doit etre remplace.
+    pub must_change_password: bool,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
 }
@@ -77,8 +80,17 @@ impl AuthUser {
 
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
+    /// Adresse email **ou** matricule d'agent. Le nom de champ reste `email` pour ne pas
+    /// casser les clients existants ; `identifier` et `matricule` sont acceptes en alias.
+    #[serde(alias = "identifier", alias = "matricule")]
     email: String,
     password: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +120,8 @@ pub struct MeResponse {
     pub commune_id: Option<Uuid>,
     pub roles: Vec<String>,
     pub active: bool,
+    /// Le client doit imposer la definition d'un nouveau mot de passe avant tout usage.
+    pub must_change_password: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -127,6 +141,7 @@ struct LoginUser {
     commune_id: Option<Uuid>,
     password_hash: String,
     active: bool,
+    must_change_password: bool,
 }
 
 struct RefreshTokenRecord {
@@ -187,8 +202,8 @@ async fn login(
         state.config.rate_limit_window_seconds,
     )?;
 
-    let email = normalize_email(&payload.email)?;
-    let user = match load_login_user(&state.db, &email).await? {
+    let identifier = normalize_login_identifier(&payload.email)?;
+    let user = match load_login_user(&state.db, &identifier).await? {
         Some(user) => user,
         None => {
             audit::record(
@@ -198,7 +213,7 @@ async fn login(
                 "users",
                 None,
                 None,
-                Some(json!({ "email": email })),
+                Some(json!({ "identifier": identifier })),
                 None,
                 None,
             )
@@ -233,6 +248,7 @@ async fn login(
         user.full_name.clone(),
         user.commune_id,
         roles,
+        user.must_change_password,
     )
     .await?;
 
@@ -313,6 +329,7 @@ async fn refresh_with_token(
         auth_user.full_name.clone(),
         auth_user.commune_id,
         auth_user.roles.clone(),
+        auth_user.must_change_password,
     )
     .await?;
     audit::record_for_commune_tx(
@@ -376,6 +393,7 @@ async fn me(auth_user: AuthUser) -> Json<MeResponse> {
         email: auth_user.email,
         full_name: auth_user.full_name,
         commune_id: auth_user.commune_id,
+        must_change_password: auth_user.must_change_password,
         roles: auth_user
             .roles
             .into_iter()
@@ -383,6 +401,91 @@ async fn me(auth_user: AuthUser) -> Json<MeResponse> {
             .collect(),
         active: true,
     })
+}
+
+/// Changement de mot de passe par l'utilisateur lui-meme.
+///
+/// C'est la sortie du provisionnement : elle leve `must_change_password` et revoque les
+/// refresh tokens, pour que le mot de passe temporaire communique par l'administrateur
+/// cesse d'ouvrir une session.
+async fn change_password(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    ApiJson(payload): ApiJson<ChangePasswordRequest>,
+) -> Result<Json<MeResponse>, ApiError> {
+    let current_hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(auth_user.id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| ApiError::unauthorized("Utilisateur introuvable"))?;
+
+    if !verify_password(&payload.current_password, &current_hash)? {
+        return Err(ApiError::unauthorized("Mot de passe actuel invalide"));
+    }
+
+    let new_password = payload.new_password.trim();
+    if new_password == payload.current_password.trim() {
+        return Err(ApiError::bad_request(
+            "Le nouveau mot de passe doit etre different de l'actuel",
+        ));
+    }
+    let new_hash = hash_password(new_password)?;
+
+    let mut transaction = state.db.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = $2, must_change_password = FALSE, updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(auth_user.id)
+    .bind(&new_hash)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    sqlx::query(
+        r#"
+        UPDATE refresh_tokens
+        SET revoked_at = now()
+        WHERE user_id = $1 AND revoked_at IS NULL
+        "#,
+    )
+    .bind(auth_user.id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record_for_commune_tx(
+        &mut transaction,
+        auth_user.commune_id,
+        Some(auth_user.id),
+        "AUTH_PASSWORD_CHANGED",
+        "users",
+        Some(auth_user.id),
+        None,
+        None,
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+    transaction.commit().await?;
+
+    Ok(Json(MeResponse {
+        id: auth_user.id,
+        email: auth_user.email,
+        full_name: auth_user.full_name,
+        commune_id: auth_user.commune_id,
+        roles: auth_user
+            .roles
+            .iter()
+            .map(|role| role.code().to_string())
+            .collect(),
+        active: true,
+        must_change_password: false,
+    }))
 }
 
 pub async fn seed_super_admin(pool: &PgPool) -> anyhow::Result<()> {
@@ -466,7 +569,7 @@ pub async fn seed_super_admin(pool: &PgPool) -> anyhow::Result<()> {
 pub async fn load_auth_user(pool: &PgPool, user_id: Uuid) -> Result<AuthUser, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT id, email, full_name, commune_id, active
+        SELECT id, email, full_name, commune_id, active, must_change_password
         FROM users
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -492,6 +595,7 @@ pub async fn load_auth_user(pool: &PgPool, user_id: Uuid) -> Result<AuthUser, Ap
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
         roles,
+        must_change_password: row.get("must_change_password"),
         ip_address: None,
         user_agent: None,
     })
@@ -503,7 +607,7 @@ async fn load_auth_user_in_tx(
 ) -> Result<AuthUser, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT id, email, full_name, commune_id, active
+        SELECT id, email, full_name, commune_id, active, must_change_password
         FROM users
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -529,6 +633,7 @@ async fn load_auth_user_in_tx(
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
         roles,
+        must_change_password: row.get("must_change_password"),
         ip_address: None,
         user_agent: None,
     })
@@ -627,6 +732,52 @@ pub fn hash_password(password: &str) -> Result<String, ApiError> {
         })
 }
 
+/// Mot de passe temporaire d'un compte provisionne automatiquement.
+///
+/// Tire sur `OsRng` et **jamais** derive du matricule : celui-ci est publiquement
+/// verifiable via `/public/agents/verify/{matricule}`, un mot de passe qui en decoulerait
+/// serait devinable par n'importe qui. L'alphabet exclut les caracteres ambigus (0/O, 1/l/I)
+/// car l'identifiant est recopie a la main ou dicte a l'agent.
+pub fn generate_temp_password() -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    const LENGTH: usize = 12;
+
+    let modulo = ALPHABET.len() as u8;
+    // Tirage avec rejet : on ecarte la queue non divisible pour rester uniforme.
+    let limit = u8::MAX - (u8::MAX % modulo);
+    let mut password = String::with_capacity(LENGTH);
+    let mut buffer = [0u8; 32];
+    while password.len() < LENGTH {
+        OsRng.fill_bytes(&mut buffer);
+        for byte in buffer {
+            if password.len() == LENGTH {
+                break;
+            }
+            if byte < limit {
+                password.push(ALPHABET[(byte % modulo) as usize] as char);
+            }
+        }
+    }
+    password
+}
+
+/// Identifiant de connexion accepte : adresse email complete **ou** matricule d'agent.
+pub fn normalize_login_identifier(value: &str) -> Result<String, ApiError> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.contains('@') {
+        return normalize_email(&normalized);
+    }
+
+    let err = || ApiError::bad_request("Identifiant invalide");
+    if normalized.is_empty() || normalized.len() > 128 {
+        return Err(err());
+    }
+    if normalized.chars().any(char::is_whitespace) {
+        return Err(err());
+    }
+    Ok(normalized)
+}
+
 pub fn verify_password(password: &str, password_hash: &str) -> Result<bool, ApiError> {
     let parsed = PasswordHash::new(password_hash).map_err(|error| {
         tracing::warn!(%error, "stored password hash is invalid");
@@ -672,15 +823,33 @@ pub fn normalize_email(email: &str) -> Result<String, ApiError> {
     Ok(normalized)
 }
 
-async fn load_login_user(pool: &PgPool, email: &str) -> Result<Option<LoginUser>, ApiError> {
+/// Resout l'identifiant de connexion : adresse email **ou** matricule d'agent.
+///
+/// Un agent est provisionne avec une adresse technique qu'il ne connait pas ; son
+/// identifiant naturel est son matricule. La resolution par matricule passe par
+/// `agents.user_id`, donc un agent sans compte lie reste non connectable.
+async fn load_login_user(pool: &PgPool, identifier: &str) -> Result<Option<LoginUser>, ApiError> {
     let row = sqlx::query(
         r#"
-        SELECT id, email, password_hash, full_name, commune_id, active
-        FROM users
-        WHERE lower(email) = lower($1) AND deleted_at IS NULL
+        SELECT u.id, u.email, u.password_hash, u.full_name, u.commune_id, u.active,
+               u.must_change_password
+        FROM users u
+        WHERE u.deleted_at IS NULL
+          AND (
+                lower(u.email) = lower($1)
+                OR u.id = (
+                    SELECT a.user_id
+                    FROM agents a
+                    WHERE lower(a.matricule) = lower($1)
+                      AND a.user_id IS NOT NULL
+                      AND a.deleted_at IS NULL
+                    LIMIT 1
+                )
+              )
+        LIMIT 1
         "#,
     )
-    .bind(email)
+    .bind(identifier)
     .fetch_optional(pool)
     .await?;
 
@@ -691,6 +860,7 @@ async fn load_login_user(pool: &PgPool, email: &str) -> Result<Option<LoginUser>
         full_name: row.get("full_name"),
         commune_id: row.get("commune_id"),
         active: row.get("active"),
+        must_change_password: row.get("must_change_password"),
     }))
 }
 
@@ -702,6 +872,7 @@ async fn issue_tokens(
     full_name: String,
     commune_id: Option<Uuid>,
     roles: Vec<Role>,
+    must_change_password: bool,
 ) -> Result<TokenResponse, ApiError> {
     let access_token = create_access_token(config, user_id, &email, commune_id, &roles)?;
     let (refresh_token_id, refresh_token, refresh_secret) = generate_refresh_token();
@@ -737,6 +908,7 @@ async fn issue_tokens(
                 .map(|role| role.code().to_string())
                 .collect(),
             active: true,
+            must_change_password,
         },
     })
 }
@@ -749,6 +921,7 @@ async fn issue_tokens_in_tx(
     full_name: String,
     commune_id: Option<Uuid>,
     roles: Vec<Role>,
+    must_change_password: bool,
 ) -> Result<TokenResponse, ApiError> {
     let access_token = create_access_token(config, user_id, &email, commune_id, &roles)?;
     let (refresh_token_id, refresh_token, refresh_secret) = generate_refresh_token();
@@ -784,6 +957,7 @@ async fn issue_tokens_in_tx(
                 .map(|role| role.code().to_string())
                 .collect(),
             active: true,
+            must_change_password,
         },
     })
 }
@@ -1025,6 +1199,7 @@ mod tests {
     fn jwt_roundtrip_returns_claims() {
         let config = AppConfig {
             app_env: "test".to_string(),
+            app_timezone: "Africa/Douala".to_string(),
             app_port: 8080,
             database_url: "postgres://apmtrack:apmtrack_dev_password@localhost:5432/apmtrack"
                 .to_string(),

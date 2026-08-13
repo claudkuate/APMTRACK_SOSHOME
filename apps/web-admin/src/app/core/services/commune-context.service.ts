@@ -95,11 +95,13 @@ export class CommuneContextService {
   }
 
   loadCommunes(): void {
-    this.api.page<Commune>('/api/v1/communes', { page_size: 100, active: true }).subscribe({
-      next: (response: Paginated<Commune>) => {
-        this.communes.set(response.items);
+    // Sélecteur global de périmètre : doit lister TOUTES les communes actives, pas les
+    // 100 premières (le pays en compte ~360).
+    this.api.pageAll<Commune>('/api/v1/communes', { active: true }).subscribe({
+      next: (items: Commune[]) => {
+        this.communes.set(items);
         const current = this.selectedId();
-        if (current && !response.items.some((commune) => commune.id === current)) {
+        if (current && !items.some((commune) => commune.id === current)) {
           this.select(null);
         }
       },
@@ -115,9 +117,10 @@ export class CommuneContextService {
         next: (summary) => {
           this.online.set(true);
           this.signalementsRecus.set(Number(summary.signalements?.['recu'] ?? 0));
-          this.pvEnAttente.set(
-            Number(summary.pvs?.['en_attente'] ?? 0) + Number(summary.pvs?.['en_retard'] ?? 0),
-          );
+          // `pending_count` couvre déjà EN_ATTENTE_PAIEMENT + EN_RETARD : le badge de
+          // navigation compte ainsi exactement la même chose que le tableau de bord et
+          // la caisse, au lieu d'additionner deux statuts de son côté.
+          this.pvEnAttente.set(Number(summary.payments?.['pending_count'] ?? 0));
         },
         error: () => {
           this.online.set(false);

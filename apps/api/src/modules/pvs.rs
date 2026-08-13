@@ -113,6 +113,14 @@ pub struct PvPublicResponse {
     pub agent_matricule: Option<String>,
     pub amount_initial: Option<f64>,
     pub amount_initial_fcfa: Option<i64>,
+    /// Décomposition du montant réellement dû au moment de la consultation.
+    /// Sans elle, le contrevenant qui scanne le QR après l'échéance lisait la seule base
+    /// (ex. 20 000) alors que 22 000 étaient exigibles au guichet.
+    pub amount_base_fcfa: i64,
+    pub amount_penalty_fcfa: i64,
+    pub amount_total_fcfa: i64,
+    pub due_date: Option<DateTime<Utc>>,
+    pub is_late: bool,
     pub created_at: DateTime<Utc>,
 }
 
@@ -1040,10 +1048,13 @@ async fn verify_pv_public(
             p.amount_initial::DOUBLE PRECISION AS amount_initial,
             p.amount_initial_fcfa, p.created_at,
             c.nom AS commune_nom,
-            a.matricule AS agent_matricule
+            a.matricule AS agent_matricule,
+            v.amount_base_fcfa, v.amount_penalty_fcfa, v.amount_total_fcfa,
+            v.due_date, v.is_late
         FROM pvs p
         INNER JOIN communes c ON c.id = p.commune_id
         LEFT JOIN agents a ON a.id = p.agent_id
+        LEFT JOIN pv_amounts_due v ON v.pv_id = p.id
         WHERE p.pv_number = $1 AND p.deleted_at IS NULL
           AND c.deleted_at IS NULL
         "#,
@@ -1060,6 +1071,11 @@ async fn verify_pv_public(
         agent_matricule: row.get("agent_matricule"),
         amount_initial: row.get("amount_initial"),
         amount_initial_fcfa: row.get("amount_initial_fcfa"),
+        amount_base_fcfa: row.try_get("amount_base_fcfa").unwrap_or(0),
+        amount_penalty_fcfa: row.try_get("amount_penalty_fcfa").unwrap_or(0),
+        amount_total_fcfa: row.try_get("amount_total_fcfa").unwrap_or(0),
+        due_date: row.try_get("due_date").unwrap_or(None),
+        is_late: row.try_get("is_late").unwrap_or(false),
         created_at: row.get("created_at"),
     }))
 }

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod csv_import;
 pub mod database;
 pub mod errors;
 pub mod extractors;

@@ -249,6 +249,40 @@
         }
       }
     },
+    "/api/v1/auth/change-password": {
+      "post": {
+        "summary": "Change le mot de passe de l'utilisateur connecte",
+        "description": "Leve must_change_password et revoque tous les refresh tokens.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangePasswordRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Mot de passe mis a jour",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
     "/api/v1/users": {
       "get": {
         "summary": "Liste les utilisateurs selon le role et la commune",
@@ -477,16 +511,47 @@
     },
     "/api/v1/agents/import-csv": {
       "post": {
-        "summary": "Importe des agents par CSV pour une commune",
+        "summary": "Importe des agents par CSV (dispatch multi-communes par code)",
         "parameters": [
           {
             "name": "commune_id",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "format": "uuid"
-            }
+            },
+            "description": "Commune par defaut, appliquee aux seules lignes sans colonne commune. Obligatoire pour un SUPER_ADMIN si le fichier n'a pas de colonne commune."
+          },
+          {
+            "name": "allow_transfer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Autorise le rattachement d'un matricule deja present dans une autre commune. SUPER_ADMIN uniquement; chaque transfert est audite."
+          },
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Simulation: execute puis annule, les compteurs restent exacts."
+          },
+          {
+            "name": "create_accounts",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Provisionne le compte mobile des agents importes. Absent = true."
           }
         ],
         "requestBody": {
@@ -495,7 +560,7 @@
             "text/csv": {
               "schema": {
                 "type": "string",
-                "description": "Colonnes: matricule, full_name, date_prise_fonction, telephone, email"
+                "description": "Colonnes reconnues (alias insensibles a la casse et aux accents): matricule; full_name / nom_complet / Nom_Complet; code_commune / Code_Commune_attache / commune_code; date_prise_fonction; telephone; email. Separateur ';' ou ',' detecte automatiquement, BOM UTF-8 tolere, repli CP1252. Une colonne absente n'ecrase jamais la valeur en base."
               }
             }
           }
@@ -510,6 +575,15 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "En-tetes invalides, commune par defaut introuvable ou plafond de lignes depasse"
+          },
+          "403": {
+            "description": "allow_transfer sans SUPER_ADMIN, ou commune hors perimetre"
+          },
+          "413": {
+            "description": "Fichier superieur a 8 Mio"
           }
         }
       }
@@ -2547,6 +2621,834 @@
           }
         }
       }
+    },
+    "/api/v1/payments/summary": {
+      "get": {
+        "summary": "Agregats de caisse (recette du jour et encours base/penalite/total)",
+        "parameters": [
+          {
+            "name": "commune_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Journee comptable a agreger, dans le fuseau APP_TIMEZONE. Defaut: aujourd'hui."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agregats de caisse",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CaisseSummary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/geography/regions": {
+      "get": {
+        "summary": "Liste les regions (referentiel national)",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste paginee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedGeneric"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Cree un(e) region (SUPER_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "Region",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Region"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/regions/{id}": {
+      "get": {
+        "summary": "Detail region",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Region",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Region"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Introuvable"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Met a jour region (SUPER_ADMIN)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Region"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Supprime region (SUPER_ADMIN, suppression logique)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Supprime"
+          },
+          "409": {
+            "description": "Enfants ou communes rattachees"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/departements": {
+      "get": {
+        "summary": "Liste les departements (referentiel national)",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "region_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste paginee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedGeneric"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Cree un(e) departement (SUPER_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "Departement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Departement"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/departements/{id}": {
+      "get": {
+        "summary": "Detail departement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Departement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Departement"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Introuvable"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Met a jour departement (SUPER_ADMIN)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Departement"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Supprime departement (SUPER_ADMIN, suppression logique)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Supprime"
+          },
+          "409": {
+            "description": "Enfants ou communes rattachees"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/arrondissements": {
+      "get": {
+        "summary": "Liste les arrondissements (referentiel national)",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "departement_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste paginee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedGeneric"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Cree un(e) arrondissement (SUPER_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "Arrondissement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Arrondissement"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/arrondissements/{id}": {
+      "get": {
+        "summary": "Detail arrondissement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Arrondissement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Arrondissement"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Introuvable"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Met a jour arrondissement (SUPER_ADMIN)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Arrondissement"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Supprime arrondissement (SUPER_ADMIN, suppression logique)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Supprime"
+          },
+          "409": {
+            "description": "Enfants ou communes rattachees"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/quartiers": {
+      "get": {
+        "summary": "Liste les quartiers (referentiel national)",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "arrondissement_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste paginee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedGeneric"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Cree un(e) quartier (SUPER_ADMIN)",
+        "responses": {
+          "200": {
+            "description": "Quartier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quartier"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/quartiers/{id}": {
+      "get": {
+        "summary": "Detail quartier",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quartier",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quartier"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Introuvable"
+          }
+        }
+      },
+      "patch": {
+        "summary": "Met a jour quartier (SUPER_ADMIN)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Quartier"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Supprime quartier (SUPER_ADMIN, suppression logique)",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Supprime"
+          },
+          "409": {
+            "description": "Enfants ou communes rattachees"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/import-csv": {
+      "post": {
+        "summary": "Importe le decoupage administratif national (SUPER_ADMIN)",
+        "parameters": [
+          {
+            "name": "dry_run",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "text/csv": {
+              "schema": {
+                "type": "string",
+                "description": "Une ligne par quartier. Colonnes: region, region_code, departement, departement_code, arrondissement, arrondissement_code, quartier, quartier_code, commune_code. Separateur ';' ou ',', BOM tolere. Creation et mise a jour uniquement: aucun DELETE."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rapport d'import",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeographyImportReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "En-tetes invalides ou fichier vide"
+          },
+          "403": {
+            "description": "Reserve au SUPER_ADMIN"
+          }
+        }
+      }
+    },
+    "/api/v1/geography/import-template.csv": {
+      "get": {
+        "summary": "Gabarit CSV du decoupage administratif",
+        "responses": {
+          "200": {
+            "description": "Gabarit",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/geography/regions": {
+      "get": {
+        "summary": "Regions ayant au moins une commune visible",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "Liste",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/geography/regions/{id}/departements": {
+      "get": {
+        "summary": "Departements d'une region",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/geography/departements/{id}/arrondissements": {
+      "get": {
+        "summary": "Arrondissements d'un departement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/geography/departements/{id}/communes": {
+      "get": {
+        "summary": "Communes d'un departement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/public/geography/arrondissements/{id}/communes": {
+      "get": {
+        "summary": "Communes d'un arrondissement",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Liste",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2723,7 +3625,7 @@
         "properties": {
           "email": {
             "type": "string",
-            "format": "email"
+            "description": "Adresse email ou matricule d'agent. Alias acceptes: identifier, matricule."
           },
           "password": {
             "type": "string",
@@ -2968,6 +3870,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "must_change_password": {
+            "type": "boolean",
+            "description": "Mot de passe temporaire a remplacer avant tout autre usage."
           }
         }
       },
@@ -3135,6 +4041,11 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "arrondissement_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
           }
         }
       },
@@ -3149,7 +4060,14 @@
           "nom",
           "region",
           "departement"
-        ]
+        ],
+        "properties": {
+          "arrondissement_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        }
       },
       "PatchCommuneRequest": {
         "type": "object",
@@ -3203,6 +4121,11 @@
           "subscription_expires_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "arrondissement_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
           }
         }
       },
@@ -3267,6 +4190,10 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "account": {
+            "$ref": "#/components/schemas/ProvisionedAccount",
+            "description": "Present uniquement dans la reponse de creation."
           }
         }
       },
@@ -3300,6 +4227,11 @@
           },
           "email": {
             "type": "string"
+          },
+          "create_account": {
+            "type": "boolean",
+            "default": true,
+            "description": "Provisionne le compte mobile de l'agent. Absent = true."
           }
         }
       },
@@ -3322,22 +4254,50 @@
         "type": "object",
         "properties": {
           "created": {
-            "type": "integer",
-            "minimum": 0
+            "type": "integer"
           },
           "updated": {
-            "type": "integer",
-            "minimum": 0
+            "type": "integer"
           },
           "skipped": {
-            "type": "integer",
-            "minimum": 0
+            "type": "integer"
+          },
+          "restored": {
+            "type": "integer"
+          },
+          "transferred": {
+            "type": "integer"
+          },
+          "total_rows": {
+            "type": "integer"
+          },
+          "error_count": {
+            "type": "integer"
           },
           "errors": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/CsvRowError"
             }
+          },
+          "errors_truncated": {
+            "type": "boolean"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "communes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportAgentsCommuneSummary"
+            }
+          },
+          "accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProvisionedAccount"
+            },
+            "description": "Comptes provisionnes pendant l'import. Vide en dry_run."
           }
         }
       },
@@ -4519,6 +5479,295 @@
               "PERSON_WITH_VEHICLE",
               null
             ]
+          }
+        }
+      },
+      "ImportAgentsCommuneSummary": {
+        "type": "object",
+        "properties": {
+          "commune_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string"
+          },
+          "nom": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "updated": {
+            "type": "integer"
+          },
+          "restored": {
+            "type": "integer"
+          }
+        }
+      },
+      "CsvRowError": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "CaisseSummary": {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "receipts_today": {
+            "type": "integer"
+          },
+          "collected_today_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "collected_today_base_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "collected_today_penalty_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pending_count": {
+            "type": "integer"
+          },
+          "pending_late_count": {
+            "type": "integer"
+          },
+          "pending_base_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pending_penalty_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "pending_total_fcfa": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "commune_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          }
+        }
+      },
+      "Region": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "nom": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Departement": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "nom": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "region_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "Arrondissement": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "nom": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "departement_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "Quartier": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "code": {
+            "type": "string",
+            "nullable": true
+          },
+          "nom": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "arrondissement_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "GeographyLevelCounts": {
+        "type": "object",
+        "properties": {
+          "created": {
+            "type": "integer"
+          },
+          "updated": {
+            "type": "integer"
+          },
+          "matched": {
+            "type": "integer"
+          }
+        }
+      },
+      "GeographyImportReport": {
+        "type": "object",
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "rows_total": {
+            "type": "integer"
+          },
+          "regions": {
+            "$ref": "#/components/schemas/GeographyLevelCounts"
+          },
+          "departements": {
+            "$ref": "#/components/schemas/GeographyLevelCounts"
+          },
+          "arrondissements": {
+            "$ref": "#/components/schemas/GeographyLevelCounts"
+          },
+          "quartiers": {
+            "$ref": "#/components/schemas/GeographyLevelCounts"
+          },
+          "communes_linked": {
+            "type": "integer"
+          },
+          "skipped": {
+            "type": "integer"
+          },
+          "errors_total": {
+            "type": "integer"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CsvRowError"
+            }
+          },
+          "errors_truncated": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ChangePasswordRequest": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "format": "password"
+          },
+          "new_password": {
+            "type": "string",
+            "format": "password",
+            "minLength": 8
+          }
+        }
+      },
+      "ProvisionedAccount": {
+        "type": "object",
+        "description": "Compte mobile cree automatiquement. Le mot de passe temporaire n'est restitue que par cette reponse.",
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "matricule": {
+            "type": "string"
+          },
+          "full_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "description": "Adresse technique de connexion; l'agent se connecte par matricule."
+          },
+          "temp_password": {
+            "type": "string"
           }
         }
       }

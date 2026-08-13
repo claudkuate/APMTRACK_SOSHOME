@@ -327,21 +327,22 @@ class _LoginFormPanel extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(height: 20),
+                    // Un agent provisionne automatiquement ne connait que son matricule :
+                    // le serveur accepte les deux formes, le champ ne doit donc plus
+                    // imposer un format email.
                     TextFormField(
                       controller: emailController,
-                      keyboardType: TextInputType.emailAddress,
+                      keyboardType: TextInputType.text,
                       textInputAction: TextInputAction.next,
+                      autocorrect: false,
                       decoration: const InputDecoration(
-                        labelText: 'Email',
-                        prefixIcon: Icon(Icons.mail_outline),
+                        labelText: 'Matricule ou email',
+                        prefixIcon: Icon(Icons.badge_outlined),
                       ),
                       validator: (value) {
                         final trimmed = value?.trim() ?? '';
                         if (trimmed.isEmpty) {
-                          return 'Email requis';
-                        }
-                        if (!trimmed.contains('@')) {
-                          return 'Email invalide';
+                          return 'Matricule ou email requis';
                         }
                         return null;
                       },

@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { RouterLink } from '@angular/router';
 
+import { I18nService } from '../../core/i18n/i18n.service';
 import { ApiService } from '../../core/services/api.service';
 import { CommuneContextService } from '../../core/services/commune-context.service';
 import { DashboardSummary, Paginated } from '../../shared/api-types';
@@ -102,8 +103,11 @@ interface StatusBar {
               </svg>
             </span>
             <p class="kpi-label mt-3">Encaissé (validé)</p>
-            <strong class="kpi-value mt-1 block" [title]="fcfa(payments()['total_collected_fcfa'])">{{ fcfaShort(payments()['total_collected_fcfa']) }}</strong>
-            <p class="mt-2 text-xs text-[var(--text-muted)]" [title]="fcfa(payments()['pending_fcfa'])">{{ fcfaShort(payments()['pending_fcfa']) }} en attente</p>
+            <strong class="kpi-value mt-1 block">{{ fcfa(payments()['total_collected_fcfa']) }}</strong>
+            <p class="mt-2 text-xs text-[var(--text-muted)]">{{ fcfa(payments()['pending_total_fcfa']) }} en attente</p>
+            @if (payments()['pending_penalty_fcfa']) {
+              <p class="mt-1 text-xs font-semibold text-[var(--red-ink)]">dont {{ fcfa(payments()['pending_penalty_fcfa']) }} de pénalités</p>
+            }
           </article>
 
           <article class="kpi-card">
@@ -113,8 +117,11 @@ interface StatusBar {
               </svg>
             </span>
             <p class="kpi-label mt-3">PV en attente de paiement</p>
-            <strong class="kpi-value mt-1 block">{{ count(pvs()['en_attente']) }}</strong>
-            <p class="mt-2 text-xs font-semibold text-[var(--red-ink)]">{{ count(pvs()['en_retard']) }} en retard</p>
+            <strong class="kpi-value mt-1 block">{{ count(payments()['pending_count']) }}</strong>
+            <!-- « en retard » dérivé des échéances (vue pv_amounts_due), et non de la
+                 colonne pvs.status qui n'est jamais basculée automatiquement : c'est ce
+                 qui affichait « 0 en retard » ici pendant que la caisse en montrait 1. -->
+            <p class="mt-2 text-xs font-semibold text-[var(--red-ink)]" title="Échéance de paiement dépassée (calculée sur la date d'échéance, pas sur le statut administratif du PV).">{{ count(payments()['pending_late_count']) }} en retard</p>
           </article>
 
           <article class="kpi-card">
@@ -133,7 +140,7 @@ interface StatusBar {
         <div class="grid gap-4 lg:grid-cols-[1.6fr_1fr]">
           <section class="section-card">
             <div class="section-head">
-              <h3>Procès-verbaux par statut</h3>
+              <h3 title="Répartition par statut administratif du PV. Le retard de paiement se lit sur l'indicateur « PV en attente de paiement ».">Procès-verbaux par statut</h3>
               <span class="num text-sm font-semibold text-[var(--text-muted)]">{{ count(pvs()['total']) }} total</span>
             </div>
             <div class="px-5 pb-6">
@@ -259,6 +266,7 @@ interface StatusBar {
 export class DashboardPage {
   private readonly api = inject(ApiService);
   private readonly commune = inject(CommuneContextService);
+  private readonly i18n = inject(I18nService);
 
   protected readonly loading = signal(true);
   protected readonly summary = signal<DashboardSummary | null>(null);
@@ -363,19 +371,13 @@ export class DashboardPage {
     return Number(value ?? 0).toLocaleString('fr-FR');
   }
 
+  /**
+   * Montant EXACT — délègue au formateur canonique de l'application.
+   * `fcfaShort()` (abréviation K/M) a été supprimé : il arrondissait au millier le plus
+   * proche, masquant les centaines (8 500 F affiché « 9 K », 119 400 F affiché « 119 K »).
+   */
   protected fcfa(value: number | null | undefined): string {
-    return `${Number(value ?? 0).toLocaleString('fr-FR')} FCFA`;
-  }
-
-  protected fcfaShort(value: number | undefined): string {
-    const amount = Number(value ?? 0);
-    if (amount >= 1_000_000) {
-      return `${(amount / 1_000_000).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} M FCFA`;
-    }
-    if (amount >= 1_000) {
-      return `${(amount / 1_000).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} K FCFA`;
-    }
-    return `${amount.toLocaleString('fr-FR')} FCFA`;
+    return this.i18n.formatMoneyFcfa(value);
   }
 
   protected date(value: string | null): string {

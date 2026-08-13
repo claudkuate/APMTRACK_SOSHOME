@@ -50,11 +50,142 @@ interface StatusContext {
   current: string;
 }
 
+/** Ramène les deux formes de rapport d'import à un modèle d'affichage unique. */
+function normalizeImportResult(raw: RawImportResult): ImportResultView {
+  const levels: Array<[string, LevelCounts | undefined]> = [
+    ['Régions', raw.regions],
+    ['Départements', raw.departements],
+    ['Arrondissements', raw.arrondissements],
+    ['Quartiers', raw.quartiers],
+  ];
+  const details = levels
+    .filter(([, counts]) => counts !== undefined)
+    .map(
+      ([label, counts]) =>
+        `${label} : ${counts!.created} créé(s), ${counts!.updated} mis à jour, ${counts!.matched} existant(s)`,
+    );
+  if (raw.communes_linked !== undefined) {
+    details.push(`Communes rattachées : ${raw.communes_linked}`);
+  }
+
+  const created =
+    raw.created ??
+    levels.reduce((sum, [, counts]) => sum + (counts?.created ?? 0), 0);
+  const updated =
+    raw.updated ??
+    levels.reduce((sum, [, counts]) => sum + (counts?.updated ?? 0), 0);
+
+  return {
+    created,
+    updated,
+    skipped: raw.skipped ?? 0,
+    restored: raw.restored ?? 0,
+    transferred: raw.transferred ?? 0,
+    error_count: raw.error_count ?? raw.errors_total ?? 0,
+    errors: raw.errors ?? [],
+    errors_truncated: raw.errors_truncated ?? false,
+    dry_run: raw.dry_run ?? false,
+    communes: raw.communes ?? [],
+    details,
+  };
+}
+
 interface AgentsDialogContext {
   patrouilleId: string;
   communeId: string | null;
   nom: string;
   status: string;
+}
+
+interface ImportRowError {
+  line: number;
+  message: string;
+}
+
+interface ImportCommuneSummary {
+  commune_id: string;
+  code: string;
+  nom: string;
+  created: number;
+  updated: number;
+  restored: number;
+}
+
+/**
+ * Rapport d'import normalisé.
+ *
+ * Les deux imports ne renvoient pas la même forme — celui des agents compte des
+ * agents (`created`/`updated`/`restored`), celui du découpage compte par niveau
+ * (`regions`/`departements`/…). On les ramène ici à un modèle d'affichage commun
+ * plutôt que de dupliquer le bloc de rapport dans le gabarit.
+ */
+interface ImportResultView {
+  created: number;
+  updated: number;
+  skipped: number;
+  restored: number;
+  transferred: number;
+  error_count: number;
+  errors: ImportRowError[];
+  errors_truncated: boolean;
+  dry_run: boolean;
+  communes: ImportCommuneSummary[];
+  /** Lignes de détail supplémentaires (ventilation par niveau du découpage). */
+  details: string[];
+}
+
+interface LevelCounts {
+  created: number;
+  updated: number;
+  matched: number;
+}
+
+/** Union des deux charges utiles renvoyées par l'API. */
+interface RawImportResult {
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  restored?: number;
+  transferred?: number;
+  error_count?: number;
+  errors_total?: number;
+  errors?: ImportRowError[];
+  errors_truncated?: boolean;
+  dry_run?: boolean;
+  communes?: ImportCommuneSummary[];
+  accounts?: ProvisionedAccount[];
+  regions?: LevelCounts;
+  departements?: LevelCounts;
+  arrondissements?: LevelCounts;
+  quartiers?: LevelCounts;
+  communes_linked?: number;
+}
+
+/**
+ * Compte mobile créé automatiquement avec un agent.
+ *
+ * Le mot de passe temporaire n'est restitué qu'une fois par l'API : il n'est stocké nulle
+ * part côté client et disparaît dès que le dialogue est fermé — d'où le téléchargement CSV.
+ */
+interface ProvisionedAccount {
+  user_id: string;
+  matricule: string;
+  full_name: string;
+  email: string;
+  temp_password: string;
+}
+
+/** Extrait les comptes provisionnés d'une réponse d'API, en tolérant leur absence. */
+function readAccounts(payload: unknown): ProvisionedAccount[] {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  const raw = (payload as Record<string, unknown>)['account'] ?? (payload as Record<string, unknown>)['accounts'];
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return list.filter(
+    (item): item is ProvisionedAccount =>
+      !!item && typeof item === 'object' && typeof (item as ProvisionedAccount).temp_password === 'string',
+  );
 }
 
 @Component({
@@ -85,7 +216,7 @@ interface AgentsDialogContext {
                 {{ 'Exporter' | auto }}
               </button>
             }
-            @if (cfg.key === 'agents' && canMutate(cfg)) {
+            @if (cfg.csvImport && canMutate(cfg)) {
               <button type="button" class="btn-secondary" (click)="openImportDialog()">
                 {{ 'Importer CSV' | auto }}
               </button>
@@ -238,7 +369,7 @@ interface AgentsDialogContext {
           </div>
         }
 
-        @if (showImportDialog() && cfg.key === 'agents' && canMutate(cfg)) {
+        @if (showImportDialog() && cfg.csvImport && canMutate(cfg)) {
           <div
             class="modal-backdrop"
             role="dialog"
@@ -253,7 +384,7 @@ interface AgentsDialogContext {
                     <p class="text-xs font-bold uppercase text-[var(--text-muted)]">
                       Reprise de donnees
                     </p>
-                    <h3 class="font-black">Import CSV agents</h3>
+                    <h3 class="font-black">{{ cfg.csvImport?.title }}</h3>
                   </div>
                   <button type="button" class="btn-ghost" (click)="closeImportDialog()">
                     Fermer
@@ -265,30 +396,141 @@ interface AgentsDialogContext {
                 </p>
               </div>
               <div class="mt-4 grid gap-3 md:grid-cols-[280px_1fr]">
+                @if (cfg.csvImport?.communeScoped && canChooseImportCommune()) {
+                  <div class="field">
+                    <label>{{ 'Commune par defaut (optionnel)' | auto }}</label>
+                    <select [(ngModel)]="importCommuneId">
+                      <option value="">{{ 'Aucune — utiliser la colonne code_commune' | auto }}</option>
+                      @for (option of optionsFor('commune_id'); track option.id) {
+                        <option [value]="option.id">{{ optionLabel(option) }}</option>
+                      }
+                    </select>
+                    <p class="mt-1 text-xs text-[var(--text-muted)]">
+                      {{ 'Utilisee uniquement pour les lignes sans code commune.' | auto }}
+                    </p>
+                  </div>
+                }
                 <div class="field">
-                  <label>Commune</label>
-                  <select [(ngModel)]="importCommuneId">
-                    <option value="">Choisir...</option>
-                    @for (option of optionsFor('commune_id'); track option.id) {
-                      <option [value]="option.id">{{ optionLabel(option) }}</option>
-                    }
-                  </select>
-                </div>
-                <div class="field">
-                  <label>CSV</label>
-                  <textarea [(ngModel)]="importCsv"></textarea>
+                  <label>{{ 'Fichier CSV' | auto }}</label>
+                  <input type="file" accept=".csv,text/csv" (change)="onImportFileSelected($event)" />
+                  @if (importFileName()) {
+                    <p class="mt-1 text-xs font-semibold">{{ importFileName() }}</p>
+                  }
+                  <label class="mt-3">{{ 'ou coller le contenu' | auto }}</label>
+                  <textarea [(ngModel)]="importCsv" rows="6"></textarea>
                 </div>
               </div>
-              @if (importResult()) {
-                <p class="mt-3 text-sm font-semibold text-[var(--text-muted)]">
-                  {{ importResult() }}
-                </p>
+              @if (importError()) {
+                <p class="mt-3 text-sm font-semibold text-[var(--red-ink)]">{{ importError() }}</p>
+              }
+              @if (importSummary(); as res) {
+                <div class="mt-3 rounded-xl bg-[var(--surface-muted)] p-3 text-sm">
+                  <p class="font-semibold">
+                    @if (res.dry_run) { {{ 'Simulation — rien n a ete enregistre.' | auto }} }
+                    {{ res.created }} {{ 'cree(s)' | auto }} · {{ res.updated }} {{ 'mis a jour' | auto }}
+                    · {{ res.restored }} {{ 'restaure(s)' | auto }} · {{ res.skipped }} {{ 'ignore(s)' | auto }}
+                    @if (res.transferred) { · {{ res.transferred }} {{ 'transfere(s)' | auto }} }
+                  </p>
+                  @if (res.details.length) {
+                    <ul class="mt-2 grid gap-1 text-xs">
+                      @for (line of res.details; track line) {
+                        <li>{{ line }}</li>
+                      }
+                    </ul>
+                  }
+                  @if (res.communes.length) {
+                    <ul class="mt-2 grid gap-1 text-xs">
+                      @for (row of res.communes; track row.commune_id) {
+                        <li>{{ row.code }} — {{ row.nom }} : {{ row.created }} {{ 'cree(s)' | auto }}, {{ row.updated }} {{ 'mis a jour' | auto }}</li>
+                      }
+                    </ul>
+                  }
+                  @if (res.errors.length) {
+                    <div class="mt-3 max-h-56 overflow-auto rounded-lg bg-[var(--tint-red)] p-2 text-[var(--red-ink)]">
+                      <p class="text-xs font-bold">{{ res.error_count }} {{ 'ligne(s) en erreur' | auto }}</p>
+                      <ul class="mt-1 grid gap-1 text-xs">
+                        @for (err of res.errors; track err.line) {
+                          <li>{{ 'Ligne' | auto }} {{ err.line }} : {{ err.message }}</li>
+                        }
+                      </ul>
+                      @if (res.errors_truncated) {
+                        <p class="mt-1 text-xs">{{ 'Liste tronquee.' | auto }}</p>
+                      }
+                    </div>
+                  }
+                </div>
               }
               <div class="mt-5 flex flex-wrap justify-end gap-2">
-                <button type="button" class="btn-secondary" (click)="closeImportDialog()">
-                  Annuler
+                <button type="button" class="btn-ghost" (click)="downloadImportTemplate()">
+                  {{ 'Telecharger le modele' | auto }}
                 </button>
-                <button type="button" class="btn-primary" (click)="importAgents()">Importer</button>
+                <button type="button" class="btn-secondary" (click)="closeImportDialog()">
+                  {{ 'Annuler' | auto }}
+                </button>
+                <button type="button" class="btn-secondary" [disabled]="importing()" (click)="importAgents(true)">
+                  {{ 'Verifier' | auto }}
+                </button>
+                <button type="button" class="btn-primary" [disabled]="importing()" (click)="importAgents(false)">
+                  {{ 'Importer' | auto }}
+                </button>
+              </div>
+            </div>
+          </div>
+        }
+
+        @if (credentials().length) {
+          <div
+            class="modal-backdrop"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Identifiants agents"
+            (keydown.escape)="closeCredentials()"
+          >
+            <div class="modal-panel modal-panel--wide" (click)="$event.stopPropagation()">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p class="text-xs font-bold uppercase text-[var(--text-muted)]">
+                    {{ 'Comptes mobiles crees' | auto }}
+                  </p>
+                  <h3 class="font-black">{{ 'Identifiants de connexion' | auto }}</h3>
+                </div>
+                <button type="button" class="btn-ghost" (click)="closeCredentials()">
+                  {{ 'Fermer' | auto }}
+                </button>
+              </div>
+              <p class="mt-2 text-sm text-[var(--text-muted)]">
+                {{
+                  "L'agent se connecte avec son matricule et ce mot de passe temporaire, qu'il devra remplacer a la premiere connexion. Ces mots de passe ne sont affiches qu'une seule fois : telechargez-les avant de fermer."
+                    | auto
+                }}
+              </p>
+              <div class="mt-4 max-h-80 overflow-auto rounded-xl bg-[var(--surface-muted)] p-3">
+                <table class="w-full text-sm">
+                  <thead>
+                    <tr class="text-left text-xs uppercase text-[var(--text-muted)]">
+                      <th class="p-2">{{ 'Matricule' | auto }}</th>
+                      <th class="p-2">{{ 'Agent' | auto }}</th>
+                      <th class="p-2">{{ 'Mot de passe temporaire' | auto }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of credentials(); track row.user_id) {
+                      <tr class="border-t border-[var(--border)]">
+                        <td class="p-2 font-semibold">{{ row.matricule }}</td>
+                        <td class="p-2">{{ row.full_name }}</td>
+                        <td class="p-2 font-mono font-bold">{{ row.temp_password }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+              <div class="mt-5 flex flex-wrap justify-end gap-2">
+                <button type="button" class="btn-secondary" (click)="downloadCredentials()">
+                  {{ 'Telecharger (CSV)' | auto }}
+                </button>
+                <button type="button" class="btn-primary" (click)="closeCredentials()">
+                  {{ 'J ai note' | auto }}
+                </button>
               </div>
             </div>
           </div>
@@ -710,6 +952,8 @@ export class ResourcePage implements OnInit, OnDestroy {
   /** Champs du formulaire courant (pour l'affichage conditionnel `visibleWhen`). */
   private formFields: ResourceField[] = [];
   private conditionalSub?: Subscription;
+  /** Une souscription par champ en cascade, pour purger l'enfant quand le parent change. */
+  private cascadeSubs: Subscription[] = [];
 
   protected readonly config = signal<ResourceConfig | null>(null);
   protected readonly rows = signal<Row[]>([]);
@@ -725,7 +969,13 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected readonly selectedRow = signal<Row | null>(null);
   protected readonly pendingAction = signal<PendingAction | null>(null);
   protected readonly importResult = signal<string | null>(null);
+  protected readonly importSummary = signal<ImportResultView | null>(null);
+  protected readonly importError = signal<string | null>(null);
+  protected readonly importFileName = signal<string | null>(null);
+  protected readonly importing = signal(false);
   protected readonly rowMenuKey = signal<string | null>(null);
+  /** Identifiants générés à la création d'agents — affichés une seule fois. */
+  protected readonly credentials = signal<ProvisionedAccount[]>([]);
   protected readonly menuPos = signal<{ top: number; left: number } | null>(null);
   protected readonly formMode = signal<'create' | 'edit'>('create');
   protected readonly editingId = signal<string | null>(null);
@@ -739,7 +989,8 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected sortDirection: 'asc' | 'desc' = 'asc';
   protected filterValues: Record<string, string> = {};
   protected importCommuneId = '';
-  protected importCsv = 'matricule,full_name,date_prise_fonction,telephone,email\n';
+  /** Format minimal du fichier national du client (les autres colonnes sont optionnelles). */
+  protected importCsv = 'matricule,nom_complet,code_commune\n';
   protected form = new FormGroup<Record<string, FormControl<unknown>>>({});
   protected statusForm = new FormGroup<Record<string, FormControl<unknown>>>({});
 
@@ -761,6 +1012,7 @@ export class ResourcePage implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.subscription?.unsubscribe();
     this.conditionalSub?.unsubscribe();
+    this.unsubscribeCascade();
     this.clearAvatars();
   }
 
@@ -835,6 +1087,62 @@ export class ResourcePage implements OnInit, OnDestroy {
 
   protected closeImportDialog(): void {
     this.showImportDialog.set(false);
+    this.importSummary.set(null);
+    this.importError.set(null);
+    this.importFileName.set(null);
+    this.importing.set(false);
+  }
+
+  /**
+   * Un ADMIN_COMMUNE n'a qu'une commune : lui proposer un sélecteur n'aurait pas de
+   * sens, et sa commune sert automatiquement de valeur par défaut côté serveur.
+   */
+  protected canChooseImportCommune(): boolean {
+    return this.auth.hasAnyRole(['SUPER_ADMIN']);
+  }
+
+  protected onImportFileSelected(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    // Réinitialise pour permettre de re-sélectionner le même fichier après correction.
+    input.value = '';
+    if (!file) {
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      this.importError.set('Fichier trop volumineux (max 8 Mo).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      this.importCsv = String(reader.result ?? '');
+      this.importFileName.set(file.name);
+      this.importError.set(null);
+      this.importSummary.set(null);
+    };
+    reader.onerror = () => this.importError.set('Lecture du fichier impossible.');
+    // Le BOM éventuel est retiré côté serveur.
+    reader.readAsText(file, 'utf-8');
+  }
+
+  /**
+   * Gabarit CSV. Quand l'API en sert un (découpage administratif), on le télécharge
+   * pour qu'il ne puisse pas diverger du parseur ; sinon on génère celui des agents.
+   */
+  protected downloadImportTemplate(): void {
+    const cfg = this.config();
+    const templatePath = cfg?.csvImport?.templatePath;
+    if (templatePath) {
+      this.api.openDownload(templatePath, 'modele-import.csv', undefined, (err) =>
+        this.importError.set(describeHttpError(err, 'Telechargement du modele')),
+      );
+      return;
+    }
+    saveCsv('modele-import-agents.csv', [
+      ['matricule', 'nom_complet', 'code_commune'],
+      ['APM-YDE1-001', 'NGONO Marie', 'YDE1'],
+      ['APM-DLA1-002', 'FOTSO Pierre', 'DLA1'],
+    ]);
   }
 
   protected load(): void {
@@ -875,11 +1183,17 @@ export class ResourcePage implements OnInit, OnDestroy {
       ? this.api.patch<Row>(`${cfg.endpoint}/${this.editingId()}`, payload)
       : this.api.post<Row>(cfg.endpoint, payload);
     request.subscribe({
-      next: () => {
+      next: (created) => {
         this.saving.set(false);
         this.closeForm();
         this.message.set(editing ? 'Modifications enregistrees.' : 'Enregistrement effectue.');
         this.buildForm(cfg.createFields ?? []);
+        // Un agent cree recoit son compte mobile : le mot de passe temporaire n'est
+        // restitue que par cette reponse, il faut donc le presenter tout de suite.
+        const accounts = editing ? [] : readAccounts(created);
+        if (accounts.length) {
+          this.credentials.set(accounts);
+        }
         this.load();
       },
       error: (err: unknown) => {
@@ -889,27 +1203,69 @@ export class ResourcePage implements OnInit, OnDestroy {
     });
   }
 
-  protected importAgents(): void {
-    if (!this.importCommuneId.trim() || !this.importCsv.trim()) {
-      this.importResult.set('Commune et contenu CSV sont requis.');
+  /**
+   * La commune n'est plus obligatoire : elle est résolue par ligne côté serveur
+   * (`code_commune` → commune par défaut → commune de l'appelant). Le rapport d'erreurs
+   * est affiché au lieu d'être ignoré, et le dialogue reste ouvert en cas d'échec
+   * partiel pour que l'opérateur puisse corriger son fichier.
+   */
+  protected importAgents(dryRun = false): void {
+    const cfg = this.config();
+    if (!cfg?.csvImport) {
       return;
     }
+    if (!this.importCsv.trim()) {
+      this.importError.set('Contenu CSV requis.');
+      return;
+    }
+    this.importing.set(true);
+    this.importError.set(null);
     this.api
-      .postText<{
-        created: number;
-        updated: number;
-        skipped: number;
-      }>('/api/v1/agents/import-csv', this.importCsv, { commune_id: this.importCommuneId.trim() })
+      .postText<RawImportResult>(cfg.csvImport.endpoint, this.importCsv, {
+        commune_id: cfg.csvImport.communeScoped
+          ? this.importCommuneId.trim() || undefined
+          : undefined,
+        dry_run: dryRun || undefined,
+      })
       .subscribe({
-        next: (result) => {
-          this.showImportDialog.set(false);
-          this.message.set(
-            `${result.created} cree(s), ${result.updated} mis a jour, ${result.skipped} ignore(s).`,
-          );
-          this.load();
+        next: (raw) => {
+          this.importing.set(false);
+          const result = normalizeImportResult(raw);
+          this.importSummary.set(result);
+          if (!result.dry_run) {
+            this.load();
+            const accounts = readAccounts(raw);
+            if (accounts.length) {
+              this.credentials.set(accounts);
+            }
+          }
+          if (result.error_count === 0 && !result.dry_run) {
+            this.closeImportDialog();
+            this.message.set(
+              `${result.created} cree(s), ${result.updated} mis a jour, ${result.skipped} ignore(s).`,
+            );
+          }
         },
-        error: (err: unknown) => this.importResult.set(describeHttpError(err, 'Import')),
+        error: (err: unknown) => {
+          this.importing.set(false);
+          this.importError.set(describeHttpError(err, 'Import'));
+        },
       });
+  }
+
+  protected closeCredentials(): void {
+    this.credentials.set([]);
+  }
+
+  protected downloadCredentials(): void {
+    const rows = this.credentials();
+    if (!rows.length) {
+      return;
+    }
+    saveCsv('identifiants-agents.csv', [
+      ['Matricule', 'Nom complet', 'Identifiant technique', 'Mot de passe temporaire'],
+      ...rows.map((row) => [row.matricule, row.full_name, row.email, row.temp_password]),
+    ]);
   }
 
   protected runAction(action: ResourceAction, row: Row, event?: MouseEvent): void {
@@ -1158,7 +1514,9 @@ export class ResourcePage implements OnInit, OnDestroy {
   /** Escape closes the top-most open overlay (most transient first). */
   @HostListener('document:keydown.escape')
   protected dismissOnEscape(): void {
-    if (this.agentsDialog()) {
+    if (this.credentials().length) {
+      this.closeCredentials();
+    } else if (this.agentsDialog()) {
       this.agentsDialog.set(null);
     } else if (this.statusContext()) {
       this.statusContext.set(null);
@@ -1464,7 +1822,65 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.conditionalSub?.unsubscribe();
     // Réévalue l'affichage conditionnel (visibleWhen) à chaque changement de valeur.
     this.conditionalSub = this.form.valueChanges.subscribe(() => this.applyConditionalState());
+    this.watchCascadeParents(fields);
     this.applyConditionalState();
+  }
+
+  private unsubscribeCascade(): void {
+    for (const sub of this.cascadeSubs) {
+      sub.unsubscribe();
+    }
+    this.cascadeSubs = [];
+  }
+
+  private watchCascadeParents(fields: ResourceField[]): void {
+    this.unsubscribeCascade();
+    for (const field of fields) {
+      if (!field.dependsOn) {
+        continue;
+      }
+      const parent = this.form.get(field.dependsOn);
+      if (!parent) {
+        continue;
+      }
+      this.cascadeSubs.push(parent.valueChanges.subscribe(() => this.pruneCascadeChild(field)));
+    }
+  }
+
+  /**
+   * Quand un parent change (Région → Département → Commune), la valeur de l'enfant
+   * n'appartient plus forcément au nouveau parent. Sans ce nettoyage, l'ancienne valeur
+   * restait dans le contrôle — invisible dans la liste filtrée, donc indétectable pour
+   * l'utilisateur — et partait quand même dans le payload : on enregistrait un couple
+   * Région/Département incohérent. Purger l'enfant propage la remise à zéro en chaîne,
+   * puisque chaque niveau écoute son propre parent.
+   */
+  private pruneCascadeChild(field: ResourceField): void {
+    const control = this.form.get(field.key);
+    if (!control) {
+      return;
+    }
+    // Options pas encore chargées : ne rien purger, sinon la valeur d'une édition en
+    // cours de rendu serait effacée avant l'arrivée du référentiel.
+    if (this.optionsFor(field.key).length === 0) {
+      return;
+    }
+    const allowed = this.optionsForField(field);
+    const value = control.value;
+    if (Array.isArray(value)) {
+      const allowedIds = new Set(allowed.map((option) => option.id));
+      const kept = value.filter((item) => allowedIds.has(String(item)));
+      if (kept.length !== value.length) {
+        control.setValue(kept);
+      }
+      return;
+    }
+    if (value === null || value === undefined || value === '') {
+      return;
+    }
+    if (!allowed.some((option) => option.id === String(value))) {
+      control.setValue('');
+    }
   }
 
   /**
@@ -1740,6 +2156,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.pendingAction.set(null);
     this.statusContext.set(null);
     this.agentsDialog.set(null);
+    this.credentials.set([]);
     this.formMode.set('create');
     this.editingId.set(null);
     this.error.set(null);

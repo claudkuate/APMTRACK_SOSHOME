@@ -52,9 +52,16 @@ export class I18nService {
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString(this.locale());
   }
 
-  /** Formate un montant entier FCFA selon la langue active. */
+  /**
+   * Formate un montant entier FCFA selon la langue active.
+   *
+   * Toujours le montant EXACT : l'ancienne abréviation « K » du tableau de bord
+   * arrondissait au millier le plus proche, si bien qu'une pénalité de 8 500 F
+   * s'affichait « 9 K ». Sur de l'argent public, aucun arrondi d'affichage.
+   */
   formatMoneyFcfa(value: unknown): string {
-    return `${Number(value).toLocaleString(this.locale())} FCFA`;
+    const amount = Number(value ?? 0);
+    return `${(Number.isFinite(amount) ? amount : 0).toLocaleString(this.locale())} FCFA`;
   }
 
   /** Rend un booléen sous forme Oui/Non (ou Yes/No). */

@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 
+import { I18nService } from '../../core/i18n/i18n.service';
 import { ApiService } from '../../core/services/api.service';
 import { CommuneContextService } from '../../core/services/commune-context.service';
 import { Paginated } from '../../shared/api-types';
@@ -12,10 +13,28 @@ interface PendingPv {
   pv_number: string;
   commune_id: string;
   amount_due_fcfa: number | null;
+  amount_base_fcfa: number;
   amount_penalty_fcfa: number;
   amount_total_fcfa: number | null;
+  /** Retard calculé par le serveur sur l'échéance, pas déduit de la pénalité. */
+  is_late: boolean;
   due_date: string;
   created_at: string;
+}
+
+/** Agrégats serveur de la caisse (`GET /api/v1/payments/summary`). */
+interface CaisseSummary {
+  day: string;
+  timezone: string;
+  receipts_today: number;
+  collected_today_fcfa: number;
+  collected_today_base_fcfa: number;
+  collected_today_penalty_fcfa: number;
+  pending_count: number;
+  pending_late_count: number;
+  pending_base_fcfa: number;
+  pending_penalty_fcfa: number;
+  pending_total_fcfa: number;
 }
 
 interface Payment {
@@ -107,16 +126,16 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
               </div>
 
               <div class="my-4 rounded-xl bg-[var(--surface-muted)] p-4">
+                <!-- Base et pénalité TOUJOURS affichées, même à zéro : chaque commune
+                     doit pouvoir lire la ventilation de ce qu'elle encaisse. -->
                 <div class="money-row">
-                  <span class="text-[var(--text-body)]">Montant initial</span>
-                  <span class="num font-bold">{{ fcfa(pv.amount_due_fcfa) }}</span>
+                  <span class="text-[var(--text-body)]">Montant de base</span>
+                  <span class="num font-bold">{{ fcfa(pv.amount_base_fcfa) }}</span>
                 </div>
-                @if (pv.amount_penalty_fcfa > 0) {
-                  <div class="money-row text-[var(--red-ink)]">
-                    <span>Pénalité de retard — échéance {{ date(pv.due_date) }}</span>
-                    <span class="num font-bold">{{ fcfa(pv.amount_penalty_fcfa) }}</span>
-                  </div>
-                }
+                <div [class]="pv.amount_penalty_fcfa > 0 ? 'money-row text-[var(--red-ink)]' : 'money-row'">
+                  <span>Pénalité de retard — échéance {{ date(pv.due_date) }}</span>
+                  <span class="num font-bold">{{ fcfa(pv.amount_penalty_fcfa) }}</span>
+                </div>
                 <div class="money-row is-total">
                   <span class="font-bold">Total à encaisser</span>
                   <span class="num text-2xl font-bold text-[var(--cameroon-green-strong)]">{{ fcfa(pv.amount_total_fcfa) }}</span>
@@ -223,13 +242,16 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
             <div class="mt-4 grid gap-3 sm:grid-cols-2">
               <div class="rounded-xl bg-[var(--cameroon-green)] p-4 text-white">
                 <p class="text-xs font-semibold opacity-90">Total encaissé</p>
-                <strong class="num mt-1 block text-2xl font-bold">{{ fcfaShort(totalToday()) }}</strong>
-                <p class="mt-1 text-xs opacity-90">{{ countToday() }} reçus</p>
+                <strong class="num mt-1 block text-2xl font-bold">{{ fcfa(summary()?.collected_today_fcfa) }}</strong>
+                <p class="mt-1 text-xs opacity-90">{{ summary()?.receipts_today ?? 0 }} reçus</p>
+                @if (summary()?.collected_today_penalty_fcfa) {
+                  <p class="mt-1 text-xs opacity-90">dont {{ fcfa(summary()?.collected_today_penalty_fcfa) }} de pénalités</p>
+                }
               </div>
               <div class="rounded-xl bg-[var(--tint-red)] p-4 text-[var(--red-ink)]">
                 <p class="text-xs font-semibold">Pénalités en attente</p>
-                <strong class="num mt-1 block text-2xl font-bold">{{ fcfaShort(pendingPenalty()) }}</strong>
-                <p class="mt-1 text-xs">{{ pendingLateCount() }} PV en retard</p>
+                <strong class="num mt-1 block text-2xl font-bold">{{ fcfa(summary()?.pending_penalty_fcfa) }}</strong>
+                <p class="mt-1 text-xs">{{ summary()?.pending_late_count ?? 0 }} PV en retard</p>
               </div>
             </div>
           </section>
@@ -266,6 +288,7 @@ type PayMode = 'ESPECES' | 'MOMO' | 'OM';
 export class PaymentsPage {
   private readonly api = inject(ApiService);
   private readonly commune = inject(CommuneContextService);
+  private readonly i18n = inject(I18nService);
 
   protected readonly pending = signal<PendingPv[]>([]);
   protected readonly payments = signal<Payment[]>([]);
@@ -286,16 +309,15 @@ export class PaymentsPage {
     { value: 'OM', label: 'Orange Money', enabled: false },
   ];
 
-  protected readonly totalToday = computed(() =>
-    this.todayPayments().reduce((sum, payment) => sum + Number(payment.amount_paid_fcfa ?? 0), 0),
-  );
-  protected readonly countToday = computed(() => this.todayPayments().length);
-  protected readonly pendingPenalty = computed(() =>
-    this.pending().reduce((sum, pv) => sum + Number(pv.amount_penalty_fcfa ?? 0), 0),
-  );
-  protected readonly pendingLateCount = computed(
-    () => this.pending().filter((pv) => Number(pv.amount_penalty_fcfa ?? 0) > 0).length,
-  );
+  /**
+   * Agrégats de caisse servis par l'API.
+   *
+   * Ils étaient auparavant calculés dans le navigateur sur les 50 dernières lignes
+   * chargées et sans filtrer `payment.status` : au-delà de 50 paiements la recette du
+   * jour était sous-évaluée, un paiement annulé y entrait, et le total divergeait de
+   * celui du tableau de bord.
+   */
+  protected readonly summary = signal<CaisseSummary | null>(null);
 
   constructor() {
     // Recharge quand la commune active change (cf. carte-map.page.ts).
@@ -324,9 +346,14 @@ export class PaymentsPage {
       },
       error: (err: unknown) => this.notify('error', describeHttpError(err, 'Chargement des PV en attente')),
     });
-    this.api.page<Payment>('/api/v1/payments', { page_size: 50, ...scope }).subscribe({
+    // `status: 'PAYE'` — « Encaissements récents » ne doit lister que des reçus réels.
+    this.api.page<Payment>('/api/v1/payments', { page_size: 50, status: 'PAYE', ...scope }).subscribe({
       next: (response: Paginated<Payment>) => this.payments.set(response.items),
       error: (err: unknown) => this.notify('error', describeHttpError(err, "Chargement de l'historique")),
+    });
+    this.api.get<CaisseSummary>('/api/v1/payments/summary', scope).subscribe({
+      next: (summary) => this.summary.set(summary),
+      error: () => this.summary.set(null),
     });
   }
 
@@ -340,8 +367,12 @@ export class PaymentsPage {
     this.selected.set(null);
   }
 
+  /**
+   * Retard servi par le serveur : un PV échu dont l'infraction porte un taux nul est
+   * bien en retard sans pénalité, cas que l'ancien test `penalite > 0` manquait.
+   */
   protected isLate(pv: PendingPv): boolean {
-    return Number(pv.amount_penalty_fcfa ?? 0) > 0;
+    return pv.is_late;
   }
 
   protected confirmValidate(): void {
@@ -393,11 +424,6 @@ export class PaymentsPage {
     return this.pending().filter((pv) => JSON.stringify(pv).toLowerCase().includes(query));
   }
 
-  private todayPayments(): Payment[] {
-    const today = new Date().toDateString();
-    return this.payments().filter((payment) => payment.paid_at && new Date(payment.paid_at).toDateString() === today);
-  }
-
   protected receipt(payment: Payment): void {
     this.api.openDownload(
       `/api/v1/payments/${payment.id}/receipt`,
@@ -427,19 +453,9 @@ export class PaymentsPage {
     ]);
   }
 
+  /** Montant EXACT — cf. suppression de `fcfaShort()` (arrondi au millier). */
   protected fcfa(value: number | null | undefined): string {
-    return `${Number(value ?? 0).toLocaleString('fr-FR')} FCFA`;
-  }
-
-  protected fcfaShort(value: number | null | undefined): string {
-    const amount = Number(value ?? 0);
-    if (amount >= 1_000_000) {
-      return `${(amount / 1_000_000).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} M`;
-    }
-    if (amount >= 1_000) {
-      return `${(amount / 1_000).toLocaleString('fr-FR', { maximumFractionDigits: 0 })} K`;
-    }
-    return amount.toLocaleString('fr-FR');
+    return this.i18n.formatMoneyFcfa(value);
   }
 
   protected date(value: string | null): string {

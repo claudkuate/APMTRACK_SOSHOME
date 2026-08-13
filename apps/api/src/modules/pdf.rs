@@ -7,6 +7,7 @@ use sqlx::Row;
 use std::io::BufWriter;
 
 use crate::errors::ApiError;
+use crate::helpers::format_fcfa;
 use crate::modules::payments::PaymentResponse;
 use crate::modules::pvs::PvResponse;
 use sqlx::PgPool;
@@ -329,31 +330,37 @@ fn build_receipt_pdf(
         &font_regular,
     );
 
+    // Montants lus sur les colonnes entières `_fcfa` (source comptable) plutôt que sur
+    // les NUMERIC hérités, et ligne « Pénalités » TOUJOURS imprimée, même à zéro :
+    // le reçu doit prouver au contrevenant la ventilation base / pénalité / total.
+    let due_fcfa = payment.amount_due_fcfa.unwrap_or(payment.amount_due as i64);
+    let penalty_fcfa = payment.amount_penalty_fcfa;
+    let total_fcfa = payment.amount_total_fcfa.unwrap_or(payment.amount_total as i64);
+    let paid_fcfa = payment.amount_paid_fcfa.unwrap_or(payment.amount_paid as i64);
+
     current_layer.use_text(
-        format!("Montant dû : {:.0} FCFA", payment.amount_due),
+        format!("Montant de base : {} FCFA", format_fcfa(due_fcfa)),
         10.0,
         Mm(20.0),
         Mm(84.0),
         &font_regular,
     );
-    if payment.amount_penalty > 0.0 {
-        current_layer.use_text(
-            format!("Pénalités : {:.0} FCFA", payment.amount_penalty),
-            10.0,
-            Mm(20.0),
-            Mm(77.0),
-            &font_regular,
-        );
-    }
     current_layer.use_text(
-        format!("Total dû : {:.0} FCFA", payment.amount_total),
+        format!("Pénalités de retard : {} FCFA", format_fcfa(penalty_fcfa)),
+        10.0,
+        Mm(20.0),
+        Mm(77.0),
+        &font_regular,
+    );
+    current_layer.use_text(
+        format!("Total dû : {} FCFA", format_fcfa(total_fcfa)),
         11.0,
         Mm(20.0),
         Mm(70.0),
         &font,
     );
     current_layer.use_text(
-        format!("Montant encaissé : {:.0} FCFA", payment.amount_paid),
+        format!("Montant encaissé : {} FCFA", format_fcfa(paid_fcfa)),
         13.0,
         Mm(20.0),
         Mm(60.0),

@@ -11,6 +11,13 @@ abstract class ApmtrackApi {
   Future<AuthSession> login(String email, String password);
   Future<AuthSession> refresh(String refreshToken);
   Future<void> logout(String token, String refreshToken);
+
+  /// Remplace le mot de passe de l'utilisateur connecte (sortie du provisionnement).
+  Future<void> changePassword(
+    String token,
+    String currentPassword,
+    String newPassword,
+  );
   Future<MobileProfile> mobileMe(String token);
   Future<List<Intervention>> mobileInterventions(String token);
   Future<PatrouilleActive> activePatrouille(String token);
@@ -147,6 +154,25 @@ class HttpApmtrackApi implements ApmtrackApi {
         _uri('/api/v1/auth/logout'),
         headers: _headers(token),
         body: jsonEncode({'refresh_token': refreshToken}),
+      ),
+    );
+    _ensureOk(response);
+  }
+
+  @override
+  Future<void> changePassword(
+    String token,
+    String currentPassword,
+    String newPassword,
+  ) async {
+    final response = await _send(
+      _client.post(
+        _uri('/api/v1/auth/change-password'),
+        headers: _headers(token),
+        body: jsonEncode({
+          'current_password': currentPassword,
+          'new_password': newPassword,
+        }),
       ),
     );
     _ensureOk(response);

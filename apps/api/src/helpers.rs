@@ -217,6 +217,26 @@ pub fn geo_feature(geometry: Value, properties: Value) -> Value {
     json!({ "type": "Feature", "geometry": geometry, "properties": properties })
 }
 
+/// Formate un montant entier FCFA avec une espace fine comme séparateur de milliers
+/// (« 27 500 »). Utilisé par les documents imprimés (reçu, PV) pour rester lisible sur
+/// des montants à cinq ou six chiffres.
+pub fn format_fcfa(amount: i64) -> String {
+    let negative = amount < 0;
+    let digits = amount.abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    if negative {
+        format!("-{out}")
+    } else {
+        out
+    }
+}
+
 pub fn csv_safe_field(value: &str) -> String {
     let prefixed = match value.chars().next() {
         Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r') | Some('\n') => {

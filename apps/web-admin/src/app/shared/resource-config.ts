@@ -160,6 +160,17 @@ export interface ResourceConfig {
   query?: Record<string, string | number | boolean>;
   filters?: ResourceFilter[];
   actions?: ResourceAction[];
+  /**
+   * Active le dialogue d'import CSV pour cette ressource.
+   * `communeScoped` affiche le sélecteur de commune par défaut (import agents) ;
+   * `templatePath` propose le téléchargement d'un gabarit servi par l'API.
+   */
+  csvImport?: {
+    endpoint: string;
+    title: string;
+    communeScoped?: boolean;
+    templatePath?: string;
+  };
   /** Enables the dedicated "Gérer les agents" dialog (patrouilles sub-resource). */
   manageAgents?: boolean;
   /** Active le bloc photo de profil sur la fiche détail (upload + aperçu).
@@ -226,7 +237,22 @@ const regionRelation: RelationConfig = {
 const departementRelation: RelationConfig = {
   endpoint: '/api/v1/geography/departements',
   labelKey: 'nom',
+  metaKey: 'code',
   parentKey: 'region_id',
+};
+
+const arrondissementRelation: RelationConfig = {
+  endpoint: '/api/v1/geography/arrondissements',
+  labelKey: 'nom',
+  metaKey: 'code',
+  parentKey: 'departement_id',
+};
+
+const quartierRelation: RelationConfig = {
+  endpoint: '/api/v1/geography/quartiers',
+  labelKey: 'nom',
+  metaKey: 'code',
+  parentKey: 'arrondissement_id',
 };
 
 const zoneRelation: RelationConfig = {
@@ -323,6 +349,181 @@ export function featureForEntityType(type: unknown): string | null {
 }
 
 export const resourceConfigs: Record<string, ResourceConfig> = {
+  // ── Découpage administratif national ────────────────────────────────────────
+  // Données de référence GLOBALES (sans commune_id) : écriture réservée au
+  // SUPER_ADMIN, cf. modules/geography.rs. La navigation hiérarchique se fait par
+  // les panneaux `detail.related`, sans composant dédié.
+  regions: {
+    key: 'regions',
+    title: 'Régions',
+    description: 'Découpage administratif national — niveau 1. Base des départements.',
+    endpoint: '/api/v1/geography/regions',
+    editable: true,
+    columns: ['code', 'nom'],
+    detailFields: ['code', 'nom'],
+    detail: {
+      summaryFields: ['code'],
+      related: [
+        { key: 'departements', title: 'Départements', foreignKey: 'region_id' },
+        { key: 'communes', title: 'Communes', foreignKey: 'region_id' },
+      ],
+    },
+    labels: commonLabels(),
+    createRoles: ['SUPER_ADMIN'],
+    mutateRoles: ['SUPER_ADMIN'],
+    // L'import du répertoire national se lance depuis l'écran de tête du découpage.
+    csvImport: {
+      endpoint: '/api/v1/geography/import-csv',
+      templatePath: '/api/v1/geography/import-template.csv',
+      title: 'Import du découpage administratif',
+    },
+    createFields: [
+      field('code', 'Code région', 'text', true),
+      field('nom', 'Nom de la région', 'text', true),
+    ],
+    patchFields: [
+      field('code', 'Code région', 'text', true),
+      field('nom', 'Nom de la région', 'text', true),
+    ],
+    actions: [
+      deleteAction(
+        'Supprimer',
+        (row) => `/api/v1/geography/regions/${row['id']}`,
+        'Supprimer cette région ? Refusé si des départements ou des communes y sont rattachés.',
+      ),
+    ],
+  },
+  departements: {
+    key: 'departements',
+    title: 'Départements',
+    description: 'Découpage administratif national — niveau 2.',
+    endpoint: '/api/v1/geography/departements',
+    editable: true,
+    columns: ['nom', 'code', 'region_id'],
+    detailFields: ['nom', 'code', 'region_id'],
+    displayRelations: { region_id: regionRelation },
+    detail: {
+      summaryFields: ['code', 'region_id'],
+      related: [
+        { key: 'arrondissements', title: 'Arrondissements', foreignKey: 'departement_id' },
+        { key: 'communes', title: 'Communes', foreignKey: 'departement_id' },
+      ],
+    },
+    labels: commonLabels(),
+    createRoles: ['SUPER_ADMIN'],
+    mutateRoles: ['SUPER_ADMIN'],
+    filters: [relationFilter('region_id', 'Région', regionRelation)],
+    createFields: [
+      relationField('region_id', 'Région', regionRelation, true),
+      field('nom', 'Nom du département', 'text', true),
+      field('code', 'Code département', 'text'),
+    ],
+    patchFields: [
+      relationField('region_id', 'Région', regionRelation, true),
+      field('nom', 'Nom du département', 'text', true),
+      field('code', 'Code département', 'text'),
+    ],
+    actions: [
+      deleteAction(
+        'Supprimer',
+        (row) => `/api/v1/geography/departements/${row['id']}`,
+        'Supprimer ce département ? Refusé si des arrondissements ou des communes y sont rattachés.',
+      ),
+    ],
+  },
+  arrondissements: {
+    key: 'arrondissements',
+    title: 'Arrondissements',
+    description: 'Découpage administratif national — niveau 3. Une commune d’arrondissement s’y rattache.',
+    endpoint: '/api/v1/geography/arrondissements',
+    editable: true,
+    columns: ['nom', 'code', 'departement_id'],
+    detailFields: ['nom', 'code', 'departement_id'],
+    displayRelations: { departement_id: departementRelation },
+    detail: {
+      summaryFields: ['code', 'departement_id'],
+      related: [
+        { key: 'quartiers', title: 'Quartiers', foreignKey: 'arrondissement_id' },
+        { key: 'communes', title: 'Communes', foreignKey: 'arrondissement_id' },
+      ],
+    },
+    labels: commonLabels(),
+    createRoles: ['SUPER_ADMIN'],
+    mutateRoles: ['SUPER_ADMIN'],
+    filters: [
+      relationFilter('region_id', 'Région', regionRelation),
+      relationFilter('departement_id', 'Département', departementRelation),
+    ],
+    createFields: [
+      // `region_id` sert uniquement à filtrer la liste des départements : il n'est
+      // jamais envoyé à l'API (uiOnly), l'arrondissement ne portant que departement_id.
+      { ...relationField('region_id', 'Région', regionRelation, false), uiOnly: true },
+      relationField('departement_id', 'Département', departementRelation, true, undefined, 'region_id'),
+      field('nom', 'Nom de l’arrondissement', 'text', true),
+      field('code', 'Code arrondissement', 'text'),
+    ],
+    patchFields: [
+      relationField('departement_id', 'Département', departementRelation, true),
+      field('nom', 'Nom de l’arrondissement', 'text', true),
+      field('code', 'Code arrondissement', 'text'),
+    ],
+    actions: [
+      deleteAction(
+        'Supprimer',
+        (row) => `/api/v1/geography/arrondissements/${row['id']}`,
+        'Supprimer cet arrondissement ? Refusé si des quartiers ou des communes y sont rattachés.',
+      ),
+    ],
+  },
+  quartiers: {
+    key: 'quartiers',
+    title: 'Quartiers',
+    description:
+      'Répertoire national des quartiers (niveau 4). Distinct des zones opérationnelles d’une commune.',
+    endpoint: '/api/v1/geography/quartiers',
+    editable: true,
+    columns: ['nom', 'code', 'arrondissement_id'],
+    detailFields: ['nom', 'code', 'arrondissement_id'],
+    displayRelations: { arrondissement_id: arrondissementRelation },
+    detail: { summaryFields: ['code', 'arrondissement_id'] },
+    labels: commonLabels(),
+    createRoles: ['SUPER_ADMIN'],
+    mutateRoles: ['SUPER_ADMIN'],
+    filters: [
+      relationFilter('departement_id', 'Département', departementRelation),
+      relationFilter('arrondissement_id', 'Arrondissement', arrondissementRelation),
+    ],
+    createFields: [
+      // Cascade purement visuelle jusqu'à l'arrondissement, seul champ réellement envoyé.
+      { ...relationField('region_id', 'Région', regionRelation, false), uiOnly: true },
+      {
+        ...relationField('departement_id', 'Département', departementRelation, false, undefined, 'region_id'),
+        uiOnly: true,
+      },
+      relationField(
+        'arrondissement_id',
+        'Arrondissement',
+        arrondissementRelation,
+        true,
+        undefined,
+        'departement_id',
+      ),
+      field('nom', 'Nom du quartier', 'text', true),
+      field('code', 'Code quartier', 'text'),
+    ],
+    patchFields: [
+      relationField('arrondissement_id', 'Arrondissement', arrondissementRelation, true),
+      field('nom', 'Nom du quartier', 'text', true),
+      field('code', 'Code quartier', 'text'),
+    ],
+    actions: [
+      deleteAction(
+        'Supprimer',
+        (row) => `/api/v1/geography/quartiers/${row['id']}`,
+        'Supprimer ce quartier ? Refusé si des zones communales y sont rattachées.',
+      ),
+    ],
+  },
   communes: {
     key: 'communes',
     title: 'Communes',
@@ -336,6 +537,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'nom',
       'region',
       'departement',
+      'arrondissement_id',
       'adresse',
       'telephone',
       'email',
@@ -347,6 +549,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'subscription_active',
       'public_visible',
     ],
+    displayRelations: { arrondissement_id: arrondissementRelation },
     detail: {
       summaryFields: ['code', 'region', 'departement'],
       related: [
@@ -364,6 +567,16 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       field('nom', 'Nom officiel', 'text', true),
       relationField('region_id', 'Région', regionRelation, true),
       relationField('departement_id', 'Département', departementRelation, true, undefined, 'region_id'),
+      // Rattachement au découpage administratif national. Optionnel : seules les communes
+      // d'arrondissement en ont un. Le trigger `communes_link_geography` s'appuie dessus.
+      relationField(
+        'arrondissement_id',
+        'Arrondissement',
+        arrondissementRelation,
+        false,
+        undefined,
+        'departement_id',
+      ),
       field('adresse', 'Adresse', 'text'),
       field('telephone', 'Téléphone', 'text'),
       field('email', 'Email', 'email'),
@@ -474,6 +687,11 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     labels: commonLabels(),
     createRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
     mutateRoles: ['SUPER_ADMIN', 'ADMIN_COMMUNE'],
+    csvImport: {
+      endpoint: '/api/v1/agents/import-csv',
+      title: 'Import CSV agents',
+      communeScoped: true,
+    },
     filters: [
       statusFilter(statusOptions['agents']),
       relationFilter('commune_id', "Commune d'attache", communeRelation),
@@ -1794,6 +2012,10 @@ function commonLabels(): Record<string, string> {
     id: 'ID',
     code: 'Code',
     nom: 'Nom',
+    region_id: 'Région',
+    departement_id: 'Département',
+    arrondissement_id: 'Arrondissement',
+    quartier_id: 'Quartier',
     full_name: 'Nom complet',
     email: 'Email',
     roles: 'Rôles',

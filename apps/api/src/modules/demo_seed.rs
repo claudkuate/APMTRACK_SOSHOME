@@ -844,11 +844,15 @@ async fn seed_referentiel(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), Ap
 const QR_PLACEHOLDER: &str =
     r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"></svg>"#;
 
-/// (seq, index dans REFERENTIEL, statut PV)
-const PV_SPECS: &[(u32, usize, &str)] = &[
-    (1, 0, "EN_ATTENTE_PAIEMENT"),
-    (2, 1, "PAYE"),
-    (3, 5, "EN_RETARD"),
+/// (seq, index dans REFERENTIEL, statut PV, ancienneté en jours)
+///
+/// L'ancienneté est explicite : sans PV réellement échu, la démo n'affiche aucune
+/// pénalité et le correctif de comptabilité passe pour inopérant. Le PV `EN_RETARD`
+/// est antidaté bien au-delà du délai de paiement du référentiel.
+const PV_SPECS: &[(u32, usize, &str, i64)] = &[
+    (1, 0, "EN_ATTENTE_PAIEMENT", 0),
+    (2, 1, "PAYE", 2),
+    (3, 5, "EN_RETARD", 45),
 ];
 
 async fn seed_pvs_payments(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiError> {
@@ -857,7 +861,7 @@ async fn seed_pvs_payments(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
     let agent_user_id = det_id(&format!("user:agent:{}", c.code));
     let receveur_user_id = det_id(&format!("user:receveur:{}", c.code));
 
-    for &(seq, interv_index, status) in PV_SPECS {
+    for &(seq, interv_index, status, age_days) in PV_SPECS {
         let interv = &REFERENTIEL[interv_index];
         let interv_id = det_id(&format!("interv:{}:{}", c.code, interv.slug));
         let zone = &c.zones[interv_index % c.zones.len()];
@@ -877,11 +881,13 @@ async fn seed_pvs_payments(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
                 id, commune_id, agent_id, pv_number, intervention_id, zone_id,
                 verbalized_name, verbalized_identifier, vehicle_plate,
                 location_description, gps_latitude, gps_longitude,
-                amount_initial, amount_initial_fcfa, status, qr_code_svg, created_by
+                amount_initial, amount_initial_fcfa, status, qr_code_svg, created_by,
+                created_at
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, $13, $14, $15, $16
+                $13, $13, $14, $15, $16,
+                now() - ($17 * 86400) * INTERVAL '1 second'
             )
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -892,6 +898,7 @@ async fn seed_pvs_payments(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
                 gps_longitude = EXCLUDED.gps_longitude,
                 amount_initial = EXCLUDED.amount_initial,
                 amount_initial_fcfa = EXCLUDED.amount_initial_fcfa,
+                created_at = EXCLUDED.created_at,
                 updated_at = now()
             "#,
         )
@@ -911,6 +918,36 @@ async fn seed_pvs_payments(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), A
         .bind(status)
         .bind(QR_PLACEHOLDER)
         .bind(agent_user_id)
+        .bind(age_days)
+        .execute(pool)
+        .await?;
+
+        // Lignes payantes snapshotées, comme le fait la création d'un PV via l'API.
+        // Sans elles, la vue `pv_amounts_due` retombe sur le référentiel et surtout la
+        // démo n'exerce pas le chemin nominal du calcul de pénalité.
+        sqlx::query(
+            r#"
+            INSERT INTO pv_interventions (
+                pv_id, intervention_id, order_index, nom, sujet_paiement,
+                montant_fcfa, delai_paiement_jours, taux_penalite,
+                taux_penalite_basis_points, penalite_fcfa
+            )
+            SELECT $1, i.id, 0, i.nom, i.sujet_paiement, i.montant_fcfa,
+                   i.delai_paiement_jours, i.taux_penalite,
+                   i.taux_penalite_basis_points, i.penalite_fcfa
+            FROM interventions i
+            WHERE i.id = $2
+            ON CONFLICT (pv_id, intervention_id) DO UPDATE SET
+                montant_fcfa = EXCLUDED.montant_fcfa,
+                delai_paiement_jours = EXCLUDED.delai_paiement_jours,
+                taux_penalite = EXCLUDED.taux_penalite,
+                taux_penalite_basis_points = EXCLUDED.taux_penalite_basis_points,
+                penalite_fcfa = EXCLUDED.penalite_fcfa,
+                sujet_paiement = EXCLUDED.sujet_paiement
+            "#,
+        )
+        .bind(pv_id)
+        .bind(interv_id)
         .execute(pool)
         .await?;
 

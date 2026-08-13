@@ -5,6 +5,10 @@ use thiserror::Error;
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub app_env: String,
+    /// Fuseau IANA servant à borner la « journée » comptable de la caisse.
+    /// `payments.paid_at` est en UTC alors que les communes vivent en WAT (UTC+1) :
+    /// sans ce fuseau, un encaissement à 00h30 est compté sur la veille.
+    pub app_timezone: String,
     pub app_port: u16,
     pub database_url: String,
     pub database_max_connections: u32,
@@ -79,6 +83,11 @@ impl AppConfig {
         dotenvy::dotenv().ok();
 
         let app_env = env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
+        let app_timezone = env::var("APP_TIMEZONE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Africa/Douala".to_string());
         let app_port = env::var("APP_PORT")
             .unwrap_or_else(|_| "8080".to_string())
             .parse::<u16>()
@@ -135,6 +144,7 @@ impl AppConfig {
 
         Ok(Self {
             app_env,
+            app_timezone,
             app_port,
             database_url,
             database_max_connections,

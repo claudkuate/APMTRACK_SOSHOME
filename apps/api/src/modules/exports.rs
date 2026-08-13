@@ -62,6 +62,8 @@ async fn export_pvs(
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
         SELECT p.pv_number, p.status, p.amount_initial_fcfa,
+               v.amount_base_fcfa, v.amount_penalty_fcfa, v.amount_total_fcfa,
+               v.due_date, v.is_late,
                p.verbalized_name, p.verbalized_identity_type, p.verbalized_identity_number,
                p.verbalized_phone, p.verbalized_address,
                p.vehicle_plate, p.vehicle_registration_card_number, p.vehicle_make,
@@ -73,6 +75,7 @@ async fn export_pvs(
         JOIN communes c ON p.commune_id = c.id
         JOIN agents a ON p.agent_id = a.id
         JOIN interventions i ON p.intervention_id = i.id
+        LEFT JOIN pv_amounts_due v ON v.pv_id = p.id
         WHERE p.deleted_at IS NULL
         "#,
     );
@@ -89,11 +92,20 @@ async fn export_pvs(
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
-    let mut csv = String::from("Numero PV,Statut,Montant (FCFA),Verbalise,Type identite,Numero identite,Telephone,Adresse,Plaque,Carte grise,Marque,Modele,Couleur,Proprietaire,Lieu,Agent Matricule,Agent Nom,Commune,Intervention,Date\n");
+    // Base / pénalité / total explicites : chaque commune doit pouvoir ventiler ce qui
+    // relève de l'amende et ce qui relève de la pénalité de retard.
+    let mut csv = String::from("Numero PV,Statut,Montant base (FCFA),Penalite (FCFA),Total du (FCFA),Echeance,En retard,Verbalise,Type identite,Numero identite,Telephone,Adresse,Plaque,Carte grise,Marque,Modele,Couleur,Proprietaire,Lieu,Agent Matricule,Agent Nom,Commune,Intervention,Date\n");
     for row in &rows {
         let pv_number: String = row.get("pv_number");
         let status: String = row.get("status");
         let amount: Option<i64> = row.get("amount_initial_fcfa");
+        let base_fcfa: i64 = row.try_get("amount_base_fcfa").unwrap_or(amount.unwrap_or(0));
+        let penalty_fcfa: i64 = row.try_get("amount_penalty_fcfa").unwrap_or(0);
+        let total_fcfa: i64 = row
+            .try_get("amount_total_fcfa")
+            .unwrap_or(amount.unwrap_or(0));
+        let due_date: Option<DateTime<Utc>> = row.try_get("due_date").unwrap_or(None);
+        let is_late: bool = row.try_get("is_late").unwrap_or(false);
         let verbalized: Option<String> = row.get("verbalized_name");
         let identity_type: Option<String> = row.get("verbalized_identity_type");
         let identity_number: Option<String> = row.get("verbalized_identity_number");
@@ -113,10 +125,16 @@ async fn export_pvs(
         let created_at: DateTime<Utc> = row.get("created_at");
 
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             csv_field(&pv_number),
             csv_field(&status),
-            amount.map(|a| a.to_string()).unwrap_or_default(),
+            base_fcfa,
+            penalty_fcfa,
+            total_fcfa,
+            due_date
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            if is_late { "OUI" } else { "NON" },
             csv_field(&verbalized.unwrap_or_default()),
             csv_field(&identity_type.unwrap_or_default()),
             csv_field(&identity_number.unwrap_or_default()),
@@ -319,8 +337,9 @@ async fn export_agents(
 
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         r#"
-        SELECT a.matricule, a.full_name, a.status,
-               a.date_prise_fonction, a.created_at, c.nom AS commune_nom
+        SELECT a.matricule, a.full_name, a.status, a.telephone, a.email,
+               a.date_prise_fonction, a.created_at,
+               c.nom AS commune_nom, c.code AS commune_code
         FROM agents a
         JOIN communes c ON a.commune_id = c.id
         WHERE a.deleted_at IS NULL
@@ -339,21 +358,31 @@ async fn export_agents(
 
     let rows = qb.build().fetch_all(&state.db).await?;
 
+    // « Code Commune », « Telephone » et « Email » rendent l'export réimportable tel
+    // quel : exporter → corriger dans Excel → réimporter est le premier réflexe d'un
+    // administrateur de commune. Les colonnes inconnues à l'import (Statut, Cree le)
+    // sont simplement ignorées.
     let mut csv = String::from(
-        "Matricule,Nom Complet,Statut,Date Prise Fonction,Commune,Cree le\n",
+        "Matricule,Nom Complet,Code Commune,Telephone,Email,Statut,Date Prise Fonction,Commune,Cree le\n",
     );
     for row in &rows {
         let matricule: String = row.get("matricule");
         let nom: String = row.get("full_name");
         let status: String = row.get("status");
+        let telephone: Option<String> = row.get("telephone");
+        let email: Option<String> = row.get("email");
         let date_pf: Option<chrono::NaiveDate> = row.get("date_prise_fonction");
         let commune_nom: String = row.get("commune_nom");
+        let commune_code: String = row.get("commune_code");
         let created_at: DateTime<Utc> = row.get("created_at");
 
         csv.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{}\n",
             csv_field(&matricule),
             csv_field(&nom),
+            csv_field(&commune_code),
+            csv_field(&telephone.unwrap_or_default()),
+            csv_field(&email.unwrap_or_default()),
             csv_field(&status),
             date_pf
                 .map(|d| d.format("%Y-%m-%d").to_string())
