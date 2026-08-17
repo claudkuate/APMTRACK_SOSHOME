@@ -83,8 +83,11 @@ import { AuthService } from '../../core/services/auth.service';
 
             <div class="mt-6 grid gap-4">
               <div class="field">
-                <label for="email">Email</label>
-                <input id="email" type="email" formControlName="email" autocomplete="email" />
+                <label for="email">{{ 'Email ou matricule' | auto }}</label>
+                <input id="email" type="text" formControlName="email" autocomplete="username" />
+                <p class="mt-1 text-xs text-[var(--text-muted)]">
+                  {{ "Un agent de terrain se connecte avec son matricule." | auto }}
+                </p>
               </div>
               <div class="field">
                 <label for="password">{{ 'Mot de passe' | auto }}</label>
@@ -116,7 +119,11 @@ export class LoginPage {
   protected readonly loading = signal(false);
   protected readonly error = signal<string | null>(null);
   protected readonly form = this.fb.nonNullable.group({
-    email: ['', [Validators.required, Validators.email]],
+    // Pas de `Validators.email` : `POST /auth/login` accepte indifféremment une
+    // adresse ou un matricule, et un agent de terrain n'a qu'un matricule. Le
+    // valideur d'adresse désactivait le bouton sans afficher le moindre message,
+    // rendant le back-office inaccessible aux agents.
+    email: ['', [Validators.required]],
     password: ['', [Validators.required, Validators.minLength(8)]],
   });
 

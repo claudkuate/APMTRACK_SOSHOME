@@ -77,6 +77,10 @@ pub struct MobileInterventionResponse {
     pub delai_paiement_jours: Option<i32>,
     pub taux_penalite: Option<f64>,
     pub taux_penalite_basis_points: Option<i32>,
+    /// Unite de facturation (NULL = forfait) : pilote la saisie d'une quantite au PV.
+    pub unite: Option<String>,
+    /// TRUE = tarif journalier : une duree en jours est saisie au PV.
+    pub facturation_par_jour: bool,
     pub reference_deliberation: Option<String>,
     pub piece_justificative: Option<String>,
     pub active: bool,
@@ -143,6 +147,7 @@ async fn interventions(
             i.montant_fcfa, i.delai_paiement_jours,
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
             i.taux_penalite_basis_points,
+            i.unite, i.facturation_par_jour,
             i.reference_deliberation, i.piece_justificative, i.active,
             i.created_at, i.updated_at
         FROM interventions i
@@ -185,6 +190,8 @@ async fn interventions(
             delai_paiement_jours: row.get("delai_paiement_jours"),
             taux_penalite: row.get("taux_penalite"),
             taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
+            unite: row.get("unite"),
+            facturation_par_jour: row.get("facturation_par_jour"),
             reference_deliberation: row.get("reference_deliberation"),
             piece_justificative: row.get("piece_justificative"),
             active: row.get("active"),

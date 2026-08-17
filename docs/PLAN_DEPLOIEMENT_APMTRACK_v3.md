@@ -551,8 +551,19 @@ flutter run
 
 ### 9.2 Build Android APK
 
+> **Contrôle obligatoire avant tout build.** L'hôte visé doit répondre en HTTPS
+> avec un certificat valide, sinon l'APK produit ne joint aucune API et l'agent
+> ne voit qu'un profil qui ne charge pas :
+>
+> ```bash
+> curl -sI https://api.apmtrack.cm/health
+> ```
+>
+> `api-staging.apmtrack.cm` n'existe pas à ce jour — ne pas l'utiliser sans
+> avoir créé au préalable son enregistrement DNS et son bloc Caddy.
+
 ```bash
-flutter build apk --release   --dart-define=API_URL=https://api-staging.apmtrack.cm   --dart-define=APP_ENV=staging
+flutter build apk --release   --dart-define=API_URL=https://api.apmtrack.cm   --dart-define=APP_ENV=staging
 ```
 
 ### 9.3 Build Android App Bundle

@@ -16,6 +16,7 @@ export const FR: Record<string, string> = {
   'public.nav.report': 'Signaler',
   'public.nav.tracking': 'Suivi',
   'public.nav.about': 'À propos',
+  'public.nav.staff': 'Espace agent',
 
   // Pourquoi (remarque 12) ----------------------------------------------
   'public.why.agent':

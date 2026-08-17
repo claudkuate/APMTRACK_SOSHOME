@@ -180,6 +180,12 @@ CreatePvPayload _payloadFromJson(JsonMap json) => CreatePvPayload(
       .map((id) => id.toString())
       .where((id) => id.isNotEmpty)
       .toList(),
+  // Sans cette restitution, un brouillon hors ligne se synchroniserait au
+  // forfait : le PV serait sous-facturé sans que personne ne le voie.
+  interventionQuantites: (json['intervention_quantites'] as List? ?? const [])
+      .whereType<Map>()
+      .map((item) => PvInterventionQuantite.fromJson(item.cast<String, dynamic>()))
+      .toList(),
   subjectType:
       readOptionalString(json, 'subject_type') ??
       PvSubjectTypes.personWithVehicle,

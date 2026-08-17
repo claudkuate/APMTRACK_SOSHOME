@@ -602,6 +602,11 @@ struct CreateInterventionRequest {
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
     penalite_fcfa: Option<i64>,
+    /// Unite de facturation deliberee (NULL = forfait) : la quantite devient
+    /// saisissable au PV et le montant est multiplie par elle.
+    unite: Option<String>,
+    /// TRUE = `montant_fcfa` est un tarif journalier ; la duree est saisie au PV.
+    facturation_par_jour: Option<bool>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -619,6 +624,8 @@ struct PatchInterventionRequest {
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
     penalite_fcfa: Option<i64>,
+    unite: Option<String>,
+    facturation_par_jour: Option<bool>,
     reference_deliberation: Option<String>,
     piece_justificative: Option<String>,
     active: Option<bool>,
@@ -640,6 +647,8 @@ pub struct InterventionResponse {
     pub taux_penalite: Option<f64>,
     pub taux_penalite_basis_points: Option<i32>,
     pub penalite_fcfa: Option<i64>,
+    pub unite: Option<String>,
+    pub facturation_par_jour: bool,
     pub reference_deliberation: Option<String>,
     pub piece_justificative: Option<String>,
     pub active: bool,
@@ -687,6 +696,7 @@ async fn list_interventions(
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
             i.taux_penalite_basis_points,
             i.penalite_fcfa,
+            i.unite, i.facturation_par_jour,
             i.reference_deliberation, i.piece_justificative, i.active,
             i.created_at, i.updated_at
         FROM interventions i
@@ -763,6 +773,7 @@ async fn create_intervention(
         montant_fcfa,
         payload.reference_deliberation.as_deref(),
     )?;
+    let unite = normalize_unite(payload.unite.as_deref())?;
 
     let nom = required_text(payload.nom, "nom")?;
     let id = Uuid::new_v4();
@@ -773,9 +784,10 @@ async fn create_intervention(
             id, commune_id, type_id, nom, description,
             requires_vehicle, sujet_paiement, montant, montant_fcfa, delai_paiement_jours,
             taux_penalite, taux_penalite_basis_points, penalite_fcfa,
+            unite, facturation_par_jour,
             reference_deliberation, piece_justificative, active
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         "#,
     )
     .bind(id)
@@ -791,6 +803,8 @@ async fn create_intervention(
     .bind(payload.taux_penalite)
     .bind(taux_penalite_basis_points)
     .bind(payload.penalite_fcfa)
+    .bind(unite)
+    .bind(payload.facturation_par_jour.unwrap_or(false))
     .bind(clean_optional(payload.reference_deliberation))
     .bind(clean_optional(payload.piece_justificative))
     .bind(payload.active.unwrap_or(true))
@@ -861,6 +875,11 @@ async fn patch_intervention(
         montant_fcfa,
         reference_deliberation.as_deref(),
     )?;
+    // Une chaîne vide remet l'intervention au forfait ; champ absent = inchangé.
+    let unite = match payload.unite.as_deref() {
+        Some(value) => normalize_unite(Some(value))?,
+        None => existing.unite.clone(),
+    };
 
     sqlx::query(
         r#"
@@ -875,9 +894,11 @@ async fn patch_intervention(
             taux_penalite = $9,
             taux_penalite_basis_points = $10,
             penalite_fcfa = $11,
-            reference_deliberation = $12,
-            piece_justificative = $13,
-            active = $14,
+            unite = $12,
+            facturation_par_jour = $13,
+            reference_deliberation = $14,
+            piece_justificative = $15,
+            active = $16,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -897,6 +918,12 @@ async fn patch_intervention(
     .bind(payload.taux_penalite.or(existing.taux_penalite))
     .bind(taux_penalite_basis_points)
     .bind(penalite_fcfa)
+    .bind(unite)
+    .bind(
+        payload
+            .facturation_par_jour
+            .unwrap_or(existing.facturation_par_jour),
+    )
     .bind(reference_deliberation)
     .bind(
         payload
@@ -967,6 +994,7 @@ pub async fn load_intervention(pool: &PgPool, id: Uuid) -> Result<InterventionRe
             i.taux_penalite::DOUBLE PRECISION AS taux_penalite,
             i.taux_penalite_basis_points,
             i.penalite_fcfa,
+            i.unite, i.facturation_par_jour,
             i.reference_deliberation, i.piece_justificative, i.active,
             i.created_at, i.updated_at
         FROM interventions i
@@ -997,6 +1025,8 @@ fn row_to_intervention(row: sqlx::postgres::PgRow) -> InterventionResponse {
         taux_penalite: row.get("taux_penalite"),
         taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
         penalite_fcfa: row.get("penalite_fcfa"),
+        unite: row.get("unite"),
+        facturation_par_jour: row.get("facturation_par_jour"),
         reference_deliberation: row.get("reference_deliberation"),
         piece_justificative: row.get("piece_justificative"),
         active: row.get("active"),
@@ -1065,6 +1095,26 @@ fn normalize_fcfa(value: Option<i64>, legacy: Option<f64>) -> Result<Option<i64>
         return Err(ApiError::bad_request("montant_fcfa doit etre positif"));
     }
     Ok(amount)
+}
+
+/// Unites de facturation autorisees — doit rester aligne sur la contrainte
+/// `interventions_unite_check` (migration 29). Le CHECK est le garde-fou ultime ;
+/// ce controle existe pour rendre une erreur 400 lisible plutot qu'un 23514 brut.
+const UNITES: &[&str] = &["BETE", "UNITE", "BOUTIQUE", "MAISON", "HEURE", "JOUR", "M2"];
+
+/// `None` = forfait. Une chaine vide vaut `None` (le formulaire web envoie "").
+fn normalize_unite(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let upper = raw.to_ascii_uppercase();
+    if !UNITES.contains(&upper.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "unite invalide: {raw} (valeurs possibles: {})",
+            UNITES.join(", ")
+        )));
+    }
+    Ok(Some(upper))
 }
 
 fn validate_penalite_fcfa(value: Option<i64>) -> Result<(), ApiError> {

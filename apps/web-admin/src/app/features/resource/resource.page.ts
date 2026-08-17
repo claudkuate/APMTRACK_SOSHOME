@@ -358,6 +358,15 @@ function readAccounts(payload: unknown): ProvisionedAccount[] {
                   </div>
                 }
 
+                <!-- L'erreur doit être rendue DANS le modal : la bannière de page est
+                     recouverte par .modal-backdrop (fixed, inset 0, z-index 40), de
+                     sorte qu'un refus de l'API passait totalement inaperçu. -->
+                @if (error()) {
+                  <p class="rounded-md border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+                    {{ error() }}
+                  </p>
+                }
+
                 <div class="flex flex-wrap items-center gap-2">
                   <button type="submit" class="btn-primary" [disabled]="form.invalid || saving()">
                     {{ (saving() ? 'Enregistrement...' : 'Enregistrer') | auto }}
@@ -1020,6 +1029,8 @@ export class ResourcePage implements OnInit, OnDestroy {
     const cfg = this.config();
     this.formMode.set('create');
     this.editingId.set(null);
+    // Sinon le modal s'ouvre sur l'erreur du formulaire précédent.
+    this.error.set(null);
     this.buildForm(cfg?.createFields ?? []);
     this.showForm.set(true);
     this.rowMenuKey.set(null);
@@ -1029,6 +1040,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     const fields = cfg.patchFields ?? cfg.createFields ?? [];
     this.formMode.set('edit');
     this.editingId.set(String(row['id'] ?? ''));
+    this.error.set(null);
     this.buildForm(fields);
     this.patchForm(fields, row);
     this.selectedRow.set(null);
@@ -2228,8 +2240,20 @@ export class ResourcePage implements OnInit, OnDestroy {
           return String(item);
         }
         const name = String(item['nom'] ?? item['intervention_id'] ?? '').trim();
-        const amount = Number(item['montant_fcfa'] ?? 0);
-        return amount > 0 ? `${name} (${amount.toLocaleString('fr-FR')} FCFA)` : name;
+        // `montant_ligne_fcfa` porte le produit unitaire × quantité × durée
+        // (migration 29) ; `montant_fcfa` n'est que le tarif unitaire. Afficher ce
+        // dernier ferait mentir la liste sur ce qui sera réclamé.
+        const unit = Number(item['montant_fcfa'] ?? 0);
+        const amount = Number(item['montant_ligne_fcfa'] ?? unit);
+        const quantite = Number(item['quantite'] ?? 1);
+        const duree = Number(item['duree_jours'] ?? 1);
+        const multiplier =
+          quantite > 1 || duree > 1
+            ? ` ×${quantite}${duree > 1 ? ` × ${duree} j` : ''}`
+            : '';
+        return amount > 0
+          ? `${name}${multiplier} (${amount.toLocaleString('fr-FR')} FCFA)`
+          : `${name}${multiplier}`;
       })
       .filter(Boolean);
     return labels.length ? labels.join(', ') : '-';

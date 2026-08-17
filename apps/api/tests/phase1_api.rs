@@ -2695,3 +2695,261 @@ async fn request(
 
     TestResponse { status, body }
 }
+
+/// Tarifs unitaires et journaliers du référentiel communal (migration 29).
+///
+/// Verrouille l'invariant le plus coûteux du lot : le montant retenu à la création
+/// (`pvs.amount_initial_fcfa`, calculé en Rust) et le montant réclamé au receveur
+/// (`pv_amounts_due`, calculé en SQL) doivent rester identiques au franc près.
+/// Deux calculs séparés, donc deux occasions de diverger.
+#[tokio::test]
+async fn tarif_unitaire_multiplie_le_montant_et_refuse_un_forfait_multiplie() {
+    if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
+        return;
+    }
+
+    let _db_guard = DB_TEST_LOCK.lock().await;
+    let state = test_state();
+    database::run_migrations(&state.db)
+        .await
+        .expect("migrations");
+    reset_database(&state).await;
+    let super_admin = seed_test_super_admin(&state).await;
+    let app = apmtrack_api::build_app(state.clone());
+
+    let admin_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": super_admin.email, "password": super_admin.password }),
+        None,
+    )
+    .await;
+    let admin_token = admin_login.body["access_token"]
+        .as_str()
+        .expect("admin token")
+        .to_string();
+
+    let commune = create_commune(&app, &admin_token, "QTE1", "Commune Quantite").await;
+    let commune_id = commune["id"].as_str().expect("commune id").to_string();
+
+    let agent = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/agents",
+        json!({
+            "matricule": "APM-QTE1-001",
+            "full_name": "Agent Quantite",
+            "commune_id": commune_id
+        }),
+        Some(&admin_token),
+    )
+    .await;
+    let agent_id = agent.body["id"].as_str().expect("agent id").to_string();
+    request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/agents/{agent_id}/account"),
+        json!({
+            "email": "agent.qte1@example.test",
+            "password": "agent-qte1-pass",
+            "active": true
+        }),
+        Some(&admin_token),
+    )
+    .await;
+    let agent_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "agent.qte1@example.test", "password": "agent-qte1-pass" }),
+        None,
+    )
+    .await;
+    let agent_token = agent_login.body["access_token"]
+        .as_str()
+        .expect("agent token")
+        .to_string();
+
+    let category = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/categories",
+        json!({ "commune_id": commune_id, "nom": "Amende" }),
+        Some(&admin_token),
+    )
+    .await;
+    let category_id = category.body["id"].as_str().expect("category id").to_string();
+    let intervention_type = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/types",
+        json!({
+            "commune_id": commune_id,
+            "category_id": category_id,
+            "nom": "Droit de Fourriere"
+        }),
+        Some(&admin_token),
+    )
+    .await;
+    let type_id = intervention_type.body["id"].as_str().expect("type id").to_string();
+
+    // Tarif du document client : « 10 000 par jour et par bête ».
+    let unitaire = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/interventions",
+        json!({
+            "commune_id": commune_id,
+            "type_id": type_id,
+            "nom": "Mise en fourriere Gros betail",
+            "sujet_paiement": true,
+            "montant_fcfa": 10000,
+            "delai_paiement_jours": 7,
+            "taux_penalite_basis_points": 1000,
+            "unite": "BETE",
+            "facturation_par_jour": true,
+            "reference_deliberation": "DEL-QTE1"
+        }),
+        Some(&admin_token),
+    )
+    .await;
+    assert_eq!(
+        unitaire.status,
+        StatusCode::OK,
+        "create intervention unitaire: {:?}",
+        unitaire.body
+    );
+    let unitaire_id = unitaire.body["id"].as_str().expect("intervention id").to_string();
+    assert_eq!(unitaire.body["unite"], "BETE");
+    assert_eq!(unitaire.body["facturation_par_jour"], true);
+
+    // Forfait : ni unité ni tarif journalier — aucun multiplicateur ne doit passer.
+    let forfait = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/referentiel/interventions",
+        json!({
+            "commune_id": commune_id,
+            "type_id": type_id,
+            "nom": "Depot sauvage d ordures",
+            "sujet_paiement": true,
+            "montant_fcfa": 20000,
+            "delai_paiement_jours": 7,
+            "reference_deliberation": "DEL-QTE1"
+        }),
+        Some(&admin_token),
+    )
+    .await;
+    let forfait_id = forfait.body["id"].as_str().expect("forfait id").to_string();
+    assert!(forfait.body["unite"].is_null(), "forfait sans unite");
+
+    // 12 bêtes gardées 3 jours = 10 000 x 12 x 3 = 360 000, et non 10 000.
+    let pv = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_ids": [unitaire_id],
+            "intervention_quantites": [
+                { "intervention_id": unitaire_id, "quantite": 12, "duree_jours": 3 }
+            ],
+            "verbalized_name": "Eleveur Test",
+            "verbalized_phone": "+237699000012",
+            "location_description": "Marche central",
+            "gps_latitude": 3.8667,
+            "gps_longitude": 11.5167
+        }),
+        Some(&agent_token),
+    )
+    .await;
+    assert_eq!(pv.status, StatusCode::CREATED, "create pv: {:?}", pv.body);
+    assert_eq!(
+        pv.body["amount_initial_fcfa"], 360000,
+        "montant calcule en Rust: {:?}",
+        pv.body
+    );
+    let ligne = &pv.body["interventions"][0];
+    assert_eq!(ligne["quantite"], 12);
+    assert_eq!(ligne["duree_jours"], 3);
+    assert_eq!(ligne["montant_ligne_fcfa"], 360000);
+    let pv_id = Uuid::parse_str(pv.body["id"].as_str().expect("pv id")).expect("pv uuid");
+
+    // La vue SQL doit trouver le même total que le calcul Rust ci-dessus.
+    let due = sqlx::query(
+        "SELECT amount_base_fcfa, amount_penalty_fcfa, amount_total_fcfa \
+         FROM pv_amounts_due WHERE pv_id = $1",
+    )
+    .bind(pv_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("pv_amounts_due");
+    assert_eq!(due.get::<i64, _>("amount_base_fcfa"), 360_000);
+    assert_eq!(due.get::<i64, _>("amount_penalty_fcfa"), 0);
+    assert_eq!(due.get::<i64, _>("amount_total_fcfa"), 360_000);
+
+    // Échu : la pénalité de 10 % porte sur le PRODUIT, pas sur le tarif unitaire.
+    sqlx::query("UPDATE pvs SET created_at = now() - interval '30 days' WHERE id = $1")
+        .bind(pv_id)
+        .execute(&state.db)
+        .await
+        .expect("backdate");
+    let late = sqlx::query(
+        "SELECT amount_penalty_fcfa, amount_total_fcfa, is_late \
+         FROM pv_amounts_due WHERE pv_id = $1",
+    )
+    .bind(pv_id)
+    .fetch_one(&state.db)
+    .await
+    .expect("pv_amounts_due late");
+    assert!(late.get::<bool, _>("is_late"));
+    assert_eq!(late.get::<i64, _>("amount_penalty_fcfa"), 36_000);
+    assert_eq!(late.get::<i64, _>("amount_total_fcfa"), 396_000);
+
+    // Un forfait ne se multiplie pas : le terrain ne fixe pas les montants.
+    let refuse = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_ids": [forfait_id],
+            "intervention_quantites": [
+                { "intervention_id": forfait_id, "quantite": 5 }
+            ],
+            "verbalized_name": "Contrevenant Forfait",
+            "verbalized_phone": "+237699000013",
+            "location_description": "Rue test"
+        }),
+        Some(&agent_token),
+    )
+    .await;
+    assert_eq!(
+        refuse.status,
+        StatusCode::BAD_REQUEST,
+        "quantite sur forfait doit etre refusee: {:?}",
+        refuse.body
+    );
+
+    // Sans quantité, le forfait reste facturé tel quel (non-régression).
+    let simple = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/pvs",
+        json!({
+            "intervention_ids": [forfait_id],
+            "verbalized_name": "Contrevenant Forfait",
+            "verbalized_phone": "+237699000013",
+            "location_description": "Rue test"
+        }),
+        Some(&agent_token),
+    )
+    .await;
+    assert_eq!(
+        simple.status,
+        StatusCode::CREATED,
+        "forfait simple: {:?}",
+        simple.body
+    );
+    assert_eq!(simple.body["amount_initial_fcfa"], 20000);
+}

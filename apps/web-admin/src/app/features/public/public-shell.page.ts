@@ -62,6 +62,9 @@ import { HelpTipComponent } from '../../shared/ui/help-tip.component';
             <a routerLink="/public/a-propos" routerLinkActive="border-[var(--cameroon-green)]" class="btn-ghost">
               {{ 'public.nav.about' | t }}
             </a>
+            <!-- La racine du site redirige vers ce portail citoyen : sans ce lien,
+                 le back-office n'est atteignable qu'en tapant /login de mémoire. -->
+            <a routerLink="/login" class="btn-primary">{{ 'public.nav.staff' | t }}</a>
             <select
               class="rounded-md border border-[var(--line-subtle)] bg-white px-2 py-2 font-semibold"
               [value]="i18n.lang()"

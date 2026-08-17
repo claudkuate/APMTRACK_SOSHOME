@@ -213,9 +213,17 @@ const statusOptions: Record<string, SelectOption[]> = {
   ],
 };
 
-const pvSubjectTypeOptions: SelectOption[] = [
-  option('PERSON_WITH_VEHICLE', 'Usager avec véhicule'),
-  option('PERSON_ONLY', 'Usager sans véhicule'),
+/// Doit rester aligné sur `UNITES` (apps/api/src/modules/referentiel.rs) et sur la
+/// contrainte `interventions_unite_check` (migration 29). Vide = forfait.
+const interventionUniteOptions: SelectOption[] = [
+  option('', 'Forfait (aucune unité)'),
+  option('BETE', 'Par bête'),
+  option('UNITE', 'Par unité'),
+  option('BOUTIQUE', 'Par boutique'),
+  option('MAISON', 'Par maison'),
+  option('HEURE', 'Par heure'),
+  option('JOUR', 'Par jour'),
+  option('M2', 'Par m²'),
 ];
 
 const communeRelation: RelationConfig = {
@@ -887,6 +895,8 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       'delai_paiement_jours',
       'taux_penalite_basis_points',
       'penalite_fcfa',
+      'unite',
+      'facturation_par_jour',
       'reference_deliberation',
       'active',
     ],
@@ -998,6 +1008,23 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         'Montant fixe délibéré par la commune. Si > 0, remplace le taux ; 0 ou vide = pénalité au taux.',
         'Règle financière',
       ),
+      selectField(
+        'unite',
+        'Unité de facturation',
+        false,
+        interventionUniteOptions,
+        "Laisser vide pour un forfait. Sinon le montant est multiplié par la quantité constatée sur le PV (ex. « par bête », « par boutique »).",
+        'Règle financière',
+      ),
+      field(
+        'facturation_par_jour',
+        'Tarif journalier',
+        'checkbox',
+        false,
+        undefined,
+        "Coché : le montant ci-dessus est un tarif PAR JOUR, multiplié par la durée saisie sur le PV.",
+        'Règle financière',
+      ),
       field(
         'reference_deliberation',
         'Référence délibération',
@@ -1072,6 +1099,23 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         'Montant fixe délibéré par la commune. Si > 0, remplace le taux ; 0 ou vide = pénalité au taux.',
+        'Règle financière',
+      ),
+      selectField(
+        'unite',
+        'Unité de facturation',
+        false,
+        interventionUniteOptions,
+        "Laisser vide pour un forfait. Sinon le montant est multiplié par la quantité constatée sur le PV (ex. « par bête », « par boutique »).",
+        'Règle financière',
+      ),
+      field(
+        'facturation_par_jour',
+        'Tarif journalier',
+        'checkbox',
+        false,
+        undefined,
+        "Coché : le montant ci-dessus est un tarif PAR JOUR, multiplié par la durée saisie sur le PV.",
         'Règle financière',
       ),
       field(
@@ -1170,20 +1214,16 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
     ],
     editable: true,
     createFields: [
-      selectField(
-        'subject_type',
-        'Type de PV',
-        true,
-        pvSubjectTypeOptions,
-        'Le backend exige ensuite les champs usager/véhicule cohérents avec ce type.',
-        '1. Type',
-      ),
+      // Pas de champ « Type de PV » : le serveur le déduit de ce qui est
+      // réellement saisi (`normalize_subject_type`, pvs.rs). Le demander en
+      // premier était une étape inventée côté outil — elle a été retirée du
+      // mobile le 28/06/2026 et n'a aucune raison de subsister ici.
       relationMultiField(
         'intervention_ids',
         'Infractions',
         interventionRelation,
         true,
-        '2. Infractions',
+        '1. Infractions',
       ),
       {
         ...selectField(
@@ -1192,7 +1232,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           true,
           [option('PHYSIQUE', 'Personne physique'), option('MORALE', 'Personne morale')],
           'Une personne morale est identifiée par sa raison sociale.',
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         default: 'PHYSIQUE',
       },
@@ -1204,12 +1244,12 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           true,
           'Ets CAMERAMAN',
           undefined,
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         visibleWhen: { field: 'subject_kind', equals: 'MORALE' },
       },
       {
-        ...field('verbalized_last_name', 'Nom', 'text', true, undefined, undefined, '3. Contrevenant'),
+        ...field('verbalized_last_name', 'Nom', 'text', true, undefined, undefined, '2. Contrevenant'),
         visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
       },
       {
@@ -1220,7 +1260,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           false,
           undefined,
           undefined,
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
       },
@@ -1237,7 +1277,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('AUTRE', 'Autre'),
         ],
         "Requis si un numéro d'identité est renseigné.",
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_identity_number',
@@ -1246,7 +1286,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         'Numéro CNI, passeport, permis...',
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_phone',
@@ -1255,7 +1295,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         true,
         undefined,
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_address',
@@ -1264,9 +1304,9 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
-      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '3. Véhicule'),
       field(
         'vehicle_registration_card_number',
         'Numéro carte grise',
@@ -1274,11 +1314,11 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         'Alternative à la plaque pour identifier le véhicule.',
-        '4. Véhicule',
+        '3. Véhicule',
       ),
-      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '4. Véhicule'),
-      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '4. Véhicule'),
-      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '3. Véhicule'),
+      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '3. Véhicule'),
+      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '3. Véhicule'),
       field(
         'vehicle_owner_name',
         'Propriétaire',
@@ -1286,9 +1326,9 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '4. Véhicule',
+        '3. Véhicule',
       ),
-      relationField('zone_id', 'Zone', zoneRelation, false, '5. Localisation'),
+      relationField('zone_id', 'Zone', zoneRelation, false, '4. Localisation'),
       field(
         'location_description',
         'Lieu',
@@ -1296,13 +1336,13 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '5. Localisation',
+        '4. Localisation',
       ),
       geoPointField(
         'gps_latitude',
         'gps_longitude',
         'Position GPS',
-        '5. Localisation',
+        '4. Localisation',
         'Cliquez sur la carte ou recherchez une adresse. La zone est déduite automatiquement.',
       ),
       field(
@@ -1312,24 +1352,17 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '6. Récapitulatif',
+        '5. Notes',
       ),
     ],
     patchFields: [
-      selectField(
-        'subject_type',
-        'Type de PV',
-        true,
-        pvSubjectTypeOptions,
-        "Modification refusée par l'API si le PV est payé ou annulé.",
-        '1. Type',
-      ),
+      // Idem création : `subject_type` reste déduit par l'API à chaque PATCH.
       relationMultiField(
         'intervention_ids',
         'Infractions',
         interventionRelation,
         true,
-        '2. Infractions',
+        '1. Infractions',
       ),
       {
         ...selectField(
@@ -1338,7 +1371,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           true,
           [option('PHYSIQUE', 'Personne physique'), option('MORALE', 'Personne morale')],
           'Une personne morale est identifiée par sa raison sociale.',
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         default: 'PHYSIQUE',
       },
@@ -1350,7 +1383,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           true,
           'Ets CAMERAMAN',
           undefined,
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         visibleWhen: { field: 'subject_kind', equals: 'MORALE' },
       },
@@ -1362,7 +1395,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           false,
           undefined,
           undefined,
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
       },
@@ -1374,7 +1407,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           false,
           undefined,
           undefined,
-          '3. Contrevenant',
+          '2. Contrevenant',
         ),
         visibleWhen: { field: 'subject_kind', equals: 'PHYSIQUE' },
       },
@@ -1391,7 +1424,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
           option('AUTRE', 'Autre'),
         ],
         "Requis si un numéro d'identité est renseigné.",
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_identity_number',
@@ -1400,7 +1433,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         'Numéro CNI, passeport, permis...',
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_phone',
@@ -1409,7 +1442,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
       field(
         'verbalized_address',
@@ -1418,9 +1451,9 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '3. Contrevenant',
+        '2. Contrevenant',
       ),
-      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_plate', 'Plaque véhicule', 'text', false, undefined, undefined, '3. Véhicule'),
       field(
         'vehicle_registration_card_number',
         'Numéro carte grise',
@@ -1428,11 +1461,11 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         'Alternative à la plaque pour identifier le véhicule.',
-        '4. Véhicule',
+        '3. Véhicule',
       ),
-      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '4. Véhicule'),
-      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '4. Véhicule'),
-      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '4. Véhicule'),
+      field('vehicle_make', 'Marque', 'text', false, undefined, undefined, '3. Véhicule'),
+      field('vehicle_model', 'Modèle', 'text', false, undefined, undefined, '3. Véhicule'),
+      field('vehicle_color', 'Couleur', 'text', false, undefined, undefined, '3. Véhicule'),
       field(
         'vehicle_owner_name',
         'Propriétaire',
@@ -1440,9 +1473,9 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '4. Véhicule',
+        '3. Véhicule',
       ),
-      relationField('zone_id', 'Zone', zoneRelation, false, '5. Localisation'),
+      relationField('zone_id', 'Zone', zoneRelation, false, '4. Localisation'),
       field(
         'location_description',
         'Lieu',
@@ -1450,13 +1483,13 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '5. Localisation',
+        '4. Localisation',
       ),
       geoPointField(
         'gps_latitude',
         'gps_longitude',
         'Position GPS',
-        '5. Localisation',
+        '4. Localisation',
         'Cliquez sur la carte ou recherchez une adresse. La zone est déduite automatiquement.',
       ),
       field(
@@ -1466,7 +1499,7 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
         false,
         undefined,
         undefined,
-        '6. Récapitulatif',
+        '5. Notes',
       ),
     ],
     actions: [
@@ -2066,6 +2099,11 @@ function commonLabels(): Record<string, string> {
     amount_paid_fcfa: 'Montant encaissé',
     delai_paiement_jours: 'Délai',
     taux_penalite_basis_points: 'Pénalité',
+    unite: 'Unité de facturation',
+    facturation_par_jour: 'Tarif journalier',
+    quantite: 'Quantité',
+    duree_jours: 'Durée (jours)',
+    montant_ligne_fcfa: 'Montant ligne',
     reference_deliberation: 'Délibération',
     pv_number: 'Numéro PV',
     verbalized_name: 'Verbalisé',

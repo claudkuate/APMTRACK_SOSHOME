@@ -15,7 +15,15 @@ class ProfilePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final profile = controller.profile;
     if (profile == null) {
-      return const Center(child: CircularProgressIndicator());
+      // Un profil absent n'est pas forcement un chargement en cours : c'est aussi
+      // le cas quand /mobile/me a echoue (API injoignable, agent non rattache a
+      // une commune, abonnement suspendu). Un spinner nu laisse alors l'agent
+      // devant un ecran fige sans diagnostic — on affiche l'erreur et on offre
+      // une relance.
+      if (controller.loadingData) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      return _ProfileUnavailable(controller: controller);
     }
 
     return ListView(
@@ -101,6 +109,88 @@ class ProfilePage extends StatelessWidget {
               Text(
                 'Env: $appEnvironment',
                 style: const TextStyle(color: apmMuted),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: () => controller.signOut(),
+          icon: const Icon(Icons.logout),
+          label: const Text('Deconnexion'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Ecran de repli quand `/mobile/me` n'a rien rendu : il nomme la cause et donne
+/// l'adresse d'API reellement interrogee, seul moyen pour un agent de terrain de
+/// signaler un APK construit sur la mauvaise URL.
+class _ProfileUnavailable extends StatelessWidget {
+  const _ProfileUnavailable({required this.controller});
+
+  final SessionController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final reason = controller.message ?? 'Profil indisponible';
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 96),
+      children: [
+        Text(
+          'Profil',
+          style: Theme.of(
+            context,
+          ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 12),
+        SectionPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.error_outline, color: apmRed),
+                  SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Profil non charge',
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(reason, style: const TextStyle(color: apmMuted)),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => controller.refreshData(),
+                icon: const Icon(Icons.refresh),
+                label: const Text('Reessayer'),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        SectionPanel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Diagnostic',
+                style: TextStyle(fontWeight: FontWeight.w900),
+              ),
+              const SizedBox(height: 8),
+              Text('API: $apiBaseUrl', style: const TextStyle(color: apmMuted)),
+              Text(
+                'Env: $appEnvironment',
+                style: const TextStyle(color: apmMuted),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Communiquez ces deux lignes au support avec le matricule concerne.',
+                style: TextStyle(color: apmMuted, fontSize: 12),
               ),
             ],
           ),

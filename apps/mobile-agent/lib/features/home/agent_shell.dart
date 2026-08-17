@@ -43,16 +43,17 @@ class _AgentShellState extends State<AgentShell> {
     }
   }
 
+  /// `refreshData` ne leve jamais : elle piege chaque appel et depose la cause
+  /// dans `controller.message`. Un `try/catch` autour d'elle serait donc du code
+  /// mort et l'agent ne verrait jamais l'erreur — on lit le message.
   Future<void> _refresh() async {
-    try {
-      await widget.controller.refreshData();
-    } catch (_) {
-      if (!mounted) return;
-      final message = widget.controller.message ?? 'Actualisation impossible';
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(message)));
-    }
+    await widget.controller.refreshData();
+    if (!mounted) return;
+    final message = widget.controller.message;
+    if (message == null) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
   @override

@@ -170,6 +170,12 @@ class _CreatePvPageState extends State<CreatePvPage> {
     _locationController.dispose();
     _notesController.dispose();
     _interventionSearchController.dispose();
+    for (final controller in _quantiteControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in _dureeControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -214,15 +220,48 @@ class _CreatePvPageState extends State<CreatePvPage> {
         .toList();
   }
 
+  /// Quantite constatee par infraction (defaut 1). Cle = identifiant d'infraction.
+  final _quantites = <String, int>{};
+
+  /// Duree en jours constatee par infraction (defaut 1).
+  final _durees = <String, int>{};
+
+  final _quantiteControllers = <String, TextEditingController>{};
+  final _dureeControllers = <String, TextEditingController>{};
+
+  int _quantiteDe(Intervention item) =>
+      item.unite == null ? 1 : (_quantites[item.id] ?? 1);
+
+  int _dureeDe(Intervention item) =>
+      item.facturationParJour ? (_durees[item.id] ?? 1) : 1;
+
+  /// Doit reproduire le calcul de ligne du serveur (`pv_amounts_due`, migration 29) :
+  /// montant unitaire x quantite x duree. Un ecart afficherait a l'agent un montant
+  /// different de celui qui sera reclame au contrevenant.
+  int _montantLigne(Intervention item) =>
+      (item.montantFcfa ?? 0) * _quantiteDe(item) * _dureeDe(item);
+
   int? get _totalFcfa {
     var total = 0;
     for (final item in _selectedInterventions) {
       if (item.sujetPaiement) {
-        total += item.montantFcfa ?? 0;
+        total += _montantLigne(item);
       }
     }
     return total == 0 ? null : total;
   }
+
+  /// Constats a transmettre : seules les lignes reellement multipliees.
+  List<PvInterventionQuantite> get _interventionQuantites => _selectedInterventions
+      .map(
+        (item) => PvInterventionQuantite(
+          interventionId: item.id,
+          quantite: _quantiteDe(item),
+          dureeJours: _dureeDe(item),
+        ),
+      )
+      .where((item) => !item.isDefault)
+      .toList();
 
   List<Intervention> get _filteredInterventions {
     final query = _normalizeForSearch(_interventionSearchController.text);
@@ -430,6 +469,7 @@ class _CreatePvPageState extends State<CreatePvPage> {
     return CreatePvPayload(
       interventionId: ids.first,
       interventionIds: ids,
+      interventionQuantites: _interventionQuantites,
       subjectType: hasVehicle
           ? PvSubjectTypes.personWithVehicle
           : PvSubjectTypes.personOnly,
@@ -869,7 +909,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
                           key: Key('selected-infraction-chip-${item.id}'),
                           label: Text(
                             '${item.nom} · ${formatFcfa(item.montantFcfa)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
+                          tooltip: item.nom,
                           deleteIcon: const Icon(Icons.cancel, size: 18),
                           onDeleted: () => setState(
                             () => _selectedInterventionIds.remove(item.id),
@@ -880,6 +923,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
                 ],
               ),
             ),
+          ],
+          if (_selectedInterventions.any((item) => item.demandeQuantite)) ...[
+            const Divider(height: 1),
+            _buildQuantitesBlock(),
           ],
           const Divider(height: 1),
           ListTile(
@@ -899,6 +946,112 @@ class _CreatePvPageState extends State<CreatePvPage> {
       ),
     );
   }
+
+  /// Saisie des multiplicateurs, affichee uniquement pour les infractions que le
+  /// referentiel declare tarifees a l'unite ou au jour. Le montant de ligne est
+  /// recalcule a chaque frappe : l'agent voit ce qui sera reclame, jamais un
+  /// forfait qui serait ensuite gonfle par le serveur.
+  Widget _buildQuantitesBlock() {
+    final items = _selectedInterventions
+        .where((item) => item.demandeQuantite)
+        .toList();
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Quantites constatees',
+            style: TextStyle(fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Ces infractions sont tarifees a l unite ou au jour : le montant est multiplie.',
+            style: TextStyle(color: apmMuted, fontSize: 12),
+          ),
+          for (final item in items)
+            Padding(
+              padding: const EdgeInsets.only(top: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.nom,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (item.unite != null)
+                        Expanded(
+                          child: TextField(
+                            key: Key('quantite-${item.id}'),
+                            controller: _counterController(
+                              _quantiteControllers,
+                              item.id,
+                              _quantiteDe(item),
+                            ),
+                            keyboardType: TextInputType.number,
+                            decoration: InputDecoration(
+                              labelText: 'Nombre de ${item.uniteLabel}',
+                              isDense: true,
+                            ),
+                            onChanged: (value) => setState(
+                              () => _quantites[item.id] = _parseCounter(value),
+                            ),
+                          ),
+                        ),
+                      if (item.unite != null && item.facturationParJour)
+                        const SizedBox(width: 10),
+                      if (item.facturationParJour)
+                        Expanded(
+                          child: TextField(
+                            key: Key('duree-${item.id}'),
+                            controller: _counterController(
+                              _dureeControllers,
+                              item.id,
+                              _dureeDe(item),
+                            ),
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Nombre de jours',
+                              isDense: true,
+                            ),
+                            onChanged: (value) => setState(
+                              () => _durees[item.id] = _parseCounter(value),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (item.sujetPaiement) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      'Ligne : ${formatFcfa(_montantLigne(item))}',
+                      style: const TextStyle(color: apmMuted, fontSize: 12),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Un champ vide ou non numerique vaut 1 : le serveur refuse toute valeur < 1,
+  /// autant ne jamais construire un payload invalide pendant la frappe.
+  int _parseCounter(String value) {
+    final parsed = int.tryParse(value.trim());
+    return parsed == null || parsed < 1 ? 1 : parsed;
+  }
+
+  TextEditingController _counterController(
+    Map<String, TextEditingController> pool,
+    String key,
+    int initial,
+  ) => pool.putIfAbsent(key, () => TextEditingController(text: '$initial'));
 
   Widget _buildSubjectStep() {
     return SectionPanel(
@@ -967,8 +1120,13 @@ class _CreatePvPageState extends State<CreatePvPage> {
             ],
           ),
         const SizedBox(height: 12),
+        // `isExpanded` borne la largeur du bouton : sans lui, un libelle long
+        // (PERMIS_CONDUIRE a fort grossissement de police) fait deborder la Row
+        // interne et affiche le bandeau jaune-et-noir. `ellipsis` seul ne suffit
+        // pas, il ne s'applique que sous une contrainte de largeur.
         DropdownButtonFormField<String>(
           initialValue: _identityType,
+          isExpanded: true,
           decoration: const InputDecoration(
             labelText: 'Type d identite',
             prefixIcon: Icon(Icons.badge_outlined),
@@ -976,7 +1134,10 @@ class _CreatePvPageState extends State<CreatePvPage> {
           items: [
             const DropdownMenuItem(value: null, child: Text('Choisir...')),
             ..._identityTypeOptions.map(
-              (value) => DropdownMenuItem(value: value, child: Text(value)),
+              (value) => DropdownMenuItem(
+                value: value,
+                child: Text(value, overflow: TextOverflow.ellipsis),
+              ),
             ),
           ],
           onChanged: (value) => setState(() => _identityType = value),

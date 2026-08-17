@@ -1,29 +1,46 @@
-{
-	email claudkuate@gmail.com
-}
+# Blocs APMTRACK pour le Caddy SYSTÈME du VPS (/etc/caddy/Caddyfile).
+#
+# ⚠️ Ce fichier est une RÉFÉRENCE à recopier, pas un Caddyfile autonome : le VPS
+# héberge d'autres projets (cqv.nasla.cm, sygifloc.adl.cm) derrière le même Caddy.
+# Ne jamais remplacer /etc/caddy/Caddyfile par ce fichier — y ajouter ces blocs.
+#
+# Les conteneurs ne publient que sur la loopback (docker-compose.prod.yml) :
+#   web-admin -> 127.0.0.1:8090
+#   api       -> 127.0.0.1:8091
+# D'où `reverse_proxy 127.0.0.1:<port>` et non un nom de service Docker : le Caddy
+# système n'est pas dans le réseau `apmtrack` et ne résout pas `api` / `web-admin`.
+
+# ─── Domaines canoniques ───────────────────────────────────────────────────────
 
 apmtrack.cm {
 	encode gzip
-	reverse_proxy web-admin:80
+	reverse_proxy 127.0.0.1:8090
 }
 
 www.apmtrack.cm {
 	redir https://apmtrack.cm{uri} permanent
 }
 
+# L'API doit rester sous le MÊME domaine racine que le front : le cookie de session
+# est `SameSite=Lax` (apps/api/src/modules/auth.rs), donc un front sur apmtrack.cm
+# qui appellerait une API sur soshome-cameroun.net ne recevrait jamais son cookie
+# de rafraîchissement — la session du back-office mourrait à chaque rechargement.
 api.apmtrack.cm {
 	encode gzip
-	reverse_proxy api:8080
+	reverse_proxy 127.0.0.1:8091
 }
 
-# Domaines de démo — conservés : les QR codes déjà imprimés sur les PV encodent
-# https://apmtrack-api.soshome-cameroun.net et les APK mobiles déployés aussi.
+# ─── Domaines historiques — à conserver indéfiniment ───────────────────────────
+# Les QR codes déjà imprimés sur les PV encodent apmtrack-api.soshome-cameroun.net,
+# et les APK déjà distribués y pointent. Ces hôtes doivent rester servis en PROXY
+# (jamais en redirection : une redirection casserait les appels d'API des APK).
+
 apmtrack.soshome-cameroun.net {
 	encode gzip
-	reverse_proxy web-admin:80
+	reverse_proxy 127.0.0.1:8090
 }
 
 apmtrack-api.soshome-cameroun.net {
 	encode gzip
-	reverse_proxy api:8080
+	reverse_proxy 127.0.0.1:8091
 }

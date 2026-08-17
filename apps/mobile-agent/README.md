@@ -20,8 +20,13 @@ L'app lit deux variables à la compilation via `--dart-define` (défauts dans
 
 | Variable  | Défaut                      | Rôle                          |
 |-----------|-----------------------------|-------------------------------|
-| `API_URL` | `http://192.168.1.113:8080` | URL de base de l'API          |
+| `API_URL` | `https://api.apmtrack.cm`   | URL de base de l'API          |
 | `APP_ENV` | `development`               | Étiquette d'environnement     |
+
+> ⚠️ Avant tout build destiné au terrain, vérifier que l'hôte visé répond
+> réellement en HTTPS : `curl -sI https://api.apmtrack.cm/health`. Un hôte sans
+> certificat produit un APK dont *tous* les appels échouent, et l'agent ne voit
+> qu'un profil qui ne charge jamais.
 
 Valeurs `API_URL` usuelles :
 

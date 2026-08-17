@@ -255,6 +255,8 @@ class Intervention {
     this.description,
     this.montantFcfa,
     this.delaiPaiementJours,
+    this.unite,
+    this.facturationParJour = false,
   });
 
   final String id;
@@ -270,6 +272,27 @@ class Intervention {
   final int? montantFcfa;
   final int? delaiPaiementJours;
 
+  /// Unite de facturation deliberee (BETE, BOUTIQUE, UNITE...). `null` = forfait :
+  /// aucune quantite n'est demandee et le serveur refuserait une quantite > 1.
+  final String? unite;
+
+  /// `true` quand `montantFcfa` est un tarif JOURNALIER : une duree est demandee.
+  final bool facturationParJour;
+
+  /// L'agent doit-il saisir un multiplicateur pour cette infraction ?
+  bool get demandeQuantite => unite != null || facturationParJour;
+
+  /// Libelle court de l'unite, pour l'etiquette du champ de saisie.
+  String get uniteLabel => switch (unite) {
+    'BETE' => 'betes',
+    'BOUTIQUE' => 'boutiques',
+    'MAISON' => 'maisons',
+    'HEURE' => 'heures',
+    'JOUR' => 'jours',
+    'M2' => 'm2',
+    _ => 'unites',
+  };
+
   factory Intervention.fromJson(JsonMap json) {
     return Intervention(
       id: readString(json, 'id'),
@@ -284,6 +307,8 @@ class Intervention {
       active: readBool(json, 'active', fallback: true),
       montantFcfa: readOptionalInt(json, 'montant_fcfa'),
       delaiPaiementJours: readOptionalInt(json, 'delai_paiement_jours'),
+      unite: readOptionalString(json, 'unite'),
+      facturationParJour: readBool(json, 'facturation_par_jour'),
     );
   }
 
@@ -300,6 +325,8 @@ class Intervention {
     'active': active,
     'montant_fcfa': montantFcfa,
     'delai_paiement_jours': delaiPaiementJours,
+    'unite': unite,
+    'facturation_par_jour': facturationParJour,
   };
 }
 
@@ -547,10 +574,43 @@ class PvIntervention {
   };
 }
 
+/// Quantite et duree constatees pour une infraction d'un PV.
+///
+/// Le referentiel decide de ce qui est multipliable (`Intervention.unite`,
+/// `Intervention.facturationParJour`) ; l'agent ne renseigne que le constat.
+class PvInterventionQuantite {
+  const PvInterventionQuantite({
+    required this.interventionId,
+    this.quantite = 1,
+    this.dureeJours = 1,
+  });
+
+  final String interventionId;
+  final int quantite;
+  final int dureeJours;
+
+  /// Rien a envoyer quand le constat se ramene au forfait.
+  bool get isDefault => quantite == 1 && dureeJours == 1;
+
+  factory PvInterventionQuantite.fromJson(JsonMap json) =>
+      PvInterventionQuantite(
+        interventionId: readString(json, 'intervention_id'),
+        quantite: readOptionalInt(json, 'quantite') ?? 1,
+        dureeJours: readOptionalInt(json, 'duree_jours') ?? 1,
+      );
+
+  JsonMap toJson() => {
+    'intervention_id': interventionId,
+    'quantite': quantite,
+    'duree_jours': dureeJours,
+  };
+}
+
 class CreatePvPayload {
   const CreatePvPayload({
     required this.interventionId,
     this.interventionIds = const [],
+    this.interventionQuantites = const [],
     this.subjectType = PvSubjectTypes.personWithVehicle,
     this.subjectKind,
     this.raisonSociale,
@@ -576,6 +636,9 @@ class CreatePvPayload {
 
   final String interventionId;
   final List<String> interventionIds;
+
+  /// Quantites/durees constatees. Une infraction absente vaut 1 unite, 1 jour.
+  final List<PvInterventionQuantite> interventionQuantites;
   final String subjectType;
   final String? subjectKind;
   final String? raisonSociale;
@@ -603,6 +666,11 @@ class CreatePvPayload {
     'intervention_ids': interventionIds.isEmpty
         ? [interventionId]
         : interventionIds,
+    // Omis quand rien n'est multiplié : le serveur applique alors 1 unité, 1 jour.
+    if (interventionQuantites.isNotEmpty)
+      'intervention_quantites': interventionQuantites
+          .map((item) => item.toJson())
+          .toList(),
     'subject_type': subjectType,
     'subject_kind': subjectKind,
     'raison_sociale': raisonSociale,

@@ -102,6 +102,11 @@ pub struct PvInterventionResponse {
     pub taux_penalite: Option<f64>,
     pub taux_penalite_basis_points: Option<i32>,
     pub penalite_fcfa: Option<i64>,
+    pub quantite: i32,
+    pub duree_jours: i32,
+    /// Montant de la ligne : `montant_fcfa` x quantite x duree. Expose pour que les
+    /// clients affichent le detail sans avoir a reproduire le calcul.
+    pub montant_ligne_fcfa: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,10 +148,24 @@ pub struct PvFilterQuery {
     status: Option<String>,
 }
 
+/// Quantite et duree constatees pour une infraction du PV.
+///
+/// Canal separe de `intervention_ids` afin que les clients anterieurs continuent de
+/// fonctionner : une infraction absente de cette liste est facturee 1 unite, 1 jour,
+/// c'est-a-dire exactement le forfait d'avant la migration 29.
+#[derive(Debug, Deserialize)]
+pub struct InterventionQuantiteInput {
+    pub intervention_id: Uuid,
+    pub quantite: Option<i32>,
+    pub duree_jours: Option<i32>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreatePvRequest {
     pub intervention_id: Option<Uuid>,
     pub intervention_ids: Option<Vec<Uuid>>,
+    /// Quantites/durees constatees, appariees par `intervention_id`.
+    pub intervention_quantites: Option<Vec<InterventionQuantiteInput>>,
     pub subject_type: Option<String>,
     pub subject_kind: Option<String>,
     pub raison_sociale: Option<String>,
@@ -175,6 +194,7 @@ pub struct CreatePvRequest {
 pub struct PatchPvRequest {
     pub intervention_id: Option<Uuid>,
     pub intervention_ids: Option<Vec<Uuid>>,
+    pub intervention_quantites: Option<Vec<InterventionQuantiteInput>>,
     pub subject_type: Option<String>,
     pub subject_kind: Option<String>,
     pub raison_sociale: Option<String>,
@@ -404,7 +424,13 @@ async fn create_pv(
     let agent_id: Uuid = agent_row.get("id");
 
     let interventions =
-        load_intervention_snapshots_tx(&mut tx, commune_id, &intervention_ids).await?;
+        load_intervention_snapshots_tx(
+            &mut tx,
+            commune_id,
+            &intervention_ids,
+            payload.intervention_quantites.as_deref().unwrap_or(&[]),
+        )
+        .await?;
     check_double_verbalisation(
         &mut tx,
         commune_id,
@@ -573,7 +599,9 @@ pub(crate) async fn create_system_pv_tx(
     input: SystemPvInput<'_>,
 ) -> Result<(Uuid, String, &'static str), ApiError> {
     let interventions =
-        load_intervention_snapshots_tx(tx, input.commune_id, &[input.intervention_id]).await?;
+        // PV système (mise en fourrière) : 1 unité, 1 jour. La facturation du
+        // gardiennage par jour se règle à la restitution, pas à l'entrée.
+        load_intervention_snapshots_tx(tx, input.commune_id, &[input.intervention_id], &[]).await?;
 
     let (year, seq) = next_document_sequence(tx, input.commune_id, SEQUENCE_PV).await?;
     let pv_number = format!(
@@ -737,7 +765,13 @@ async fn patch_pv(
     )?;
 
     let interventions =
-        load_intervention_snapshots_tx(&mut tx, existing.commune_id, &intervention_ids).await?;
+        load_intervention_snapshots_tx(
+            &mut tx,
+            existing.commune_id,
+            &intervention_ids,
+            payload.intervention_quantites.as_deref().unwrap_or(&[]),
+        )
+        .await?;
     check_double_verbalisation(
         &mut tx,
         existing.commune_id,
@@ -1239,6 +1273,10 @@ struct InterventionSnapshot {
     taux_penalite: Option<f64>,
     taux_penalite_basis_points: Option<i32>,
     penalite_fcfa: Option<i64>,
+    /// Nombre d'unites constatees (betes, boutiques, vehicules...). 1 pour un forfait.
+    quantite: i32,
+    /// Nombre de jours factures. 1 hors tarif journalier.
+    duree_jours: i32,
 }
 
 async fn load_pv_for_update_tx(
@@ -1287,7 +1325,8 @@ async fn load_pv_interventions(
             delai_paiement_jours,
             taux_penalite::DOUBLE PRECISION AS taux_penalite,
             taux_penalite_basis_points,
-            penalite_fcfa
+            penalite_fcfa,
+            quantite, duree_jours
         FROM pv_interventions
         WHERE pv_id = $1
         ORDER BY order_index ASC
@@ -1317,7 +1356,8 @@ async fn load_pv_interventions_bulk(
             delai_paiement_jours,
             taux_penalite::DOUBLE PRECISION AS taux_penalite,
             taux_penalite_basis_points,
-            penalite_fcfa
+            penalite_fcfa,
+            quantite, duree_jours
         FROM pv_interventions
         WHERE pv_id = ANY($1)
         ORDER BY pv_id, order_index ASC
@@ -1348,7 +1388,8 @@ async fn load_pv_interventions_tx(
             delai_paiement_jours,
             taux_penalite::DOUBLE PRECISION AS taux_penalite,
             taux_penalite_basis_points,
-            penalite_fcfa
+            penalite_fcfa,
+            quantite, duree_jours
         FROM pv_interventions
         WHERE pv_id = $1
         ORDER BY order_index ASC
@@ -1361,24 +1402,72 @@ async fn load_pv_interventions_tx(
 }
 
 fn row_to_pv_intervention(row: sqlx::postgres::PgRow) -> PvInterventionResponse {
+    let montant_fcfa: Option<i64> = row.get("montant_fcfa");
+    let quantite: i32 = row.get("quantite");
+    let duree_jours: i32 = row.get("duree_jours");
     PvInterventionResponse {
         id: row.get("id"),
         intervention_id: row.get("intervention_id"),
         order_index: row.get("order_index"),
         nom: row.get("nom"),
         sujet_paiement: row.get("sujet_paiement"),
-        montant_fcfa: row.get("montant_fcfa"),
+        montant_fcfa,
         delai_paiement_jours: row.get("delai_paiement_jours"),
         taux_penalite: row.get("taux_penalite"),
         taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
         penalite_fcfa: row.get("penalite_fcfa"),
+        quantite,
+        duree_jours,
+        montant_ligne_fcfa: montant_fcfa
+            .unwrap_or(0)
+            .saturating_mul(i64::from(quantite))
+            .saturating_mul(i64::from(duree_jours)),
     }
+}
+
+/// Quantite et duree retenues pour une infraction, controlees contre le referentiel.
+///
+/// Le referentiel est seul juge de ce qui est multipliable : une infraction sans
+/// `unite` est un forfait et une infraction sans `facturation_par_jour` est ponctuelle.
+/// Accepter un multiplicateur non delibere reviendrait a laisser le terrain fixer le
+/// montant, ce que la regle « les montants viennent du referentiel » interdit.
+fn resolve_quantite(
+    requested: Option<&InterventionQuantiteInput>,
+    nom: &str,
+    unite: Option<&str>,
+    facturation_par_jour: bool,
+) -> Result<(i32, i32), ApiError> {
+    let quantite = requested.and_then(|item| item.quantite).unwrap_or(1);
+    let duree_jours = requested.and_then(|item| item.duree_jours).unwrap_or(1);
+
+    if quantite < 1 {
+        return Err(ApiError::bad_request(format!(
+            "Quantite invalide pour « {nom} » : elle doit valoir au moins 1"
+        )));
+    }
+    if duree_jours < 1 {
+        return Err(ApiError::bad_request(format!(
+            "Duree invalide pour « {nom} » : elle doit valoir au moins 1 jour"
+        )));
+    }
+    if unite.is_none() && quantite != 1 {
+        return Err(ApiError::bad_request(format!(
+            "« {nom} » est un forfait : aucune quantite ne peut lui etre appliquee"
+        )));
+    }
+    if !facturation_par_jour && duree_jours != 1 {
+        return Err(ApiError::bad_request(format!(
+            "« {nom} » n'est pas facturee au jour : aucune duree ne peut lui etre appliquee"
+        )));
+    }
+    Ok((quantite, duree_jours))
 }
 
 async fn load_intervention_snapshots_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commune_id: Uuid,
     intervention_ids: &[Uuid],
+    quantites: &[InterventionQuantiteInput],
 ) -> Result<Vec<InterventionSnapshot>, ApiError> {
     let mut snapshots = Vec::with_capacity(intervention_ids.len());
     for (index, intervention_id) in intervention_ids.iter().enumerate() {
@@ -1390,6 +1479,7 @@ async fn load_intervention_snapshots_tx(
                 taux_penalite::DOUBLE PRECISION AS taux_penalite,
                 taux_penalite_basis_points,
                 penalite_fcfa,
+                unite, facturation_par_jour,
                 active
             FROM interventions
             WHERE id = $1 AND deleted_at IS NULL
@@ -1413,16 +1503,31 @@ async fn load_intervention_snapshots_tx(
             ));
         }
 
+        let nom: String = row.get("nom");
+        let unite: Option<String> = row.get("unite");
+        let facturation_par_jour: bool = row.get("facturation_par_jour");
+        let requested = quantites
+            .iter()
+            .find(|item| item.intervention_id == *intervention_id);
+        let (quantite, duree_jours) = resolve_quantite(
+            requested,
+            &nom,
+            unite.as_deref(),
+            facturation_par_jour,
+        )?;
+
         snapshots.push(InterventionSnapshot {
             intervention_id: row.get("id"),
             order_index: index as i32,
-            nom: row.get("nom"),
+            nom,
             sujet_paiement: row.get("sujet_paiement"),
             montant_fcfa: row.get("montant_fcfa"),
             delai_paiement_jours: row.get("delai_paiement_jours"),
             taux_penalite: row.get("taux_penalite"),
             taux_penalite_basis_points: row.get("taux_penalite_basis_points"),
             penalite_fcfa: row.get("penalite_fcfa"),
+            quantite,
+            duree_jours,
         });
     }
     Ok(snapshots)
@@ -1444,9 +1549,10 @@ async fn replace_pv_interventions_tx(
             INSERT INTO pv_interventions (
                 pv_id, intervention_id, order_index, nom, sujet_paiement,
                 montant_fcfa, delai_paiement_jours, taux_penalite,
-                taux_penalite_basis_points, penalite_fcfa
+                taux_penalite_basis_points, penalite_fcfa,
+                quantite, duree_jours
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             "#,
         )
         .bind(pv_id)
@@ -1459,6 +1565,8 @@ async fn replace_pv_interventions_tx(
         .bind(item.taux_penalite)
         .bind(item.taux_penalite_basis_points)
         .bind(item.penalite_fcfa)
+        .bind(item.quantite)
+        .bind(item.duree_jours)
         .execute(&mut **tx)
         .await
         .map_err(map_database_error)?;
@@ -1466,11 +1574,19 @@ async fn replace_pv_interventions_tx(
     Ok(())
 }
 
+/// Doit reproduire EXACTEMENT le calcul de ligne de la vue `pv_amounts_due`
+/// (migration 29) : montant unitaire x quantite x duree. Toute divergence ferait
+/// mentir `pvs.amount_initial_fcfa`, qui sert de base au repli de la vue.
 fn total_amount_fcfa(interventions: &[InterventionSnapshot]) -> Option<i64> {
     let total = interventions
         .iter()
         .filter(|item| item.sujet_paiement)
-        .map(|item| item.montant_fcfa.unwrap_or(0))
+        .map(|item| {
+            item.montant_fcfa
+                .unwrap_or(0)
+                .saturating_mul(i64::from(item.quantite))
+                .saturating_mul(i64::from(item.duree_jours))
+        })
         .sum::<i64>();
     (total > 0).then_some(total)
 }

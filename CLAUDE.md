@@ -271,9 +271,11 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 20260603000027 — découpage administratif : arrondissements, quartiers, communes.arrondissement_id,
                  zones.quartier_id, index uniques CI partiels (suppression/recréation possible)
 20260603000028 — users.must_change_password (provisionnement automatique du compte agent)
+20260603000029 — tarifs unitaires/journaliers (interventions.unite + facturation_par_jour,
+                 pv_interventions.quantite + duree_jours, vue pv_amounts_due multipliée)
 ```
 
-**Next migration number: `20260603000029`.**
+**Next migration number: `20260603000030`.**
 
 **PostGIS** — the Postgres image is `postgis/postgis` (see `docker-compose.dev.yml`). Migration 7 runs
 `CREATE EXTENSION postgis`. Geometry columns use SRID 4326. Never decode `geometry` into Rust directly:
@@ -294,6 +296,15 @@ Point columns (`pvs.geom`, `signalements.geom`) are `GENERATED ALWAYS` from `gps
   to the receveur, the amount required at validation and the dashboard aggregate cannot diverge.
   Never re-implement the penalty formula in Rust, and never sum `pvs.amount_initial_fcfa` as an
   "amount due" — that column is the **base only** and structurally cannot carry a penalty.
+- **Tarifs unitaires et journaliers** (migration 29) — le référentiel déclare
+  `interventions.unite` (NULL = forfait) et `interventions.facturation_par_jour` ;
+  le PV porte le constat dans `pv_interventions.quantite` / `duree_jours`.
+  Le montant de ligne est **`montant_fcfa × quantite × duree_jours`**, dans la vue
+  `pv_amounts_due` **comme** dans `pvs::total_amount_fcfa()` — les deux doivent rester
+  identiques, sinon `pvs.amount_initial_fcfa` (base du repli de la vue) devient faux.
+  L'API refuse une quantité sur un forfait ou une durée sur un tarif non journalier :
+  un agent ne fixe jamais un montant que la délibération n'autorise pas. La pénalité
+  **forfaitaire** n'est pas multipliée (c'est une sanction, pas un prix unitaire).
 - **Penalty calculation** — flat `penalite_fcfa` wins over the rate; rate is
   `taux_penalite_basis_points/100`, falling back to `taux_penalite`; applied once `now > due_date`.
   A PV with no paying `pv_interventions` row still accrues its penalty, rebuilt from `interventions`
