@@ -11,6 +11,8 @@ import {
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
 import * as L from 'leaflet';
+// Doit precéder le greffon : il s'installe sur le `L` global (voir leaflet-global).
+import { pluginL } from '../../shared/map/leaflet-global';
 import 'leaflet.markercluster';
 
 import {
@@ -237,7 +239,7 @@ export class CarteMapPage implements AfterViewInit, OnDestroy {
     fc: GeoFeatureCollection,
     aggregate: L.FeatureGroup,
   ): L.LayerGroup {
-    const cluster = L.markerClusterGroup({ showCoverageOnHover: false });
+    const cluster = pluginL.markerClusterGroup({ showCoverageOnHover: false });
     const icon = coloredDivIcon(this.colorFor(key));
     for (const feature of fc.features) {
       const coords = this.pointCoords(feature);

@@ -9,6 +9,8 @@ import {
   viewChild,
 } from '@angular/core';
 import * as L from 'leaflet';
+// Doit precéder le greffon : il s'installe sur le `L` global (voir leaflet-global).
+import './leaflet-global';
 import 'leaflet-draw';
 
 import { createBaseMap, fitToLayer, polygonStyle } from './leaflet-shared';
@@ -80,14 +82,20 @@ export class ZoneEditorComponent implements AfterViewInit, OnDestroy {
     });
     this.map.addControl(drawControl);
 
-    this.map.on(L.Draw.Event.CREATED, (e: L.LeafletEvent) => {
+    // Noms d'événements en clair plutôt que `L.Draw.Event.*`. leaflet-draw est un
+    // greffon UMD : il greffe `Draw` sur le `L` **global**, alors que ce module lit le
+    // `L` **importé**. Les deux partagent leurs sous-objets — d'où `L.Control.Draw`
+    // ci-dessus qui fonctionne — mais la propriété de premier niveau `Draw` n'existe
+    // que sur le global. `L.Draw.Event` y était donc `undefined`, et sa lecture cassait
+    // le `ngAfterViewInit` de tout formulaire portant un contour (zones, communes).
+    this.map.on('draw:created', (e: L.LeafletEvent) => {
       const layer = (e as L.DrawEvents.Created).layer;
       this.drawn!.clearLayers();
       this.drawn!.addLayer(layer);
       this.emitGeometry();
     });
-    this.map.on(L.Draw.Event.EDITED, () => this.emitGeometry());
-    this.map.on(L.Draw.Event.DELETED, () => this.emitGeometry());
+    this.map.on('draw:edited', () => this.emitGeometry());
+    this.map.on('draw:deleted', () => this.emitGeometry());
 
     this.loadBoundary(this.boundary());
     setTimeout(() => this.map?.invalidateSize(), 150);
