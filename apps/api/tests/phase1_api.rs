@@ -15,6 +15,137 @@ use uuid::Uuid;
 static DB_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
+async fn commune_subscription_migration_preserves_legacy_deadlines_and_adds_grace() {
+    if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
+        eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
+        return;
+    }
+
+    let _db_guard = DB_TEST_LOCK.lock().await;
+    let state = test_state();
+    database::run_migrations(&state.db)
+        .await
+        .expect("base migrations");
+
+    let mut tx = state.db.begin().await.expect("migration test transaction");
+    let schema_name = format!("subscription_migration_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema_name}"))
+        .execute(&mut *tx)
+        .await
+        .expect("isolated migration schema");
+    sqlx::query(&format!(
+        "SET LOCAL search_path TO {schema_name}, public"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("isolated migration search path");
+
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE communes (
+            id UUID PRIMARY KEY,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            subscription_status TEXT NOT NULL DEFAULT 'ACTIVE',
+            subscription_started_at TIMESTAMPTZ,
+            subscription_expires_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            deleted_at TIMESTAMPTZ
+        );
+        CREATE TABLE users (id UUID PRIMARY KEY);
+        "#,
+    )
+    .execute(&mut *tx)
+    .await
+    .expect("pre-migration schema");
+
+    let known_id = Uuid::new_v4();
+    let grace_id = Uuid::new_v4();
+    let known_expiry: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT date_trunc('second', now()) + INTERVAL '30 days'")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("known legacy expiry");
+    sqlx::query(
+        r#"
+        INSERT INTO communes (id, active, subscription_status, subscription_expires_at)
+        VALUES ($1, TRUE, 'ACTIVE', $2), ($3, TRUE, 'ACTIVE', NULL)
+        "#,
+    )
+    .bind(known_id)
+    .bind(known_expiry)
+    .bind(grace_id)
+    .execute(&mut *tx)
+    .await
+    .expect("pre-migration communes");
+
+    let grace_reference = chrono::Utc::now();
+    sqlx::raw_sql(include_str!(
+        "../migrations/20260603000030_commune_subscription_payments.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .expect("apply subscription migration in isolation");
+
+    let known_row = sqlx::query(
+        r#"
+        SELECT subscription_expires_at, subscription_legacy_access_until
+        FROM communes WHERE id = $1
+        "#,
+    )
+    .bind(known_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("known expiry after migration");
+    assert_eq!(
+        known_row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_expires_at"),
+        known_expiry
+    );
+    assert_eq!(
+        known_row.get::<chrono::DateTime<chrono::Utc>, _>("subscription_legacy_access_until"),
+        known_expiry
+    );
+
+    let grace_row = sqlx::query(
+        "SELECT subscription_expires_at, subscription_legacy_access_until FROM communes WHERE id = $1",
+    )
+    .bind(grace_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("grace expiry after migration");
+    let grace_expiry: chrono::DateTime<chrono::Utc> =
+        grace_row.get("subscription_expires_at");
+    let grace_legacy_until: chrono::DateTime<chrono::Utc> =
+        grace_row.get("subscription_legacy_access_until");
+    assert!(grace_expiry >= grace_reference + chrono::Duration::days(59));
+    assert!(grace_expiry <= grace_reference + chrono::Duration::days(61));
+    assert_eq!(grace_legacy_until, grace_expiry);
+
+    let payment_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM commune_subscription_payments")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("legacy payment count");
+    assert_eq!(payment_count, 0, "migration must not invent payment history");
+
+    let new_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO communes (id) VALUES ($1)")
+        .bind(new_id)
+        .execute(&mut *tx)
+        .await
+        .expect("commune using migrated defaults");
+    let default_row = sqlx::query("SELECT active, subscription_status FROM communes WHERE id = $1")
+        .bind(new_id)
+        .fetch_one(&mut *tx)
+        .await
+        .expect("migrated defaults");
+    assert!(!default_row.get::<bool, _>("active"));
+    assert_eq!(default_row.get::<String, _>("subscription_status"), "SUSPENDED");
+
+    tx.rollback().await.expect("rollback isolated migration test");
+}
+
+#[tokio::test]
 async fn phase1_auth_crud_audit_and_commune_isolation_flow() {
     if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
         eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
@@ -1430,7 +1561,7 @@ async fn signalement_assignment_restricted_to_commune_or_global_supervisor() {
 }
 
 #[tokio::test]
-async fn commune_admin_cannot_modify_own_subscription() {
+async fn commune_subscription_payment_controls_login_refresh_and_active_sessions() {
     if std::env::var("APMTRACK_RUN_DB_TESTS").ok().as_deref() != Some("1") {
         eprintln!("skipping db integration test; set APMTRACK_RUN_DB_TESTS=1");
         return;
@@ -1459,20 +1590,25 @@ async fn commune_admin_cannot_modify_own_subscription() {
     assert_eq!(root_login.status, StatusCode::OK);
     let root_token = root_login.body["access_token"].as_str().expect("token");
 
-    let commune = create_commune(&app, root_token, "YDE1", "Yaounde 1").await;
-    let commune_id = commune["id"].as_str().expect("commune id");
-
-    // Le SUPER_ADMIN suspend l'abonnement de la commune.
-    let suspended = request_json(
+    // Une nouvelle commune ne recoit plus d'acces implicite.
+    let commune = request_json(
         app.clone(),
-        Method::PATCH,
-        &format!("/api/v1/communes/{commune_id}"),
-        json!({ "subscription_status": "EXPIRED" }),
+        Method::POST,
+        "/api/v1/communes",
+        json!({
+            "code": "YDE1",
+            "nom": "Yaounde 1",
+            "region": "Centre",
+            "departement": "Mfoundi"
+        }),
         Some(root_token),
     )
     .await;
-    assert_eq!(suspended.status, StatusCode::OK, "{:?}", suspended.body);
-    assert_eq!(suspended.body["subscription_status"], "EXPIRED");
+    assert_eq!(commune.status, StatusCode::OK, "{:?}", commune.body);
+    assert_eq!(commune.body["active"], false);
+    assert_eq!(commune.body["subscription_status"], "SUSPENDED");
+    assert_eq!(commune.body["subscription_active"], false);
+    let commune_id = commune.body["id"].as_str().expect("commune id");
 
     let admin = request_json(
         app.clone(),
@@ -1490,6 +1626,176 @@ async fn commune_admin_cannot_modify_own_subscription() {
     .await;
     assert_eq!(admin.status, StatusCode::OK);
 
+    let global_supervisor = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/users",
+        json!({
+            "email": "global.supervisor@example.test",
+            "password": "global-supervisor-password",
+            "full_name": "Superviseur global",
+            "commune_id": null,
+            "roles": ["SUPERVISEUR"]
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(global_supervisor.status, StatusCode::OK);
+
+    // Etat techniquement date mais sans paiement/essai : le motif doit rester
+    // distinct d'une suspension administrative.
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = TRUE,
+            subscription_status = 'ACTIVE',
+            subscription_started_at = now() - INTERVAL '1 day',
+            subscription_expires_at = now() + INTERVAL '1 day',
+            subscription_legacy_access_until = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .execute(&state.db)
+    .await
+    .expect("seed payment-required state");
+    let payment_required_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "admin.yde1@example.test", "password": "admin-commune-password" }),
+        None,
+    )
+    .await;
+    assert_eq!(payment_required_login.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        payment_required_login.body["error"]["details"]["reason"],
+        "PAYMENT_REQUIRED"
+    );
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = FALSE,
+            subscription_status = 'SUSPENDED',
+            subscription_started_at = NULL,
+            subscription_expires_at = NULL,
+            subscription_legacy_access_until = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .execute(&state.db)
+    .await
+    .expect("restore initially suspended state");
+
+    let blocked_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "admin.yde1@example.test", "password": "admin-commune-password" }),
+        None,
+    )
+    .await;
+    assert_eq!(blocked_login.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        blocked_login.body["error"]["code"],
+        "COMMUNE_SUBSCRIPTION_INACTIVE"
+    );
+    assert_eq!(
+        blocked_login.body["error"]["details"]["reason"],
+        "SUSPENDED"
+    );
+
+    let future_trial_start = chrono::Utc::now() + chrono::Duration::days(1);
+    let future_trial_end = future_trial_start + chrono::Duration::days(7);
+    let future_trial = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/trial"),
+        json!({
+            "period_started_at": future_trial_start,
+            "period_expires_at": future_trial_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(future_trial.status, StatusCode::OK, "{:?}", future_trial.body);
+    assert_eq!(future_trial.body["subscription_active"], false);
+    assert_eq!(future_trial.body["subscription_entitlement_current"], true);
+
+    let not_started_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "admin.yde1@example.test", "password": "admin-commune-password" }),
+        None,
+    )
+    .await;
+    assert_eq!(not_started_login.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        not_started_login.body["error"]["details"]["reason"],
+        "NOT_STARTED"
+    );
+
+    let trial_start = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let trial_end = chrono::Utc::now() + chrono::Duration::days(1);
+    let future_trial_overwrite = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/trial"),
+        json!({
+            "period_started_at": trial_start,
+            "period_expires_at": trial_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(future_trial_overwrite.status, StatusCode::CONFLICT);
+
+    // Fin du scenario NOT_STARTED : on simule ensuite son expiration pour
+    // poursuivre les controles sur une nouvelle periode d'essai.
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = FALSE,
+            subscription_status = 'SUSPENDED',
+            subscription_started_at = now() - INTERVAL '2 days',
+            subscription_expires_at = now() - INTERVAL '1 day',
+            subscription_legacy_access_until = NULL
+        WHERE id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .execute(&state.db)
+    .await
+    .expect("expire future trial for remaining acceptance checks");
+
+    let trial = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/trial"),
+        json!({
+            "period_started_at": trial_start,
+            "period_expires_at": trial_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(trial.status, StatusCode::OK, "{:?}", trial.body);
+    assert_eq!(trial.body["subscription_status"], "TRIAL");
+    assert_eq!(trial.body["subscription_active"], true);
+    assert_eq!(trial.body["public_visible"], true);
+
+    let publicly_visible = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/public/communes?search=YDE1",
+        None,
+    )
+    .await;
+    assert_eq!(publicly_visible.status, StatusCode::OK);
+    assert_eq!(publicly_visible.body.as_array().map(Vec::len), Some(1));
+
     let admin_login = request_json(
         app.clone(),
         Method::POST,
@@ -1498,40 +1804,606 @@ async fn commune_admin_cannot_modify_own_subscription() {
         None,
     )
     .await;
-    assert_eq!(admin_login.status, StatusCode::OK);
+    assert_eq!(admin_login.status, StatusCode::OK, "{:?}", admin_login.body);
     let admin_token = admin_login.body["access_token"].as_str().expect("token");
+    let admin_refresh = admin_login.body["refresh_token"]
+        .as_str()
+        .expect("refresh token");
 
-    // L'ADMIN_COMMUNE tente de se réabonner lui-même : la requête passe (il
-    // peut éditer sa commune) mais les champs d'abonnement sont ignorés.
-    let attempt = request_json(
+    let root_user_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM users WHERE lower(email) = lower($1) AND deleted_at IS NULL",
+    )
+    .bind(&super_admin.email)
+    .fetch_one(&state.db)
+    .await
+    .expect("root user id");
+    let admin_user_id: Uuid = sqlx::query_scalar(
+        "SELECT id FROM users WHERE lower(email) = 'admin.yde1@example.test'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .expect("commune admin id");
+    let commune_uuid = Uuid::parse_str(commune_id).expect("commune uuid");
+
+    // Les ecritures SQL directes restent soumises aux invariants critiques.
+    let future_paid_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let future_payment_error = sqlx::query(
+        r#"
+        INSERT INTO commune_subscription_payments (
+            commune_id, payment_reference, amount_fcfa, paid_at,
+            period_started_at, period_expires_at, confirmed_by_user_id
+        ) VALUES ($1, 'DB-FUTURE', 1000, $2, $2, $3, $4)
+        "#,
+    )
+    .bind(commune_uuid)
+    .bind(future_paid_at)
+    .bind(future_paid_at + chrono::Duration::days(1))
+    .bind(root_user_id)
+    .execute(&state.db)
+    .await
+    .expect_err("future paid_at must be rejected by the database");
+    assert_eq!(
+        future_payment_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("commune_subscription_payment_paid_at_not_future")
+    );
+
+    let direct_non_super_error = sqlx::query(
+        r#"
+        INSERT INTO commune_subscription_payments (
+            commune_id, payment_reference, amount_fcfa, paid_at,
+            period_started_at, period_expires_at, confirmed_by_user_id
+        ) VALUES ($1, 'DB-NON-SUPER', 1000, now(), now(), now() + INTERVAL '1 day', $2)
+        "#,
+    )
+    .bind(commune_uuid)
+    .bind(admin_user_id)
+    .execute(&state.db)
+    .await
+    .expect_err("non-super confirmer must be rejected by the database");
+    assert_eq!(
+        direct_non_super_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("commune_subscription_payment_confirmer_super_admin")
+    );
+    let blank_reference_error = sqlx::query(
+        r#"
+        INSERT INTO commune_subscription_payments (
+            commune_id, payment_reference, amount_fcfa, paid_at,
+            period_started_at, period_expires_at, confirmed_by_user_id
+        ) VALUES ($1, '   ', 1000, now(), now(), now() + INTERVAL '1 day', $2)
+        "#,
+    )
+    .bind(commune_uuid)
+    .bind(root_user_id)
+    .execute(&state.db)
+    .await
+    .expect_err("blank payment reference must be rejected by the database");
+    assert_eq!(
+        blank_reference_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("commune_subscription_payment_reference_not_blank")
+    );
+
+    // Donnees minimales pour verifier toutes les lectures publiques rattachees
+    // a une commune avant et apres sa suspension.
+    let public_agent_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO agents (id, matricule, full_name, commune_id, status, photo_url)
+        VALUES ($1, 'APM-SUB-001', 'Agent abonnement', $2, 'ACTIF', 'avatars/test.png')
+        "#,
+    )
+    .bind(public_agent_id)
+    .bind(commune_uuid)
+    .execute(&state.db)
+    .await
+    .expect("seed public agent");
+
+    let category_id = Uuid::new_v4();
+    let type_id = Uuid::new_v4();
+    let intervention_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO intervention_categories (id, commune_id, nom) VALUES ($1, $2, 'Categorie abonnement')",
+    )
+    .bind(category_id)
+    .bind(commune_uuid)
+    .execute(&state.db)
+    .await
+    .expect("seed public category");
+    sqlx::query(
+        "INSERT INTO intervention_types (id, commune_id, category_id, nom) VALUES ($1, $2, $3, 'Type abonnement')",
+    )
+    .bind(type_id)
+    .bind(commune_uuid)
+    .bind(category_id)
+    .execute(&state.db)
+    .await
+    .expect("seed public type");
+    sqlx::query(
+        r#"
+        INSERT INTO interventions (
+            id, commune_id, type_id, nom, description, sujet_paiement, active
+        ) VALUES ($1, $2, $3, 'Intervention abonnement', 'Test public', FALSE, TRUE)
+        "#,
+    )
+    .bind(intervention_id)
+    .bind(commune_uuid)
+    .bind(type_id)
+    .execute(&state.db)
+    .await
+    .expect("seed public intervention");
+    sqlx::query(
+        r#"
+        INSERT INTO pvs (
+            id, commune_id, agent_id, pv_number, intervention_id,
+            amount_initial_fcfa, status, created_by
+        ) VALUES ($1, $2, $3, 'PV-SUB-001', $4, 0, 'NON_PAYANT', $5)
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(commune_uuid)
+    .bind(public_agent_id)
+    .bind(intervention_id)
+    .bind(root_user_id)
+    .execute(&state.db)
+    .await
+    .expect("seed public pv");
+    sqlx::query(
+        r#"
+        INSERT INTO signalements (
+            id, commune_id, signalement_number, type_incident,
+            location_description, description
+        ) VALUES ($1, $2, 'SIG-SUB-001', 'Autre', 'Centre-ville', 'Test public')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(commune_uuid)
+    .execute(&state.db)
+    .await
+    .expect("seed public signalement");
+
+    for uri in [
+        "/api/v1/public/agents/verify/APM-SUB-001",
+        "/api/v1/public/pvs/PV-SUB-001",
+        "/api/v1/public/signalements/SIG-SUB-001",
+    ] {
+        let visible = request_empty(app.clone(), Method::GET, uri, None).await;
+        assert_eq!(visible.status, StatusCode::OK, "public route {uri}: {:?}", visible.body);
+    }
+    let visible_photo = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/public/agents/verify/APM-SUB-001/photo",
+        None,
+    )
+    .await;
+    assert_eq!(visible_photo.status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    let agent_account = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/agents/{public_agent_id}/account"),
+        json!({
+            "email": "agent.subscription@example.test",
+            "password": "agent-subscription-password"
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(agent_account.status, StatusCode::OK, "{:?}", agent_account.body);
+    let agent_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({
+            "email": "agent.subscription@example.test",
+            "password": "agent-subscription-password"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(agent_login.status, StatusCode::OK, "{:?}", agent_login.body);
+    let agent_token = agent_login.body["access_token"]
+        .as_str()
+        .expect("agent token")
+        .to_string();
+    let mobile_visible = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/mobile/me",
+        Some(&agent_token),
+    )
+    .await;
+    assert_eq!(mobile_visible.status, StatusCode::OK, "{:?}", mobile_visible.body);
+
+    // Le PATCH generique et un ADMIN_COMMUNE ne peuvent creer aucun droit.
+    let generic_patch = request_json(
         app.clone(),
         Method::PATCH,
         &format!("/api/v1/communes/{commune_id}"),
+        json!({ "subscription_status": "ACTIVE" }),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(generic_patch.status, StatusCode::BAD_REQUEST);
+
+    let paid_at = chrono::Utc::now();
+    let paid_end = trial_end + chrono::Duration::days(365);
+    let forbidden_confirmation = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
         json!({
-            "nom": "Yaounde 1er",
-            "subscription_status": "ACTIVE",
-            "subscription_expires_at": "2099-01-01T00:00:00Z",
-            "active": true
+            "payment_reference": "OM-2026-0001",
+            "amount_fcfa": 120000,
+            "paid_at": paid_at,
+            "period_started_at": trial_end,
+            "period_expires_at": paid_end
         }),
         Some(admin_token),
     )
     .await;
-    assert_eq!(attempt.status, StatusCode::OK, "{:?}", attempt.body);
-    assert_eq!(attempt.body["nom"], "Yaounde 1er");
-    assert_eq!(attempt.body["subscription_status"], "EXPIRED");
-    assert!(attempt.body["subscription_expires_at"].is_null());
+    assert_eq!(forbidden_confirmation.status, StatusCode::FORBIDDEN);
 
-    // Le SUPER_ADMIN, lui, peut réactiver l'abonnement.
-    let reactivated = request_json(
-        app,
-        Method::PATCH,
-        &format!("/api/v1/communes/{commune_id}"),
-        json!({ "subscription_status": "ACTIVE" }),
+    let invalid_amount = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "OM-2026-ZERO",
+            "amount_fcfa": 0,
+            "paid_at": paid_at,
+            "period_started_at": trial_end,
+            "period_expires_at": paid_end
+        }),
         Some(root_token),
     )
     .await;
-    assert_eq!(reactivated.status, StatusCode::OK);
-    assert_eq!(reactivated.body["subscription_status"], "ACTIVE");
+    assert_eq!(invalid_amount.status, StatusCode::BAD_REQUEST);
+
+    let invalid_dates = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "OM-2026-DATES",
+            "amount_fcfa": 120000,
+            "paid_at": paid_at,
+            "period_started_at": trial_end,
+            "period_expires_at": trial_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(invalid_dates.status, StatusCode::BAD_REQUEST);
+
+    let discontinuous_renewal = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "OM-2026-GAP",
+            "amount_fcfa": 120000,
+            "paid_at": paid_at,
+            "period_started_at": trial_end + chrono::Duration::days(1),
+            "period_expires_at": paid_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(discontinuous_renewal.status, StatusCode::BAD_REQUEST);
+
+    // Suspendre un essai coupe l'acces, mais conserve son droit temporel :
+    // aucun second essai ne peut etre empile avant son echeance.
+    let suspended_trial = request_json(
+        app.clone(),
+        Method::PATCH,
+        &format!("/api/v1/communes/{commune_id}"),
+        json!({ "active": false }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(suspended_trial.status, StatusCode::OK, "{:?}", suspended_trial.body);
+    assert_eq!(suspended_trial.body["subscription_status"], "SUSPENDED");
+    assert_eq!(
+        suspended_trial.body["subscription_entitlement_current"],
+        true
+    );
+    assert_eq!(suspended_trial.body["subscription_active"], false);
+
+    let suspended_trial_session = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/auth/me",
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(suspended_trial_session.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        suspended_trial_session.body["error"]["details"]["reason"],
+        "SUSPENDED"
+    );
+    let suspended_mobile_session = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/mobile/me",
+        Some(&agent_token),
+    )
+    .await;
+    assert_eq!(suspended_mobile_session.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        suspended_mobile_session.body["error"]["code"],
+        "COMMUNE_SUBSCRIPTION_INACTIVE"
+    );
+    assert_eq!(
+        suspended_mobile_session.body["error"]["details"]["reason"],
+        "SUSPENDED"
+    );
+
+    let repeated_trial = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/trial"),
+        json!({
+            "period_started_at": chrono::Utc::now(),
+            "period_expires_at": chrono::Utc::now() + chrono::Duration::days(30)
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(repeated_trial.status, StatusCode::CONFLICT);
+
+    for uri in [
+        "/api/v1/public/agents/verify/APM-SUB-001",
+        "/api/v1/public/agents/verify/APM-SUB-001/photo",
+        "/api/v1/public/pvs/PV-SUB-001",
+        "/api/v1/public/signalements/SIG-SUB-001",
+    ] {
+        let hidden = request_empty(app.clone(), Method::GET, uri, None).await;
+        assert_eq!(
+            hidden.status,
+            StatusCode::NOT_FOUND,
+            "suspended public route {uri}: {:?}",
+            hidden.body
+        );
+    }
+
+    let suspension_audit = sqlx::query(
+        r#"
+        SELECT old_value, new_value
+        FROM audit_logs
+        WHERE commune_id = $1 AND action = 'COMMUNE_SUSPENDED'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(commune_uuid)
+    .fetch_one(&state.db)
+    .await
+    .expect("explicit suspension audit");
+    let suspension_old: Value = suspension_audit.get("old_value");
+    let suspension_new: Value = suspension_audit.get("new_value");
+    assert_eq!(suspension_old["active"], true);
+    assert_eq!(suspension_new["active"], false);
+    assert!(suspension_old.get("subscription_legacy_access_until").is_some());
+    assert!(suspension_new["subscription_legacy_access_until"].is_string());
+
+    let confirmed = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "OM-2026-0001",
+            "amount_fcfa": 120000,
+            "paid_at": paid_at,
+            "period_started_at": trial_end,
+            "period_expires_at": paid_end
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(confirmed.status, StatusCode::OK, "{:?}", confirmed.body);
+    assert_eq!(confirmed.body["amount_fcfa"], 120000);
+    let paid_period_active: bool = sqlx::query_scalar(
+        "SELECT commune_subscription_is_active($1, $2)",
+    )
+    .bind(commune_uuid)
+    .bind(trial_end + chrono::Duration::days(1))
+    .fetch_one(&state.db)
+    .await
+    .expect("paid period access");
+    assert!(paid_period_active);
+    let paid_period_expired: bool = sqlx::query_scalar(
+        "SELECT commune_subscription_is_active($1, $2)",
+    )
+    .bind(commune_uuid)
+    .bind(paid_end + chrono::Duration::seconds(1))
+    .fetch_one(&state.db)
+    .await
+    .expect("paid period expiry");
+    assert!(!paid_period_expired);
+
+    let duplicate_reference = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "om-2026-0001",
+            "amount_fcfa": 120000,
+            "paid_at": paid_at,
+            "period_started_at": paid_end,
+            "period_expires_at": paid_end + chrono::Duration::days(365)
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(duplicate_reference.status, StatusCode::CONFLICT);
+    let normalized_duplicate_error = sqlx::query(
+        r#"
+        INSERT INTO commune_subscription_payments (
+            commune_id, payment_reference, amount_fcfa, paid_at,
+            period_started_at, period_expires_at, confirmed_by_user_id
+        ) VALUES ($1, '  Om-2026-0001  ', 120000, now(), $2, $3, $4)
+        "#,
+    )
+    .bind(commune_uuid)
+    .bind(paid_end)
+    .bind(paid_end + chrono::Duration::days(365))
+    .bind(root_user_id)
+    .execute(&state.db)
+    .await
+    .expect_err("normalized duplicate reference must be rejected");
+    assert_eq!(
+        normalized_duplicate_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("commune_subscription_payment_reference_unique_ci")
+    );
+
+    let history = request_empty(
+        app.clone(),
+        Method::GET,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(history.status, StatusCode::OK);
+    assert_eq!(history.body["total"], 1);
+    assert_eq!(history.body["items"][0]["payment_reference"], "OM-2026-0001");
+
+    let forbidden_history = request_empty(
+        app.clone(),
+        Method::GET,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(forbidden_history.status, StatusCode::FORBIDDEN);
+
+    let immutable_payment = sqlx::query(
+        "UPDATE commune_subscription_payments SET amount_fcfa = 1 WHERE commune_id = $1",
+    )
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .execute(&state.db)
+    .await;
+    assert!(immutable_payment.is_err());
+
+    // La conversion essai -> paye ne coupe pas la periode d'essai restante.
+    let still_connected = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/auth/me",
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(still_connected.status, StatusCode::OK);
+
+    let suspended = request_json(
+        app.clone(),
+        Method::PATCH,
+        &format!("/api/v1/communes/{commune_id}"),
+        json!({ "active": false }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(suspended.status, StatusCode::OK);
+    assert_eq!(suspended.body["subscription_status"], "SUSPENDED");
+    assert_eq!(suspended.body["public_visible"], false);
+
+    let publicly_hidden = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/public/communes?search=YDE1",
+        None,
+    )
+    .await;
+    assert_eq!(publicly_hidden.status, StatusCode::OK);
+    assert_eq!(publicly_hidden.body.as_array().map(Vec::len), Some(0));
+
+    let blocked_existing_token = request_empty(
+        app.clone(),
+        Method::GET,
+        "/api/v1/auth/me",
+        Some(admin_token),
+    )
+    .await;
+    assert_eq!(blocked_existing_token.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        blocked_existing_token.body["error"]["code"],
+        "COMMUNE_SUBSCRIPTION_INACTIVE"
+    );
+
+    let blocked_refresh = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/refresh",
+        json!({ "refresh_token": admin_refresh }),
+        None,
+    )
+    .await;
+    assert_eq!(blocked_refresh.status, StatusCode::FORBIDDEN);
+
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = TRUE,
+            subscription_status = 'ACTIVE',
+            subscription_started_at = now() - INTERVAL '2 days',
+            subscription_expires_at = now() - INTERVAL '1 day',
+            subscription_legacy_access_until = now() - INTERVAL '1 day'
+        WHERE id = $1
+        "#,
+    )
+    .bind(Uuid::parse_str(commune_id).expect("commune uuid"))
+    .execute(&state.db)
+    .await
+    .expect("expire subscription for acceptance check");
+    let expired_backdated_renewal = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/subscription-payments"),
+        json!({
+            "payment_reference": "OM-2026-BACKDATED",
+            "amount_fcfa": 120000,
+            "paid_at": chrono::Utc::now(),
+            "period_started_at": chrono::Utc::now() - chrono::Duration::minutes(1),
+            "period_expires_at": chrono::Utc::now() + chrono::Duration::days(365)
+        }),
+        Some(root_token),
+    )
+    .await;
+    assert_eq!(expired_backdated_renewal.status, StatusCode::BAD_REQUEST);
+    let expired_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({ "email": "admin.yde1@example.test", "password": "admin-commune-password" }),
+        None,
+    )
+    .await;
+    assert_eq!(expired_login.status, StatusCode::FORBIDDEN);
+    assert_eq!(expired_login.body["error"]["details"]["reason"], "EXPIRED");
+
+    let global_supervisor_login = request_json(
+        app.clone(),
+        Method::POST,
+        "/api/v1/auth/login",
+        json!({
+            "email": "global.supervisor@example.test",
+            "password": "global-supervisor-password"
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(global_supervisor_login.status, StatusCode::OK);
+
+    // L'acteur global reste operationnel malgre l'invalidite de cette commune.
+    let root_me = request_empty(app, Method::GET, "/api/v1/auth/me", Some(root_token)).await;
+    assert_eq!(root_me.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -2610,7 +3482,22 @@ async fn create_commune(app: &axum::Router, access_token: &str, code: &str, nom:
     .await;
 
     assert_eq!(response.status, StatusCode::OK);
-    response.body
+    let commune_id = response.body["id"].as_str().expect("commune id");
+    let started_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+    let expires_at = chrono::Utc::now() + chrono::Duration::days(365);
+    let activated = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/v1/communes/{commune_id}/trial"),
+        json!({
+            "period_started_at": started_at,
+            "period_expires_at": expires_at
+        }),
+        Some(access_token),
+    )
+    .await;
+    assert_eq!(activated.status, StatusCode::OK, "{:?}", activated.body);
+    activated.body
 }
 
 async fn request_empty(

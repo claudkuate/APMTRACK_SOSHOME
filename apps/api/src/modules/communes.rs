@@ -26,6 +26,15 @@ pub fn router() -> Router<AppState> {
             "/communes/{id}",
             axum::routing::get(get_commune).patch(patch_commune),
         )
+        .route(
+            "/communes/{id}/subscription-payments",
+            axum::routing::get(list_subscription_payments)
+                .post(confirm_subscription_payment),
+        )
+        .route(
+            "/communes/{id}/trial",
+            axum::routing::post(start_subscription_trial),
+        )
 }
 
 /// Routes publiques (sans authentification) — recherche de communes pour les
@@ -97,9 +106,7 @@ async fn search_communes_public(
         SELECT id, code, nom, region, departement
         FROM communes
         WHERE deleted_at IS NULL
-          AND active = true
-          AND subscription_status IN ('ACTIVE', 'TRIAL')
-          AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+          AND commune_subscription_is_active(id, now())
           AND (
             $1::text IS NULL
             OR nom ILIKE '%' || $1 || '%'
@@ -262,6 +269,42 @@ struct PatchCommuneRequest {
     boundary: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConfirmSubscriptionPaymentRequest {
+    payment_reference: String,
+    amount_fcfa: i64,
+    paid_at: DateTime<Utc>,
+    period_started_at: DateTime<Utc>,
+    period_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StartSubscriptionTrialRequest {
+    period_started_at: DateTime<Utc>,
+    period_expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct SubscriptionPaymentResponse {
+    id: Uuid,
+    commune_id: Uuid,
+    payment_reference: String,
+    amount_fcfa: i64,
+    paid_at: DateTime<Utc>,
+    period_started_at: DateTime<Utc>,
+    period_expires_at: DateTime<Utc>,
+    confirmed_at: DateTime<Utc>,
+    confirmed_by_user_id: Uuid,
+    confirmed_by_full_name: Option<String>,
+    confirmed_by_email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscriptionPaymentQuery {
+    page: Option<i64>,
+    page_size: Option<i64>,
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct CommuneResponse {
     id: Uuid,
@@ -282,6 +325,11 @@ pub struct CommuneResponse {
     subscription_status: String,
     subscription_started_at: Option<DateTime<Utc>>,
     subscription_expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing)]
+    subscription_legacy_access_until: Option<DateTime<Utc>>,
+    /// Droit confirme non expire, eventuellement non commence ou suspendu.
+    /// `subscription_active` reste l'unique indicateur d'acces effectif.
+    subscription_entitlement_current: bool,
     subscription_active: bool,
     public_visible: bool,
     /// Contour GeoJSON (MultiPolygon) ou null.
@@ -297,11 +345,10 @@ const COMMUNE_COLUMNS: &str = "id, code, nom, region, departement, region_id, de
     arrondissement_id, \
     adresse, telephone, email, \
     site_web, logo_url, theme_color, active, subscription_status, subscription_started_at, \
-    subscription_expires_at, \
-    (subscription_status IN ('ACTIVE', 'TRIAL') AND \
-        (subscription_expires_at IS NULL OR subscription_expires_at >= now())) AS subscription_active, \
-    (active = true AND subscription_status IN ('ACTIVE', 'TRIAL') AND \
-        (subscription_expires_at IS NULL OR subscription_expires_at >= now())) AS public_visible, \
+    subscription_expires_at, subscription_legacy_access_until, \
+    commune_subscription_entitlement_is_current(id, now()) AS subscription_entitlement_current, \
+    commune_subscription_is_active(id, now()) AS subscription_active, \
+    commune_subscription_is_active(id, now()) AS public_visible, \
     ST_AsGeoJSON(boundary) AS boundary_geojson, ST_AsGeoJSON(centre) AS centre_geojson, \
     created_at, updated_at";
 
@@ -411,9 +458,18 @@ async fn create_commune(
     auth_user.require_any_role(&[Role::SuperAdmin])?;
 
     let boundary_json = prepare_boundary(payload.boundary)?;
-    let subscription_status = validate_subscription_status(
-        payload.subscription_status.as_deref().unwrap_or("ACTIVE"),
-    )?;
+    if payload.active == Some(true)
+        || payload
+            .subscription_status
+            .as_deref()
+            .is_some_and(|status| !status.eq_ignore_ascii_case("SUSPENDED"))
+        || payload.subscription_started_at.is_some()
+        || payload.subscription_expires_at.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "Une nouvelle commune doit etre activee par un paiement confirme ou une periode d'essai",
+        ));
+    }
     // region/departement peuvent être fournis en texte OU via leurs identifiants
     // (cascade géographique) — le trigger `communes_link_geography` réconcilie.
     let region = clean_optional(payload.region);
@@ -457,10 +513,10 @@ async fn create_commune(
     .bind(clean_optional(payload.site_web))
     .bind(clean_optional(payload.logo_url))
     .bind(clean_optional(payload.theme_color))
-    .bind(payload.active.unwrap_or(true))
-    .bind(&subscription_status)
-    .bind(payload.subscription_started_at)
-    .bind(payload.subscription_expires_at)
+    .bind(false)
+    .bind("SUSPENDED")
+    .bind(Option::<DateTime<Utc>>::None)
+    .bind(Option::<DateTime<Utc>>::None)
     .bind(&boundary_json)
     .bind(payload.arrondissement_id)
     .execute(&state.db)
@@ -517,32 +573,51 @@ async fn patch_commune(
         None if payload.departement_id.is_some() => None,
         None => Some(existing.departement.clone()),
     };
-    // Les champs d'abonnement et l'activation de la commune conditionnent la
-    // facturation, la visibilité publique et l'accès mobile : ils sont réservés
-    // au SUPER_ADMIN. Un ADMIN_COMMUNE ne peut pas se réabonner lui-même — les
-    // valeurs du payload sont ignorées et l'existant est conservé.
-    let subscription_status = match (is_super_admin, payload.subscription_status.as_deref()) {
-        (true, Some(value)) => validate_subscription_status(value)?,
-        _ => existing.subscription_status.clone(),
-    };
-    let subscription_started_at = if is_super_admin {
-        payload
-            .subscription_started_at
-            .or(existing.subscription_started_at)
-    } else {
-        existing.subscription_started_at
-    };
-    let subscription_expires_at = if is_super_admin {
-        payload
-            .subscription_expires_at
-            .or(existing.subscription_expires_at)
-    } else {
-        existing.subscription_expires_at
-    };
-    let active = if is_super_admin {
-        payload.active.unwrap_or(existing.active)
+    // Un PATCH generique ne peut jamais creer ou prolonger un droit d'acces.
+    // Ces transitions passent exclusivement par les endpoints paiement/essai.
+    if payload.subscription_status.is_some()
+        || payload.subscription_started_at.is_some()
+        || payload.subscription_expires_at.is_some()
+    {
+        return Err(ApiError::bad_request(
+            "L'abonnement se modifie uniquement par confirmation de paiement ou activation d'un essai",
+        ));
+    }
+    if is_super_admin && payload.active == Some(true) && !existing.active {
+        return Err(ApiError::bad_request(
+            "La commune doit etre activee par un paiement confirme ou une periode d'essai",
+        ));
+    }
+    let active = if is_super_admin && payload.active == Some(false) {
+        false
     } else {
         existing.active
+    };
+    let subscription_status = if !active {
+        "SUSPENDED".to_string()
+    } else {
+        existing.subscription_status.clone()
+    };
+    let subscription_started_at = existing.subscription_started_at;
+    let subscription_expires_at = existing.subscription_expires_at;
+    // L'interrupteur administratif coupe l'acces sans effacer un essai deja
+    // accorde. Le bridge conserve seulement le droit confirme non expire : il
+    // bloque un nouvel essai et impose un renouvellement continu.
+    let subscription_legacy_access_until = if existing.active
+        && !active
+        && existing.subscription_status == "TRIAL"
+        && existing.subscription_entitlement_current
+    {
+        match (
+            existing.subscription_legacy_access_until,
+            subscription_expires_at,
+        ) {
+            (Some(legacy), Some(expires_at)) => Some(legacy.max(expires_at)),
+            (None, expires_at) => expires_at,
+            (legacy, None) => legacy,
+        }
+    } else {
+        existing.subscription_legacy_access_until
     };
     let boundary_json = prepare_boundary(payload.boundary)?;
 
@@ -569,6 +644,7 @@ async fn patch_commune(
             boundary = COALESCE(ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), boundary),
             centre = COALESCE(ST_Centroid(ST_SetSRID(ST_GeomFromGeoJSON($18), 4326)), centre),
             arrondissement_id = COALESCE($19, arrondissement_id),
+            subscription_legacy_access_until = $20,
             updated_at = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -592,6 +668,7 @@ async fn patch_commune(
     .bind(subscription_expires_at)
     .bind(&boundary_json)
     .bind(payload.arrondissement_id)
+    .bind(subscription_legacy_access_until)
     .execute(&state.db)
     .await
     .map_err(map_database_error)?;
@@ -600,17 +677,376 @@ async fn patch_commune(
         &state.db,
         Some(commune_id),
         Some(auth_user.id),
-        "COMMUNE_UPDATED",
+        if existing.active && !active {
+            "COMMUNE_SUSPENDED"
+        } else {
+            "COMMUNE_UPDATED"
+        },
         "communes",
         Some(commune_id),
-        Some(json!({ "code": existing.code, "nom": existing.nom })),
-        Some(json!({ "code": code, "nom": nom })),
+        Some(json!({
+            "code": existing.code,
+            "nom": existing.nom,
+            "active": existing.active,
+            "subscription_status": existing.subscription_status,
+            "subscription_started_at": existing.subscription_started_at,
+            "subscription_expires_at": existing.subscription_expires_at,
+            "subscription_legacy_access_until": existing.subscription_legacy_access_until,
+        })),
+        Some(json!({
+            "code": code,
+            "nom": nom,
+            "active": active,
+            "subscription_status": subscription_status,
+            "subscription_started_at": subscription_started_at,
+            "subscription_expires_at": subscription_expires_at,
+            "subscription_legacy_access_until": subscription_legacy_access_until,
+        })),
         auth_user.ip_address.clone(),
         auth_user.user_agent.clone(),
     )
     .await;
 
     Ok(Json(load_commune(&state.db, commune_id).await?))
+}
+
+async fn confirm_subscription_payment(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(commune_id): Path<Uuid>,
+    ApiJson(payload): ApiJson<ConfirmSubscriptionPaymentRequest>,
+) -> Result<Json<SubscriptionPaymentResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin])?;
+
+    let payment_reference = required_text(payload.payment_reference, "payment_reference")?;
+    if payment_reference.len() > 160 {
+        return Err(ApiError::bad_request(
+            "payment_reference ne doit pas depasser 160 caracteres",
+        ));
+    }
+    if payload.amount_fcfa <= 0 {
+        return Err(ApiError::bad_request(
+            "amount_fcfa doit etre strictement positif",
+        ));
+    }
+    let now = Utc::now();
+    if payload.paid_at > now {
+        return Err(ApiError::bad_request(
+            "paid_at ne peut pas etre dans le futur",
+        ));
+    }
+    validate_subscription_period(payload.period_started_at, payload.period_expires_at)?;
+    if payload.period_started_at < payload.paid_at {
+        return Err(ApiError::bad_request(
+            "La periode d'abonnement ne peut pas commencer avant le paiement",
+        ));
+    }
+
+    let mut transaction = state.db.begin().await?;
+    let commune = sqlx::query(
+        r#"
+        SELECT active, subscription_status, subscription_started_at,
+               subscription_expires_at, subscription_legacy_access_until,
+               commune_subscription_entitlement_is_current(id, now()) AS entitlement_current
+        FROM communes
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Commune introuvable"))?;
+
+    let entitlement_current: bool = commune.get("entitlement_current");
+    let current_started_at: Option<DateTime<Utc>> = commune.get("subscription_started_at");
+    let current_expires_at: Option<DateTime<Utc>> = commune.get("subscription_expires_at");
+    let current_status: String = commune.get("subscription_status");
+    let current_active: bool = commune.get("active");
+    let current_legacy_until: Option<DateTime<Utc>> =
+        commune.get("subscription_legacy_access_until");
+
+    if entitlement_current {
+        let current_expires_at = current_expires_at.expect("active entitlement has an expiry");
+        // `datetime-local` inputs are precise to the second while PostgreSQL may
+        // retain sub-second precision. Values in the same second are one boundary.
+        if payload
+            .period_started_at
+            .signed_duration_since(current_expires_at)
+            .num_seconds()
+            .abs()
+            > 0
+        {
+            return Err(ApiError::bad_request(
+                "Le renouvellement doit commencer exactement a l'echeance actuelle",
+            ));
+        }
+    }
+
+    let aggregate_started_at = if entitlement_current {
+        current_started_at.unwrap_or(payload.period_started_at)
+    } else {
+        payload.period_started_at
+    };
+    // Lorsqu'un essai encore valide est converti en abonnement paye, cette
+    // passerelle conserve l'acces jusqu'au debut contigu de la periode payee.
+    let legacy_bridge_until = if entitlement_current && current_status == "TRIAL" {
+        match (current_legacy_until, current_expires_at) {
+            (Some(legacy), Some(expires)) => Some(legacy.max(expires)),
+            (None, expires) => expires,
+            (legacy, None) => legacy,
+        }
+    } else {
+        current_legacy_until
+    };
+
+    let payment_id = Uuid::new_v4();
+    let payment_row = sqlx::query(
+        r#"
+        INSERT INTO commune_subscription_payments (
+            id, commune_id, payment_reference, amount_fcfa, paid_at,
+            period_started_at, period_expires_at, confirmed_by_user_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, commune_id, payment_reference, amount_fcfa, paid_at,
+                  period_started_at, period_expires_at, confirmed_at,
+                  confirmed_by_user_id
+        "#,
+    )
+    .bind(payment_id)
+    .bind(commune_id)
+    .bind(&payment_reference)
+    .bind(payload.amount_fcfa)
+    .bind(payload.paid_at)
+    .bind(payload.period_started_at)
+    .bind(payload.period_expires_at)
+    .bind(auth_user.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = TRUE,
+            subscription_status = 'ACTIVE',
+            subscription_started_at = $2,
+            subscription_expires_at = $3,
+            subscription_legacy_access_until = $4,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(commune_id)
+    .bind(aggregate_started_at)
+    .bind(payload.period_expires_at)
+    .bind(legacy_bridge_until)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record_for_commune_tx(
+        &mut transaction,
+        Some(commune_id),
+        Some(auth_user.id),
+        "COMMUNE_SUBSCRIPTION_PAYMENT_CONFIRMED",
+        "commune_subscription_payments",
+        Some(payment_id),
+        Some(json!({
+            "active": current_active,
+            "subscription_status": current_status,
+            "subscription_started_at": current_started_at,
+            "subscription_expires_at": current_expires_at,
+            "subscription_legacy_access_until": current_legacy_until,
+        })),
+        Some(json!({
+            "active": true,
+            "subscription_status": "ACTIVE",
+            "subscription_started_at": aggregate_started_at,
+            "subscription_expires_at": payload.period_expires_at,
+            "subscription_legacy_access_until": legacy_bridge_until,
+            "payment_reference": payment_reference,
+            "amount_fcfa": payload.amount_fcfa,
+            "paid_at": payload.paid_at,
+            "period_started_at": payload.period_started_at,
+            "period_expires_at": payload.period_expires_at,
+        })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+    transaction.commit().await?;
+
+    let mut response = row_to_subscription_payment(payment_row);
+    response.confirmed_by_full_name = Some(auth_user.full_name);
+    response.confirmed_by_email = Some(auth_user.email);
+    Ok(Json(response))
+}
+
+async fn list_subscription_payments(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(commune_id): Path<Uuid>,
+    Query(query): Query<SubscriptionPaymentQuery>,
+) -> Result<Json<Paginated<SubscriptionPaymentResponse>>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin])?;
+    let pagination = Pagination::from_query(PaginationQuery {
+        page: query.page,
+        page_size: query.page_size,
+    })?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM communes WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(commune_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !exists {
+        return Err(ApiError::not_found("Commune introuvable"));
+    }
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM commune_subscription_payments WHERE commune_id = $1",
+    )
+    .bind(commune_id)
+    .fetch_one(&state.db)
+    .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT sp.id, sp.commune_id, sp.payment_reference, sp.amount_fcfa, sp.paid_at,
+               sp.period_started_at, sp.period_expires_at, sp.confirmed_at,
+               sp.confirmed_by_user_id, u.full_name AS confirmed_by_full_name,
+               u.email AS confirmed_by_email
+        FROM commune_subscription_payments sp
+        LEFT JOIN users u ON u.id = sp.confirmed_by_user_id
+        WHERE sp.commune_id = $1
+        ORDER BY sp.confirmed_at DESC
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(commune_id)
+    .bind(pagination.limit)
+    .bind(pagination.offset)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(Paginated::new(
+        rows.into_iter().map(row_to_subscription_payment).collect(),
+        &pagination,
+        total,
+    )))
+}
+
+async fn start_subscription_trial(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(commune_id): Path<Uuid>,
+    ApiJson(payload): ApiJson<StartSubscriptionTrialRequest>,
+) -> Result<Json<CommuneResponse>, ApiError> {
+    auth_user.require_any_role(&[Role::SuperAdmin])?;
+    validate_subscription_period(payload.period_started_at, payload.period_expires_at)?;
+    if payload.period_expires_at < Utc::now() {
+        return Err(ApiError::bad_request(
+            "La periode d'essai doit expirer dans le futur",
+        ));
+    }
+
+    let mut transaction = state.db.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT active, subscription_status, subscription_started_at,
+               subscription_expires_at, subscription_legacy_access_until,
+               commune_subscription_entitlement_is_current(id, now()) AS entitlement_current
+        FROM communes
+        WHERE id = $1 AND deleted_at IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or_else(|| ApiError::not_found("Commune introuvable"))?;
+    if row.get::<bool, _>("entitlement_current") {
+        return Err(ApiError::conflict(
+            "Une commune ayant deja un abonnement valide ne peut pas passer en essai",
+        ));
+    }
+
+    let old_value = json!({
+        "active": row.get::<bool, _>("active"),
+        "subscription_status": row.get::<String, _>("subscription_status"),
+        "subscription_started_at": row.get::<Option<DateTime<Utc>>, _>("subscription_started_at"),
+        "subscription_expires_at": row.get::<Option<DateTime<Utc>>, _>("subscription_expires_at"),
+        "subscription_legacy_access_until": row.get::<Option<DateTime<Utc>>, _>("subscription_legacy_access_until"),
+    });
+    sqlx::query(
+        r#"
+        UPDATE communes
+        SET active = TRUE,
+            subscription_status = 'TRIAL',
+            subscription_started_at = $2,
+            subscription_expires_at = $3,
+            subscription_legacy_access_until = NULL,
+            updated_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(commune_id)
+    .bind(payload.period_started_at)
+    .bind(payload.period_expires_at)
+    .execute(&mut *transaction)
+    .await
+    .map_err(map_database_error)?;
+
+    audit::record_for_commune_tx(
+        &mut transaction,
+        Some(commune_id),
+        Some(auth_user.id),
+        "COMMUNE_SUBSCRIPTION_TRIAL_STARTED",
+        "communes",
+        Some(commune_id),
+        Some(old_value),
+        Some(json!({
+            "active": true,
+            "subscription_status": "TRIAL",
+            "subscription_started_at": payload.period_started_at,
+            "subscription_expires_at": payload.period_expires_at,
+            "subscription_legacy_access_until": null,
+        })),
+        auth_user.ip_address.clone(),
+        auth_user.user_agent.clone(),
+    )
+    .await;
+    transaction.commit().await?;
+
+    Ok(Json(load_commune(&state.db, commune_id).await?))
+}
+
+fn validate_subscription_period(
+    started_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+) -> Result<(), ApiError> {
+    if expires_at <= started_at {
+        return Err(ApiError::bad_request(
+            "La fin de la periode doit etre posterieure a son debut",
+        ));
+    }
+    Ok(())
+}
+
+fn row_to_subscription_payment(row: sqlx::postgres::PgRow) -> SubscriptionPaymentResponse {
+    SubscriptionPaymentResponse {
+        id: row.get("id"),
+        commune_id: row.get("commune_id"),
+        payment_reference: row.get("payment_reference"),
+        amount_fcfa: row.get("amount_fcfa"),
+        paid_at: row.get("paid_at"),
+        period_started_at: row.get("period_started_at"),
+        period_expires_at: row.get("period_expires_at"),
+        confirmed_at: row.get("confirmed_at"),
+        confirmed_by_user_id: row.get("confirmed_by_user_id"),
+        confirmed_by_full_name: row.try_get("confirmed_by_full_name").ok(),
+        confirmed_by_email: row.try_get("confirmed_by_email").ok(),
+    }
 }
 
 pub async fn load_commune(pool: &PgPool, commune_id: Uuid) -> Result<CommuneResponse, ApiError> {
@@ -649,6 +1085,8 @@ fn row_to_commune(row: sqlx::postgres::PgRow) -> CommuneResponse {
         subscription_status: row.get("subscription_status"),
         subscription_started_at: row.get("subscription_started_at"),
         subscription_expires_at: row.get("subscription_expires_at"),
+        subscription_legacy_access_until: row.get("subscription_legacy_access_until"),
+        subscription_entitlement_current: row.get("subscription_entitlement_current"),
         subscription_active: row.get("subscription_active"),
         public_visible: row.get("public_visible"),
         boundary: row
@@ -684,9 +1122,7 @@ fn required_text(value: String, field: &'static str) -> Result<String, ApiError>
 async fn ensure_public_commune_visible(pool: &PgPool, commune_id: Uuid) -> Result<(), ApiError> {
     let visible: Option<bool> = sqlx::query_scalar(
         r#"
-        SELECT active = true
-           AND subscription_status IN ('ACTIVE', 'TRIAL')
-           AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+        SELECT commune_subscription_is_active(id, now())
         FROM communes
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -699,17 +1135,6 @@ async fn ensure_public_commune_visible(pool: &PgPool, commune_id: Uuid) -> Resul
         Some(true) => Ok(()),
         Some(false) => Err(ApiError::forbidden("Commune non disponible")),
         None => Err(ApiError::not_found("Commune introuvable")),
-    }
-}
-
-fn validate_subscription_status(value: &str) -> Result<String, ApiError> {
-    let status = value.trim().to_ascii_uppercase();
-    if matches!(status.as_str(), "ACTIVE" | "TRIAL" | "EXPIRED" | "SUSPENDED") {
-        Ok(status)
-    } else {
-        Err(ApiError::bad_request(
-            "Statut d'abonnement invalide. Valeurs acceptees: ACTIVE, TRIAL, EXPIRED, SUSPENDED",
-        ))
     }
 }
 

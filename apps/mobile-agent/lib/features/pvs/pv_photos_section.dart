@@ -157,6 +157,8 @@ class _PvPhotosSectionState extends State<PvPhotosSection> {
                         photo.id,
                       ),
                       headers: widget.controller.authHeaders,
+                      onForbidden:
+                          widget.controller.handleAuthenticatedAssetForbidden,
                       onDelete: widget.editable && !_busy
                           ? () => _delete(photo)
                           : null,
@@ -211,11 +213,13 @@ class _PhotoTile extends StatelessWidget {
   const _PhotoTile({
     required this.url,
     required this.headers,
+    required this.onForbidden,
     required this.onDelete,
   });
 
   final String url;
   final Map<String, String> headers;
+  final VoidCallback onForbidden;
   final VoidCallback? onDelete;
 
   @override
@@ -229,10 +233,16 @@ class _PhotoTile extends StatelessWidget {
             url,
             headers: headers,
             fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => Container(
-              color: apmPanel,
-              child: const Icon(Icons.broken_image_outlined, color: apmMuted),
-            ),
+            errorBuilder: (_, error, _) {
+              if (error is NetworkImageLoadException &&
+                  error.statusCode == 403) {
+                onForbidden();
+              }
+              return Container(
+                color: apmPanel,
+                child: const Icon(Icons.broken_image_outlined, color: apmMuted),
+              );
+            },
             loadingBuilder: (context, child, progress) => progress == null
                 ? child
                 : Container(

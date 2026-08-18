@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import 'core/api/api_client.dart';
@@ -20,12 +22,14 @@ class ApmtrackAgentApp extends StatefulWidget {
   State<ApmtrackAgentApp> createState() => _ApmtrackAgentAppState();
 }
 
-class _ApmtrackAgentAppState extends State<ApmtrackAgentApp> {
+class _ApmtrackAgentAppState extends State<ApmtrackAgentApp>
+    with WidgetsBindingObserver {
   late final SessionController controller;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     controller = SessionController(
       api: widget.api ?? HttpApmtrackApi(),
       store: widget.store ?? SecureSessionStore(),
@@ -36,8 +40,18 @@ class _ApmtrackAgentAppState extends State<ApmtrackAgentApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     controller.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(
+        controller.revalidateKnownSubscriptionAccess(checkServer: true),
+      );
+    }
   }
 
   @override

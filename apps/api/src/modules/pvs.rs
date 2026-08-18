@@ -1091,6 +1091,7 @@ async fn verify_pv_public(
         LEFT JOIN pv_amounts_due v ON v.pv_id = p.id
         WHERE p.pv_number = $1 AND p.deleted_at IS NULL
           AND c.deleted_at IS NULL
+          AND commune_subscription_is_active(c.id, now())
         "#,
     )
     .bind(&pv_number)

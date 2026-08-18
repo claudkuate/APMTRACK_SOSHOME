@@ -27,6 +27,14 @@ export interface SelectOption {
   label: string;
 }
 
+/** Restaure la valeur typée d'une option après coercition en chaine par un select HTML. */
+export function resolveSelectOptionValue(
+  options: SelectOption[],
+  rawValue: unknown,
+): string | number | boolean | unknown {
+  return options.find((option) => String(option.value) === String(rawValue))?.value ?? rawValue;
+}
+
 export interface RelationConfig {
   endpoint: string;
   valueKey?: string;
@@ -96,6 +104,8 @@ export interface ResourceAction {
   confirmMessage?: (row: Record<string, unknown>) => string;
   /** Restrict action visibility to these roles. Defaults to the resource mutateRoles. */
   roles?: RoleCode[];
+  /** Restrict action visibility according to the current row. */
+  visibleWhen?: (row: Record<string, unknown>) => boolean;
   // status-kind specifics ------------------------------------------------------
   /** Candidate target statuses for a 'status' action. */
   statusOptions?: SelectOption[];
@@ -589,26 +599,52 @@ export const resourceConfigs: Record<string, ResourceConfig> = {
       field('telephone', 'Téléphone', 'text'),
       field('email', 'Email', 'email'),
       field('theme_color', 'Couleur thème', 'text', false, '#1F7A4D'),
-      field('active', 'Commune active', 'checkbox'),
-      selectField(
-        'subscription_status',
-        'Statut abonnement',
-        false,
-        [
-          option('ACTIVE', 'Actif'),
-          option('TRIAL', 'Essai'),
-          option('EXPIRED', 'Expiré'),
-          option('SUSPENDED', 'Suspendu'),
-        ],
-      ),
-      field('subscription_started_at', 'Début abonnement', 'datetime'),
-      field('subscription_expires_at', 'Expiration abonnement', 'datetime'),
       geoPolygonField(
         'boundary',
         'Contour de la commune',
         'Géographie',
         'Tracez le périmètre administratif de la commune.',
       ),
+    ],
+    patchFields: [
+      field('code', 'Code commune', 'text', true, 'YDE1'),
+      field('nom', 'Nom officiel', 'text', true),
+      relationField('region_id', 'Région', regionRelation, true),
+      relationField('departement_id', 'Département', departementRelation, true, undefined, 'region_id'),
+      relationField(
+        'arrondissement_id',
+        'Arrondissement',
+        arrondissementRelation,
+        false,
+        undefined,
+        'departement_id',
+      ),
+      field('adresse', 'Adresse', 'text'),
+      field('telephone', 'Téléphone', 'text'),
+      field('email', 'Email', 'email'),
+      field('theme_color', 'Couleur thème', 'text', false, '#1F7A4D'),
+      geoPolygonField(
+        'boundary',
+        'Contour de la commune',
+        'Géographie',
+        'Tracez le périmètre administratif de la commune.',
+      ),
+    ],
+    actions: [
+      {
+        label: 'Suspendre la mairie',
+        kind: 'status',
+        path: (row) => `/api/v1/communes/${row['id']}`,
+        roles: ['SUPER_ADMIN'],
+        visibleWhen: (row) => row['active'] === true,
+        statusOptions: [option(false, 'Suspendre l’accès')],
+        statusFromKey: 'active',
+        statusKey: 'active',
+        method: 'patch',
+        selectLabel: 'Action administrative',
+        currentLabel: 'Accès actuel',
+        successMessage: 'Mairie suspendue.',
+      },
     ],
   },
   users: {

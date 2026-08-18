@@ -48,6 +48,7 @@ class ProfilePage extends StatelessWidget {
                         ? null
                         : controller.agentPhotoContentUrl(profile.agent.id),
                     headers: controller.authHeaders,
+                    onForbidden: controller.handleAuthenticatedAssetForbidden,
                     radius: 28,
                   ),
                   const SizedBox(width: 12),

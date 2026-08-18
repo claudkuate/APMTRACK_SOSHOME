@@ -24,12 +24,14 @@ import {
   ResourceField,
   ResourceFilter,
   SelectOption,
+  resolveSelectOptionValue,
   resourceConfigs,
 } from '../../shared/resource-config';
 import { PatrouilleAgentsDialog } from '../patrouilles/patrouille-agents.dialog';
 import { LocationPickerComponent } from '../../shared/map/location-picker.component';
 import { ZoneEditorComponent } from '../../shared/map/zone-editor.component';
 import { GeoGeometry } from '../../core/services/geo.service';
+import { CommuneSubscriptionDialog } from '../communes/commune-subscription.dialog';
 
 type Row = Record<string, unknown>;
 
@@ -95,6 +97,15 @@ interface AgentsDialogContext {
   communeId: string | null;
   nom: string;
   status: string;
+}
+
+interface SubscriptionDialogContext {
+  id: string;
+  nom: string;
+  subscriptionActive: boolean;
+  subscriptionEntitlementCurrent: boolean;
+  subscriptionStartedAt: string | null;
+  subscriptionExpiresAt: string | null;
 }
 
 interface ImportRowError {
@@ -197,6 +208,7 @@ function readAccounts(payload: unknown): ProvisionedAccount[] {
     PatrouilleAgentsDialog,
     LocationPickerComponent,
     ZoneEditorComponent,
+    CommuneSubscriptionDialog,
     AutoTranslatePipe,
   ],
   template: `
@@ -686,6 +698,16 @@ function readAccounts(payload: unknown): ProvisionedAccount[] {
                                 {{ 'Editer' | auto }}
                               </button>
                             }
+                            @if (cfg.key === 'communes' && canManageSubscriptions()) {
+                              <button
+                                type="button"
+                                class="context-menu-item"
+                                role="menuitem"
+                                (click)="openSubscriptionFromMenu(row, $event)"
+                              >
+                                {{ 'Gérer l’abonnement' | auto }}
+                              </button>
+                            }
                             @if (cfg.manageAgents && canMutate(cfg)) {
                               <button
                                 type="button"
@@ -704,7 +726,7 @@ function readAccounts(payload: unknown): ProvisionedAccount[] {
                             >
                               {{ 'Exporter ligne' | auto }}
                             </button>
-                            @for (action of visibleActions(cfg); track action.label) {
+                            @for (action of visibleActions(cfg, row); track action.label) {
                               <button
                                 type="button"
                                 class="context-menu-item"
@@ -939,6 +961,19 @@ function readAccounts(payload: unknown): ProvisionedAccount[] {
             (closed)="agentsDialog.set(null)"
           />
         }
+
+        @if (subscriptionDialog(); as ctx) {
+          <app-commune-subscription-dialog
+            [communeId]="ctx.id"
+            [communeName]="ctx.nom"
+            [subscriptionActive]="ctx.subscriptionActive"
+            [subscriptionEntitlementCurrent]="ctx.subscriptionEntitlementCurrent"
+            [subscriptionStartedAt]="ctx.subscriptionStartedAt"
+            [subscriptionExpiresAt]="ctx.subscriptionExpiresAt"
+            (closed)="subscriptionDialog.set(null)"
+            (updated)="load()"
+          />
+        }
       </section>
     } @else {
       <section class="panel p-5">
@@ -990,6 +1025,7 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected readonly editingId = signal<string | null>(null);
   protected readonly statusContext = signal<StatusContext | null>(null);
   protected readonly agentsDialog = signal<AgentsDialogContext | null>(null);
+  protected readonly subscriptionDialog = signal<SubscriptionDialogContext | null>(null);
   /** id de ligne → object URL de l'avatar (résolu via blob authentifié). */
   protected readonly avatarUrls = signal<Record<string, string>>({});
 
@@ -1062,6 +1098,27 @@ export class ResourcePage implements OnInit, OnDestroy {
       nom: String(row['nom'] ?? 'Patrouille'),
       status: String(row['status'] ?? ''),
     });
+  }
+
+  protected openSubscriptionFromMenu(row: Row, event: MouseEvent): void {
+    event.stopPropagation();
+    this.rowMenuKey.set(null);
+    this.subscriptionDialog.set({
+      id: String(row['id'] ?? ''),
+      nom: String(row['nom'] ?? 'Commune'),
+      subscriptionActive: row['subscription_active'] === true,
+      subscriptionEntitlementCurrent: row['subscription_entitlement_current'] === true,
+      subscriptionStartedAt: row['subscription_started_at']
+        ? String(row['subscription_started_at'])
+        : null,
+      subscriptionExpiresAt: row['subscription_expires_at']
+        ? String(row['subscription_expires_at'])
+        : null,
+    });
+  }
+
+  protected canManageSubscriptions(): boolean {
+    return this.auth.hasAnyRole(['SUPER_ADMIN']);
   }
 
   protected closeForm(): void {
@@ -1345,8 +1402,10 @@ export class ResourcePage implements OnInit, OnDestroy {
     }
   }
 
-  protected visibleActions(cfg: ResourceConfig): ResourceAction[] {
-    return (cfg.actions ?? []).filter((action) => this.actionAllowed(cfg, action));
+  protected visibleActions(cfg: ResourceConfig, row: Row): ResourceAction[] {
+    return (cfg.actions ?? []).filter(
+      (action) => this.actionAllowed(cfg, action) && (action.visibleWhen?.(row) ?? true),
+    );
   }
 
   private actionAllowed(cfg: ResourceConfig, action: ResourceAction): boolean {
@@ -1402,7 +1461,13 @@ export class ResourcePage implements OnInit, OnDestroy {
       return;
     }
     const raw = this.statusForm.getRawValue() as Record<string, unknown>;
-    const payload: Record<string, unknown> = { [ctx.action.statusKey ?? 'status']: raw['status'] };
+    // Un <select> HTML restitue toujours une chaine avec `[value]`. Retrouver la
+    // valeur typée de l'option évite notamment d'envoyer `"false"` au PATCH de
+    // suspension, dont le contrat attend un booléen JSON.
+    const selectedStatus = resolveSelectOptionValue(ctx.options, raw['status']);
+    const payload: Record<string, unknown> = {
+      [ctx.action.statusKey ?? 'status']: selectedStatus,
+    };
     for (const extra of ctx.action.statusExtra ?? []) {
       const value = raw[extra.key];
       if (value !== '' && value !== null && value !== undefined) {
@@ -1528,6 +1593,8 @@ export class ResourcePage implements OnInit, OnDestroy {
   protected dismissOnEscape(): void {
     if (this.credentials().length) {
       this.closeCredentials();
+    } else if (this.subscriptionDialog()) {
+      this.subscriptionDialog.set(null);
     } else if (this.agentsDialog()) {
       this.agentsDialog.set(null);
     } else if (this.statusContext()) {
@@ -2168,6 +2235,7 @@ export class ResourcePage implements OnInit, OnDestroy {
     this.pendingAction.set(null);
     this.statusContext.set(null);
     this.agentsDialog.set(null);
+    this.subscriptionDialog.set(null);
     this.credentials.set([]);
     this.formMode.set('create');
     this.editingId.set(null);

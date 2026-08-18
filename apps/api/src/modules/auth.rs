@@ -10,7 +10,7 @@ use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -46,6 +46,8 @@ pub struct AuthUser {
     pub roles: Vec<Role>,
     /// Compte provisionne automatiquement : le mot de passe temporaire doit etre remplace.
     pub must_change_password: bool,
+    /// Echeance connue de l'acces communal. `None` pour les acteurs globaux.
+    pub commune_access_expires_at: Option<DateTime<Utc>>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
 }
@@ -120,6 +122,7 @@ pub struct MeResponse {
     pub commune_id: Option<Uuid>,
     pub roles: Vec<String>,
     pub active: bool,
+    pub commune_access_expires_at: Option<DateTime<Utc>>,
     /// Le client doit imposer la definition d'un nouveau mot de passe avant tout usage.
     pub must_change_password: bool,
 }
@@ -240,6 +243,31 @@ async fn login(
     }
 
     let roles = roles_for_user(&state.db, user.id).await?;
+    let commune_access_expires_at = match ensure_commune_subscription_access(
+        &state.db,
+        user.commune_id,
+        &roles,
+    )
+    .await
+    {
+        Ok(expires_at) => expires_at,
+        Err(error) => {
+            audit::record_for_commune(
+                &state.db,
+                user.commune_id,
+                Some(user.id),
+                "AUTH_LOGIN_BLOCKED_SUBSCRIPTION",
+                "users",
+                Some(user.id),
+                None,
+                Some(json!({ "email": user.email })),
+                None,
+                None,
+            )
+            .await;
+            return Err(error);
+        }
+    };
     let response = issue_tokens(
         &state.db,
         &state.config,
@@ -249,6 +277,7 @@ async fn login(
         user.commune_id,
         roles,
         user.must_change_password,
+        commune_access_expires_at,
     )
     .await?;
 
@@ -330,6 +359,7 @@ async fn refresh_with_token(
         auth_user.commune_id,
         auth_user.roles.clone(),
         auth_user.must_change_password,
+        auth_user.commune_access_expires_at,
     )
     .await?;
     audit::record_for_commune_tx(
@@ -400,6 +430,7 @@ async fn me(auth_user: AuthUser) -> Json<MeResponse> {
             .map(|role| role.code().to_string())
             .collect(),
         active: true,
+        commune_access_expires_at: auth_user.commune_access_expires_at,
     })
 }
 
@@ -484,6 +515,7 @@ async fn change_password(
             .map(|role| role.code().to_string())
             .collect(),
         active: true,
+        commune_access_expires_at: auth_user.commune_access_expires_at,
         must_change_password: false,
     }))
 }
@@ -589,13 +621,18 @@ pub async fn load_auth_user(pool: &PgPool, user_id: Uuid) -> Result<AuthUser, Ap
         return Err(ApiError::forbidden("Utilisateur sans role actif"));
     }
 
+    let commune_id = row.get("commune_id");
+    let commune_access_expires_at =
+        ensure_commune_subscription_access(pool, commune_id, &roles).await?;
+
     Ok(AuthUser {
         id: row.get("id"),
         email: row.get("email"),
         full_name: row.get("full_name"),
-        commune_id: row.get("commune_id"),
+        commune_id,
         roles,
         must_change_password: row.get("must_change_password"),
+        commune_access_expires_at,
         ip_address: None,
         user_agent: None,
     })
@@ -627,16 +664,136 @@ async fn load_auth_user_in_tx(
         return Err(ApiError::forbidden("Utilisateur sans role actif"));
     }
 
+    let commune_id = row.get("commune_id");
+    let commune_access_expires_at =
+        ensure_commune_subscription_access_in_tx(transaction, commune_id, &roles).await?;
+
     Ok(AuthUser {
         id: row.get("id"),
         email: row.get("email"),
         full_name: row.get("full_name"),
-        commune_id: row.get("commune_id"),
+        commune_id,
         roles,
         must_change_password: row.get("must_change_password"),
+        commune_access_expires_at,
         ip_address: None,
         user_agent: None,
     })
+}
+
+#[derive(Debug)]
+struct CommuneAccessSnapshot {
+    active: bool,
+    subscription_status: String,
+    subscription_started_at: Option<DateTime<Utc>>,
+    subscription_expires_at: Option<DateTime<Utc>>,
+    access_active: bool,
+}
+
+fn subscription_exempt(commune_id: Option<Uuid>, roles: &[Role]) -> bool {
+    roles.contains(&Role::SuperAdmin)
+        || (commune_id.is_none() && roles.contains(&Role::Superviseur))
+}
+
+fn evaluate_commune_access(
+    snapshot: CommuneAccessSnapshot,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    if snapshot.access_active {
+        return Ok(snapshot.subscription_expires_at);
+    }
+
+    let now = Utc::now();
+    let reason = if snapshot.subscription_status == "SUSPENDED" {
+        "SUSPENDED"
+    } else if !snapshot.active {
+        "INACTIVE"
+    } else if snapshot.subscription_status == "EXPIRED"
+        || snapshot
+            .subscription_expires_at
+            .is_none_or(|expires_at| expires_at < now)
+    {
+        "EXPIRED"
+    } else if snapshot
+        .subscription_started_at
+        .is_none_or(|started_at| started_at > now)
+    {
+        "NOT_STARTED"
+    } else {
+        "PAYMENT_REQUIRED"
+    };
+
+    Err(ApiError::commune_subscription_inactive(
+        reason,
+        snapshot.subscription_expires_at,
+    ))
+}
+
+fn row_to_commune_access(row: sqlx::postgres::PgRow) -> CommuneAccessSnapshot {
+    CommuneAccessSnapshot {
+        active: row.get("active"),
+        subscription_status: row.get("subscription_status"),
+        subscription_started_at: row.get("subscription_started_at"),
+        subscription_expires_at: row.get("subscription_expires_at"),
+        access_active: row.get("access_active"),
+    }
+}
+
+async fn ensure_commune_subscription_access(
+    pool: &PgPool,
+    commune_id: Option<Uuid>,
+    roles: &[Role],
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    if subscription_exempt(commune_id, roles) {
+        return Ok(None);
+    }
+    let Some(commune_id) = commune_id else {
+        return Ok(None);
+    };
+
+    let row = sqlx::query(
+        r#"
+        SELECT active, subscription_status, subscription_started_at,
+               subscription_expires_at,
+               commune_subscription_is_active(id, now()) AS access_active
+        FROM communes
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::commune_subscription_inactive("INACTIVE", None))?;
+
+    evaluate_commune_access(row_to_commune_access(row))
+}
+
+async fn ensure_commune_subscription_access_in_tx(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commune_id: Option<Uuid>,
+    roles: &[Role],
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    if subscription_exempt(commune_id, roles) {
+        return Ok(None);
+    }
+    let Some(commune_id) = commune_id else {
+        return Ok(None);
+    };
+
+    let row = sqlx::query(
+        r#"
+        SELECT active, subscription_status, subscription_started_at,
+               subscription_expires_at,
+               commune_subscription_is_active(id, now()) AS access_active
+        FROM communes
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(commune_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| ApiError::commune_subscription_inactive("INACTIVE", None))?;
+
+    evaluate_commune_access(row_to_commune_access(row))
 }
 
 pub async fn roles_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Role>, ApiError> {
@@ -873,6 +1030,7 @@ async fn issue_tokens(
     commune_id: Option<Uuid>,
     roles: Vec<Role>,
     must_change_password: bool,
+    commune_access_expires_at: Option<DateTime<Utc>>,
 ) -> Result<TokenResponse, ApiError> {
     let access_token = create_access_token(config, user_id, &email, commune_id, &roles)?;
     let (refresh_token_id, refresh_token, refresh_secret) = generate_refresh_token();
@@ -908,6 +1066,7 @@ async fn issue_tokens(
                 .map(|role| role.code().to_string())
                 .collect(),
             active: true,
+            commune_access_expires_at,
             must_change_password,
         },
     })
@@ -922,6 +1081,7 @@ async fn issue_tokens_in_tx(
     commune_id: Option<Uuid>,
     roles: Vec<Role>,
     must_change_password: bool,
+    commune_access_expires_at: Option<DateTime<Utc>>,
 ) -> Result<TokenResponse, ApiError> {
     let access_token = create_access_token(config, user_id, &email, commune_id, &roles)?;
     let (refresh_token_id, refresh_token, refresh_secret) = generate_refresh_token();
@@ -957,6 +1117,7 @@ async fn issue_tokens_in_tx(
                 .map(|role| role.code().to_string())
                 .collect(),
             active: true,
+            commune_access_expires_at,
             must_change_password,
         },
     })

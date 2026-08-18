@@ -797,9 +797,7 @@ async fn active_agent_id_for_user(
           AND a.status = 'ACTIF'
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
-          AND c.active = true
-          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
-          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+          AND commune_subscription_is_active(c.id, now())
         LIMIT 1
         "#,
     )

@@ -47,6 +47,21 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, "FORBIDDEN", message, None)
     }
 
+    pub fn commune_subscription_inactive(
+        reason: &'static str,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "COMMUNE_SUBSCRIPTION_INACTIVE",
+            "L’accès de votre mairie est suspendu ou son abonnement n’est pas valide. Contactez l’administrateur de la plateforme.",
+            Some(serde_json::json!({
+                "reason": reason,
+                "subscription_expires_at": expires_at,
+            })),
+        )
+    }
+
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "NOT_FOUND", message, None)
     }

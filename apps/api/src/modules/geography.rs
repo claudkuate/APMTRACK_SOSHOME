@@ -34,10 +34,8 @@ use crate::pagination::{Paginated, Pagination, PaginationQuery};
 use crate::state::AppState;
 
 /// Prédicat SQL d'une commune visible publiquement (active + abonnement valide).
-const VISIBLE_COMMUNE_PREDICATE: &str = "active = true \
-    AND subscription_status IN ('ACTIVE', 'TRIAL') \
-    AND (subscription_expires_at IS NULL OR subscription_expires_at >= now()) \
-    AND deleted_at IS NULL";
+const VISIBLE_COMMUNE_PREDICATE: &str =
+    "commune_subscription_is_active(id, now()) AND deleted_at IS NULL";
 
 /// Les référentiels nationaux doivent pouvoir être chargés d'un seul coup par les
 /// sélecteurs du back-office (~360 arrondissements) ; les lignes sont minuscules.

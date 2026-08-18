@@ -91,6 +91,7 @@ class UserAccount {
     required this.active,
     this.communeId,
     this.mustChangePassword = false,
+    this.communeAccessExpiresAt,
   });
 
   final String id;
@@ -103,6 +104,7 @@ class UserAccount {
   /// Compte provisionne avec un mot de passe temporaire : l'agent doit le remplacer
   /// avant de pouvoir travailler.
   final bool mustChangePassword;
+  final DateTime? communeAccessExpiresAt;
 
   factory UserAccount.fromJson(JsonMap json) {
     return UserAccount(
@@ -115,6 +117,7 @@ class UserAccount {
           .toList(),
       active: readBool(json, 'active', fallback: true),
       mustChangePassword: readBool(json, 'must_change_password', fallback: false),
+      communeAccessExpiresAt: readDate(json, 'commune_access_expires_at'),
     );
   }
 
@@ -126,6 +129,7 @@ class UserAccount {
     'roles': roles,
     'active': active,
     'must_change_password': mustChangePassword,
+    'commune_access_expires_at': communeAccessExpiresAt?.toIso8601String(),
   };
 }
 

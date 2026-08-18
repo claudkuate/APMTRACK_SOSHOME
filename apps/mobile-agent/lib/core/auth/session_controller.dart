@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -32,6 +33,9 @@ class SessionController extends ChangeNotifier {
   static const _cacheKey = 'offline.snapshot';
   static const _draftsKey = 'offline.drafts';
   static const _maxCachedPvs = 50;
+  static const subscriptionBlockedMessage =
+      'L’accès de votre mairie est suspendu ou son abonnement n’est pas valide. '
+      'Contactez l’administrateur de la plateforme.';
 
   SessionStatus status = SessionStatus.booting;
   AuthSession? session;
@@ -50,6 +54,8 @@ class SessionController extends ChangeNotifier {
   bool offline = false;
   bool syncing = false;
   int _draftCounter = 0;
+  Timer? _subscriptionExpiryTimer;
+  Future<void>? _assetAccessRevalidation;
 
   String? get token => session?.accessToken;
   bool get isAuthenticated => status == SessionStatus.authenticated;
@@ -82,6 +88,11 @@ class SessionController extends ChangeNotifier {
       return;
     }
     session = saved;
+    if (_knownSubscriptionExpired(saved)) {
+      await _handleSubscriptionBlocked(subscriptionBlockedMessage);
+      return;
+    }
+    _scheduleSubscriptionExpiry(saved);
     // Show cached data immediately so the app is usable before/without network.
     await _loadFromCache();
     // refreshData never throws: a transient network error keeps the session
@@ -97,6 +108,15 @@ class SessionController extends ChangeNotifier {
     final nextSession = await api.login(email, password);
     session = nextSession;
     await store.write(nextSession);
+    if (_knownSubscriptionExpired(nextSession)) {
+      await _handleSubscriptionBlocked(subscriptionBlockedMessage);
+      throw ApiException(
+        subscriptionBlockedMessage,
+        statusCode: 403,
+        code: 'COMMUNE_SUBSCRIPTION_INACTIVE',
+      );
+    }
+    _scheduleSubscriptionExpiry(nextSession);
     // Reload the persisted queue so the returning author's pending drafts
     // resync in this session (signOut cleared the in-memory list).
     _allDrafts = decodeDrafts(await _cache.read(_draftsKey));
@@ -120,7 +140,10 @@ class SessionController extends ChangeNotifier {
   /// Le serveur revoque tous les refresh tokens : la session courante ne peut plus etre
   /// prolongee, l'agent est donc renvoye vers l'ecran de connexion pour repartir sur des
   /// jetons coherents avec son nouveau mot de passe.
-  Future<void> changePassword(String currentPassword, String newPassword) async {
+  Future<void> changePassword(
+    String currentPassword,
+    String newPassword,
+  ) async {
     final accessToken = token;
     if (accessToken == null) {
       return;
@@ -344,6 +367,11 @@ class SessionController extends ChangeNotifier {
         draftsChanged = true;
         pvsChanged = pv != null || pvsChanged;
       } catch (error) {
+        if (error is ApiException && error.isCommuneSubscriptionInactive) {
+          // Le brouillon reste en attente : il pourra etre synchronise apres
+          // regularisation de l'abonnement et nouvelle connexion de l'agent.
+          break;
+        }
         if (_isNetworkError(error)) {
           // Still offline — keep the queue and retry on the next sync.
           break;
@@ -382,9 +410,7 @@ class SessionController extends ChangeNotifier {
   }
 
   Future<void> deleteDraft(String localId) async {
-    _allDrafts = _allDrafts
-        .where((draft) => draft.localId != localId)
-        .toList();
+    _allDrafts = _allDrafts.where((draft) => draft.localId != localId).toList();
     await _saveDrafts();
     notifyListeners();
   }
@@ -502,6 +528,15 @@ class SessionController extends ChangeNotifier {
   /// Runs an authenticated call. On a 401, attempts a single token refresh
   /// (shared across concurrent calls) and replays the request once.
   Future<T> _withAuth<T>(Future<T> Function(String token) call) async {
+    final currentSession = session;
+    if (currentSession != null && _knownSubscriptionExpired(currentSession)) {
+      await _handleSubscriptionBlocked(subscriptionBlockedMessage);
+      throw ApiException(
+        subscriptionBlockedMessage,
+        statusCode: 403,
+        code: 'COMMUNE_SUBSCRIPTION_INACTIVE',
+      );
+    }
     final currentToken = token;
     if (currentToken == null) {
       throw ApiException('Session expiree', statusCode: 401);
@@ -509,6 +544,10 @@ class SessionController extends ChangeNotifier {
     try {
       return await call(currentToken);
     } on ApiException catch (error) {
+      if (error.isCommuneSubscriptionInactive) {
+        await _handleSubscriptionBlocked(error.message);
+        rethrow;
+      }
       if (!error.isUnauthorized) {
         rethrow;
       }
@@ -517,7 +556,14 @@ class SessionController extends ChangeNotifier {
       if (renewedToken == null) {
         throw ApiException('Session expiree', statusCode: 401);
       }
-      return await call(renewedToken);
+      try {
+        return await call(renewedToken);
+      } on ApiException catch (replayError) {
+        if (replayError.isCommuneSubscriptionInactive) {
+          await _handleSubscriptionBlocked(replayError.message);
+        }
+        rethrow;
+      }
     }
   }
 
@@ -540,6 +586,15 @@ class SessionController extends ChangeNotifier {
       // The backend rotates refresh tokens, so the new pair must be persisted
       // or the next refresh would fail against a revoked token.
       await store.write(next);
+      if (_knownSubscriptionExpired(next)) {
+        await _handleSubscriptionBlocked(subscriptionBlockedMessage);
+        throw ApiException(
+          subscriptionBlockedMessage,
+          statusCode: 403,
+          code: 'COMMUNE_SUBSCRIPTION_INACTIVE',
+        );
+      }
+      _scheduleSubscriptionExpiry(next);
       notifyListeners();
     } on ApiException catch (error) {
       // Only a definitive rejection invalidates the session; a transient
@@ -548,15 +603,99 @@ class SessionController extends ChangeNotifier {
         await signOut(localOnly: true);
         message = 'Session expiree';
         notifyListeners();
+      } else if (error.isCommuneSubscriptionInactive) {
+        await _handleSubscriptionBlocked(error.message);
       }
       rethrow;
     }
+  }
+
+  bool _knownSubscriptionExpired(AuthSession value) {
+    final expiresAt = value.user.communeAccessExpiresAt;
+    return expiresAt != null && !expiresAt.isAfter(DateTime.now().toUtc());
+  }
+
+  /// Rechecks the server-backed expiry when the application returns to the
+  /// foreground. The timer covers an app left open; this method covers timers
+  /// paused by the operating system while the process was backgrounded.
+  Future<void> revalidateKnownSubscriptionAccess({
+    bool checkServer = false,
+  }) async {
+    final current = session;
+    if (current == null) {
+      _subscriptionExpiryTimer?.cancel();
+      _subscriptionExpiryTimer = null;
+      return;
+    }
+    if (_knownSubscriptionExpired(current)) {
+      await _handleSubscriptionBlocked(subscriptionBlockedMessage);
+      return;
+    }
+    _scheduleSubscriptionExpiry(current);
+    if (checkServer) {
+      try {
+        await _withAuth(api.mobileMe);
+      } catch (_) {
+        // A reconnect probe stays silent while the device is still offline.
+        // `_withAuth` handles the dedicated subscription 403 by closing the
+        // local session while leaving the persisted draft queue untouched.
+      }
+    }
+  }
+
+  void _scheduleSubscriptionExpiry(AuthSession value) {
+    _subscriptionExpiryTimer?.cancel();
+    _subscriptionExpiryTimer = null;
+    final expiresAt = value.user.communeAccessExpiresAt;
+    if (expiresAt == null) {
+      return;
+    }
+    final delay = expiresAt.toUtc().difference(DateTime.now().toUtc());
+    if (delay <= Duration.zero) {
+      unawaited(revalidateKnownSubscriptionAccess());
+      return;
+    }
+    _subscriptionExpiryTimer = Timer(
+      delay,
+      () => unawaited(revalidateKnownSubscriptionAccess()),
+    );
+  }
+
+  /// Called after a protected image request returns 403. `Image.network` does
+  /// not expose the response body, so a lightweight authenticated API request
+  /// is used to distinguish an expired subscription from an asset-only denial.
+  /// Concurrent failed images share the same revalidation request.
+  Future<void> handleAuthenticatedAssetForbidden() {
+    return _assetAccessRevalidation ??= _performAssetAccessRevalidation()
+        .whenComplete(() => _assetAccessRevalidation = null);
+  }
+
+  Future<void> _performAssetAccessRevalidation() async {
+    if (session == null) {
+      return;
+    }
+    try {
+      await _withAuth(api.mobileMe);
+    } catch (_) {
+      // `_withAuth` already closes the session and preserves drafts for the
+      // dedicated subscription rejection. Other asset errors stay non-fatal.
+    }
+  }
+
+  Future<void> _handleSubscriptionBlocked(String serverMessage) async {
+    await signOut(localOnly: true);
+    message = serverMessage.trim().isEmpty
+        ? subscriptionBlockedMessage
+        : serverMessage;
+    notifyListeners();
   }
 
   Future<PvPublic> verifyPv(String pvNumber) => api.verifyPublicPv(pvNumber);
 
   Future<void> signOut({bool localOnly = false}) async {
     final current = session;
+    _subscriptionExpiryTimer?.cancel();
+    _subscriptionExpiryTimer = null;
     session = null;
     profile = null;
     interventions = const [];
@@ -578,5 +717,12 @@ class SessionController extends ChangeNotifier {
       }
     }
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _subscriptionExpiryTimer?.cancel();
+    _subscriptionExpiryTimer = null;
+    super.dispose();
   }
 }

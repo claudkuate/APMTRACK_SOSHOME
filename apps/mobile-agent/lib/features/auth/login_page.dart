@@ -124,7 +124,7 @@ class _LoginPageState extends State<LoginPage>
                           emailController: _emailController,
                           passwordController: _passwordController,
                           loading: _loading,
-                          error: _error,
+                          error: _error ?? widget.controller.message,
                           onSubmit: _submit,
                         ),
                       ],

@@ -1,10 +1,12 @@
 import { Component, HostListener, inject, signal } from '@angular/core';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
+import { HttpErrorResponse } from '@angular/common/http';
 import { Router, RouterLink } from '@angular/router';
 
 import { I18nService } from '../../core/i18n/i18n.service';
 import { AutoTranslatePipe } from '../../core/i18n/auto-translate.pipe';
 import { AuthService } from '../../core/services/auth.service';
+import { describeHttpError } from '../../shared/http-error';
 
 @Component({
   selector: 'app-login-page',
@@ -100,6 +102,11 @@ import { AuthService } from '../../core/services/auth.service';
                 {{ error() }}
               </p>
             }
+            @if (!error() && auth.accessNotice()) {
+              <p class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-900">
+                {{ auth.accessNotice() }}
+              </p>
+            }
 
             <button type="submit" class="btn-primary mt-6 w-full" [disabled]="form.invalid || loading()">
               {{ (loading() ? 'Connexion...' : 'Se connecter') | auto }}
@@ -112,7 +119,7 @@ import { AuthService } from '../../core/services/auth.service';
 })
 export class LoginPage {
   private readonly fb = inject(FormBuilder);
-  private readonly auth = inject(AuthService);
+  protected readonly auth = inject(AuthService);
   private readonly router = inject(Router);
   private readonly i18n = inject(I18nService);
 
@@ -162,8 +169,12 @@ export class LoginPage {
     const { email, password } = this.form.getRawValue();
     this.auth.login(email, password).subscribe({
       next: () => this.router.navigateByUrl('/dashboard'),
-      error: () => {
-        this.error.set(this.i18n.auto('Identifiants invalides ou compte inactif.'));
+      error: (requestError: unknown) => {
+        this.error.set(
+          requestError instanceof HttpErrorResponse && requestError.status === 403
+            ? describeHttpError(requestError, 'Connexion')
+            : this.i18n.auto('Identifiants invalides ou compte inactif.'),
+        );
         this.loading.set(false);
       },
     });

@@ -72,6 +72,50 @@ void main() {
       expect(controller.session, isNull);
       expect(await store.read(), isNull);
     });
+
+    test(
+      'signs out when the replay after refresh is rejected by the subscription guard',
+      () async {
+        final api = _ScriptedApi(
+          validToken: 'old-access',
+          refreshResult: _rotatedSession,
+        );
+        final store = MemorySessionStore();
+        await store.write(_initialSession);
+        final controller = SessionController(
+          api: api,
+          store: store,
+          cache: MemoryOfflineCacheStore(),
+        );
+        addTearDown(controller.dispose);
+        await controller.bootstrap();
+        expect(controller.status, SessionStatus.authenticated);
+
+        api
+          ..validToken = 'new-access'
+          ..subscriptionInactive = true;
+
+        await expectLater(
+          controller.pvQrSvg('pv-1'),
+          throwsA(
+            isA<ApiException>().having(
+              (error) => error.code,
+              'code',
+              'COMMUNE_SUBSCRIPTION_INACTIVE',
+            ),
+          ),
+        );
+
+        expect(api.refreshCalls, 1);
+        expect(controller.status, SessionStatus.unauthenticated);
+        expect(controller.session, isNull);
+        expect(
+          controller.message,
+          SessionController.subscriptionBlockedMessage,
+        );
+        expect(await store.read(), isNull);
+      },
+    );
   });
 }
 
@@ -122,10 +166,11 @@ class _ScriptedApi implements ApmtrackApi {
     this.networkDown = false,
   });
 
-  final String validToken;
+  String validToken;
   final AuthSession? refreshResult;
   final bool refreshUnauthorized;
   final bool networkDown;
+  bool subscriptionInactive = false;
   int refreshCalls = 0;
 
   Never _fail(int? code) => throw ApiException('err', statusCode: code);
@@ -136,6 +181,13 @@ class _ScriptedApi implements ApmtrackApi {
     }
     if (token != validToken) {
       _fail(401);
+    }
+    if (subscriptionInactive) {
+      throw ApiException(
+        SessionController.subscriptionBlockedMessage,
+        statusCode: 403,
+        code: 'COMMUNE_SUBSCRIPTION_INACTIVE',
+      );
     }
   }
 
@@ -204,8 +256,10 @@ class _ScriptedApi implements ApmtrackApi {
       throw UnimplementedError();
 
   @override
-  Future<String> pvQrSvg(String token, String pvId) =>
-      throw UnimplementedError();
+  Future<String> pvQrSvg(String token, String pvId) async {
+    _auth(token);
+    return '<svg />';
+  }
 
   @override
   Future<List<int>> pvPdfBytes(String token, String pvId) =>

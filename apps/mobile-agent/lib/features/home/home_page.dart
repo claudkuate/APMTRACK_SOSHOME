@@ -43,6 +43,7 @@ class HomePage extends StatelessWidget {
                         ? null
                         : controller.agentPhotoContentUrl(profile.agent.id),
                     headers: controller.authHeaders,
+                    onForbidden: controller.handleAuthenticatedAssetForbidden,
                   ),
                   const SizedBox(width: 12),
                   Expanded(

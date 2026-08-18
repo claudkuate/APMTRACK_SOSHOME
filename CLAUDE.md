@@ -273,9 +273,13 @@ Agents are identified by their linked `user_id` on the `agents` table. A `SUPER_
 20260603000028 — users.must_change_password (provisionnement automatique du compte agent)
 20260603000029 — tarifs unitaires/journaliers (interventions.unite + facturation_par_jour,
                  pv_interventions.quantite + duree_jours, vue pv_amounts_due multipliée)
+20260603000030 — activation des mairies par paiement/essai, registre append-only des paiements,
+                 accès effectif centralisé et grâce de migration de 60 jours
+20260603000031 — garde-fous DB des confirmations d'abonnement (date non future,
+                 confirmateur SUPER_ADMIN, référence normalisée)
 ```
 
-**Next migration number: `20260603000030`.**
+**Next migration number: `20260603000032`.**
 
 **PostGIS** — the Postgres image is `postgis/postgis` (see `docker-compose.dev.yml`). Migration 7 runs
 `CREATE EXTENSION postgis`. Geometry columns use SRID 4326. Never decode `geometry` into Rust directly:

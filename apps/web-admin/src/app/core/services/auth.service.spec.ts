@@ -76,4 +76,19 @@ describe('AuthService.refreshCookie', () => {
       .flush(tokenResponse('recovered'));
     expect(service.accessToken()).toBe('recovered');
   });
+
+  it("ferme la session et conserve le message d'abonnement pour la page de connexion", () => {
+    service.refreshCookie().subscribe();
+    http
+      .expectOne((req) => req.url.endsWith('/api/v1/auth/refresh-cookie'))
+      .flush(tokenResponse('active-session'));
+
+    const message = "L'accès de cette mairie est suspendu";
+    service.blockCommuneAccess(message);
+
+    expect(service.isAuthenticated()).toBe(false);
+    expect(service.accessToken()).toBeNull();
+    expect(service.user()).toBeNull();
+    expect(service.accessNotice()).toBe(message);
+  });
 });

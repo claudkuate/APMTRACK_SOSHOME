@@ -19,6 +19,8 @@ export interface CurrentUser {
   commune_id: string | null;
   roles: RoleCode[];
   active: boolean;
+  must_change_password?: boolean;
+  commune_access_expires_at?: string | null;
 }
 
 export interface TokenResponse {

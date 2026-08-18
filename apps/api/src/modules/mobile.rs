@@ -162,9 +162,7 @@ async fn interventions(
           AND ic.deleted_at IS NULL
           AND ic.active = TRUE
           AND c.deleted_at IS NULL
-          AND c.active = TRUE
-          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
-          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+          AND commune_subscription_is_active(c.id, now())
         ORDER BY ic.nom ASC, it.nom ASC, i.nom ASC
         "#,
     )
@@ -311,9 +309,7 @@ async fn load_mobile_me(pool: &PgPool, auth_user: &AuthUser) -> Result<MobileMeR
           AND a.commune_id = $2
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
-          AND c.active = TRUE
-          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
-          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+          AND commune_subscription_is_active(c.id, now())
         ORDER BY (a.status = 'ACTIF') DESC, a.created_at DESC
         LIMIT 1
         "#,
@@ -383,9 +379,7 @@ async fn agent_context(pool: &PgPool, auth_user: &AuthUser) -> Result<AgentConte
           AND a.commune_id = $2
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
-          AND c.active = TRUE
-          AND c.subscription_status IN ('ACTIVE', 'TRIAL')
-          AND (c.subscription_expires_at IS NULL OR c.subscription_expires_at >= now())
+          AND commune_subscription_is_active(c.id, now())
         ORDER BY (a.status = 'ACTIF') DESC, a.created_at DESC
         LIMIT 1
         "#,

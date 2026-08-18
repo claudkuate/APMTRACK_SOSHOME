@@ -561,10 +561,12 @@ async fn seed_commune(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiErr
         r#"
         INSERT INTO communes (
             id, code, nom, region, departement, adresse, telephone, email,
-            theme_color, active, double_verbalisation_bloquant, centre, boundary
+            theme_color, active, subscription_status, subscription_started_at,
+            subscription_expires_at, double_verbalisation_bloquant, centre, boundary
         )
         VALUES (
-            $1, $2, $3, $4, $5, $6, '+237 222 000 000', $7, $8, TRUE, TRUE,
+            $1, $2, $3, $4, $5, $6, '+237 222 000 000', $7, $8, TRUE,
+            'TRIAL', now(), now() + INTERVAL '365 days', TRUE,
             ST_SetSRID(ST_MakePoint($9, $10), 4326),
             ST_SetSRID(ST_GeomFromGeoJSON($11), 4326)
         )
@@ -579,6 +581,10 @@ async fn seed_commune(pool: &sqlx::PgPool, c: &CommuneSeed) -> Result<(), ApiErr
             centre = EXCLUDED.centre,
             boundary = EXCLUDED.boundary,
             active = TRUE,
+            subscription_status = 'TRIAL',
+            subscription_started_at = now(),
+            subscription_expires_at = now() + INTERVAL '365 days',
+            subscription_legacy_access_until = NULL,
             updated_at = now()
         "#,
     )

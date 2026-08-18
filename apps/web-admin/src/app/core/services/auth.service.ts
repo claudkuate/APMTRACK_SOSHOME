@@ -11,11 +11,13 @@ export class AuthService {
   private readonly baseUrl = apiBaseUrl();
   private readonly tokenState = signal<string | null>(null);
   private readonly userState = signal<CurrentUser | null>(null);
+  private readonly accessNoticeState = signal<string | null>(null);
   private restoreAttempted = false;
   private refreshInFlight$: Observable<TokenResponse> | null = null;
 
   readonly user = this.userState.asReadonly();
   readonly accessToken = this.tokenState.asReadonly();
+  readonly accessNotice = this.accessNoticeState.asReadonly();
   readonly isAuthenticated = computed(() => Boolean(this.tokenState() && this.userState()));
 
   login(email: string, password: string) {
@@ -71,6 +73,11 @@ export class AuthService {
     this.userState.set(null);
   }
 
+  blockCommuneAccess(message: string): void {
+    this.clearSession();
+    this.accessNoticeState.set(message);
+  }
+
   hasAnyRole(roles: RoleCode[]): boolean {
     const current = this.userState();
     if (!current) {
@@ -80,6 +87,7 @@ export class AuthService {
   }
 
   private applySession(response: TokenResponse): void {
+    this.accessNoticeState.set(null);
     this.tokenState.set(response.access_token);
     this.userState.set(response.user);
   }

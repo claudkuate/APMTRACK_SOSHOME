@@ -1427,6 +1427,7 @@ async fn verify_agent_public(
         WHERE lower(a.matricule) = lower($1)
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
+          AND commune_subscription_is_active(c.id, now())
         "#,
     )
     .bind(&matricule)
@@ -1468,6 +1469,7 @@ async fn verify_agent_photo_public(
         WHERE lower(a.matricule) = lower($1)
           AND a.deleted_at IS NULL
           AND c.deleted_at IS NULL
+          AND commune_subscription_is_active(c.id, now())
         "#,
     )
     .bind(&matricule)

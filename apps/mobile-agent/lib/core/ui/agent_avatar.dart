@@ -9,12 +9,14 @@ class AgentAvatar extends StatelessWidget {
     required this.agent,
     required this.imageUrl,
     required this.headers,
+    this.onForbidden,
     this.radius = 26,
   });
 
   final AgentProfile agent;
   final String? imageUrl;
   final Map<String, String> headers;
+  final VoidCallback? onForbidden;
   final double radius;
 
   @override
@@ -52,8 +54,16 @@ class AgentAvatar extends StatelessWidget {
                       ),
                     );
                   },
-                  errorBuilder: (_, _, _) =>
-                      _InitialsFallback(agentId: agent.id, initials: initials),
+                  errorBuilder: (_, error, _) {
+                    if (error is NetworkImageLoadException &&
+                        error.statusCode == 403) {
+                      onForbidden?.call();
+                    }
+                    return _InitialsFallback(
+                      agentId: agent.id,
+                      initials: initials,
+                    );
+                  },
                 )
               : _InitialsFallback(agentId: agent.id, initials: initials),
         ),

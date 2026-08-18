@@ -49,12 +49,15 @@ abstract class ApmtrackApi {
 }
 
 class ApiException implements Exception {
-  ApiException(this.message, {this.statusCode});
+  ApiException(this.message, {this.statusCode, this.code});
 
   final String message;
   final int? statusCode;
+  final String? code;
 
   bool get isUnauthorized => statusCode == 401;
+  bool get isCommuneSubscriptionInactive =>
+      statusCode == 403 && code == 'COMMUNE_SUBSCRIPTION_INACTIVE';
 
   @override
   String toString() => message;
@@ -105,12 +108,14 @@ class HttpApmtrackApi implements ApmtrackApi {
     }
 
     var message = 'Erreur API ${response.statusCode}';
+    String? code;
     try {
       final decoded = jsonDecode(response.body);
       if (decoded is Map<String, dynamic>) {
         final error = decoded['error'];
         if (error is Map<String, dynamic>) {
           message = error['message']?.toString() ?? message;
+          code = error['code']?.toString();
         }
       }
     } catch (_) {
@@ -118,7 +123,11 @@ class HttpApmtrackApi implements ApmtrackApi {
         message = response.body.trim();
       }
     }
-    throw ApiException(message, statusCode: response.statusCode);
+    throw ApiException(
+      message,
+      statusCode: response.statusCode,
+      code: code,
+    );
   }
 
   @override

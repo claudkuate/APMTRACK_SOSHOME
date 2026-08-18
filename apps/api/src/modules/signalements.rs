@@ -188,6 +188,7 @@ async fn track_signalement_public(
         INNER JOIN communes c ON c.id = s.commune_id
         WHERE s.signalement_number = $1
           AND c.deleted_at IS NULL
+          AND commune_subscription_is_active(c.id, now())
         "#,
     )
     .bind(&numero_suivi)
@@ -236,9 +237,7 @@ async fn create_signalement_public(
             FROM communes
             WHERE id = $1
               AND deleted_at IS NULL
-              AND active = true
-              AND subscription_status IN ('ACTIVE', 'TRIAL')
-              AND (subscription_expires_at IS NULL OR subscription_expires_at >= now())
+              AND commune_subscription_is_active(id, now())
             "#,
         )
             .bind(payload.commune_id)

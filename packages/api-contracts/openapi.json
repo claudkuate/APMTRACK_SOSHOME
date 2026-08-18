@@ -459,6 +459,114 @@
         }
       }
     },
+    "/api/v1/communes/{id}/subscription-payments": {
+      "get": {
+        "summary": "Consulte l'historique immuable des paiements d'abonnement",
+        "description": "Reserve au SUPER_ADMIN.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          },
+          {
+            "$ref": "#/components/parameters/Page"
+          },
+          {
+            "$ref": "#/components/parameters/PageSize"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Historique pagine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionPaymentPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "summary": "Confirme un paiement et active atomiquement l'abonnement",
+        "description": "Reserve au SUPER_ADMIN. Une reference est unique par commune.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmSubscriptionPaymentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paiement confirme",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionPayment"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Reference deja utilisee"
+          }
+        }
+      }
+    },
+    "/api/v1/communes/{id}/trial": {
+      "post": {
+        "summary": "Ouvre une periode d'essai et active la commune",
+        "description": "Reserve au SUPER_ADMIN. Refuse si un droit d'acces est encore valide.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartSubscriptionTrialRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Periode d'essai activee",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Commune"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Un abonnement est encore valide"
+          }
+        }
+      }
+    },
     "/api/v1/agents": {
       "get": {
         "summary": "Liste les agents selon le role et la commune",
@@ -3503,7 +3611,7 @@
         }
       },
       "Forbidden": {
-        "description": "Role ou commune non autorise",
+        "description": "Role ou commune non autorise, ou acces communal bloque (code COMMUNE_SUBSCRIPTION_INACTIVE avec motif INACTIVE, SUSPENDED, NOT_STARTED, EXPIRED ou PAYMENT_REQUIRED)",
         "content": {
           "application/json": {
             "schema": {
@@ -3874,6 +3982,14 @@
           "must_change_password": {
             "type": "boolean",
             "description": "Mot de passe temporaire a remplacer avant tout autre usage."
+          },
+          "commune_access_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Echeance connue de l'acces communal; absente pour les acteurs globaux exemptes."
           }
         }
       },
@@ -4028,6 +4144,10 @@
             ],
             "format": "date-time"
           },
+          "subscription_entitlement_current": {
+            "type": "boolean",
+            "description": "Un droit confirme existe et n'est pas expire. Il peut ne pas avoir commence ou etre suspendu ; seul subscription_active indique un acces effectif."
+          },
           "subscription_active": {
             "type": "boolean"
           },
@@ -4103,29 +4223,151 @@
             "type": "string"
           },
           "active": {
-            "type": "boolean"
-          },
-          "subscription_status": {
-            "type": "string",
-            "enum": [
-              "ACTIVE",
-              "TRIAL",
-              "EXPIRED",
-              "SUSPENDED"
-            ]
-          },
-          "subscription_started_at": {
-            "type": "string",
-            "format": "date-time"
-          },
-          "subscription_expires_at": {
-            "type": "string",
-            "format": "date-time"
+            "type": "boolean",
+            "description": "Interrupteur administratif. Le PATCH accepte la desactivation mais l'activation exige un paiement confirme ou un essai."
           },
           "arrondissement_id": {
             "type": "string",
             "format": "uuid",
             "nullable": true
+          }
+        }
+      },
+      "ConfirmSubscriptionPaymentRequest": {
+        "type": "object",
+        "required": [
+          "payment_reference",
+          "amount_fcfa",
+          "paid_at",
+          "period_started_at",
+          "period_expires_at"
+        ],
+        "properties": {
+          "payment_reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "amount_fcfa": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "StartSubscriptionTrialRequest": {
+        "type": "object",
+        "required": [
+          "period_started_at",
+          "period_expires_at"
+        ],
+        "properties": {
+          "period_started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SubscriptionPayment": {
+        "type": "object",
+        "required": [
+          "id",
+          "commune_id",
+          "payment_reference",
+          "amount_fcfa",
+          "paid_at",
+          "period_started_at",
+          "period_expires_at",
+          "confirmed_at",
+          "confirmed_by_user_id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "commune_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_reference": {
+            "type": "string"
+          },
+          "amount_fcfa": {
+            "type": "integer"
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "period_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "confirmed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "confirmed_by_user_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "confirmed_by_full_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirmed_by_email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SubscriptionPaymentPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "page_size",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubscriptionPayment"
+            }
+          },
+          "page": {
+            "type": "integer"
+          },
+          "page_size": {
+            "type": "integer"
+          },
+          "total": {
+            "type": "integer"
           }
         }
       },
